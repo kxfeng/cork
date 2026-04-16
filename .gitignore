@@ -1,0 +1,12 @@
+node_modules/
+dist/
+package/
+*.tgz
+
+*.log
+*.pid
+
+.env
+.env.*
+
+.DS_Store

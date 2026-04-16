@@ -1,0 +1,48 @@
+{
+  "name": "cork",
+  "version": "0.1.0",
+  "description": "A CLI daemon that bridges IM channels to Claude Code subprocesses",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "cork": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "npm run build && npm link && cork stop; cork start",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "claude",
+    "cli",
+    "lark",
+    "feishu",
+    "bridge"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "dependencies": {
+    "@inquirer/prompts": "^8.4.1",
+    "@larksuiteoapi/node-sdk": "^1.60.0",
+    "commander": "^14.0.3",
+    "jsonc-parser": "^3.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "uuid": "^13.0.0",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "@types/uuid": "^11.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.4"
+  }
+}
