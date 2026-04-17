@@ -24,7 +24,7 @@ import {
   type FetchedMessage,
 } from "./client.js";
 import { buildMarkdownCard, buildPostContent } from "./card.js";
-import { createEventDispatcher } from "./events.js";
+import { createEventDispatcher, clearStaleBuffers } from "./events.js";
 
 const logger = getLogger("lark-channel");
 
@@ -78,6 +78,7 @@ export class LarkChannel implements Channel {
 
   async stop(): Promise<void> {
     this.wsClient = null;
+    clearStaleBuffers();
     logger.info("lark channel stopped");
   }
 

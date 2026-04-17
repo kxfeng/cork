@@ -11,31 +11,86 @@ import { getChatSettings, updateChatSettings } from "./chat-settings.js";
 
 const logger = getLogger("lark-events");
 
-// Deduplication cache: message_id -> timestamp
+// Deduplication cache: message_id -> timestamp. Map iteration follows insertion
+// order, so the oldest key is always the first entry — cheap FIFO eviction.
 const seenMessages = new Map<string, number>();
-const DEDUP_TTL_MS = 60_000; // 1 minute
+const DEDUP_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours, covers Lark's long-interval replays
+const DEDUP_MAX_ENTRIES = 5000;
 
 // Chat name cache: chat_id -> name
 const chatNameCache = new Map<string, string>();
 
-// Startup time: reject messages older than this
+// Startup time: drop messages that predate cork startup (reconnect replay batch).
 const startupTime = Date.now();
 const STALE_THRESHOLD_MS = 30_000; // 30 seconds grace period
 
+// Messages whose createTime is older than this are considered no longer
+// relevant (e.g. Lark replayed a long-ago message after a network hiccup).
+const OLD_MESSAGE_THRESHOLD_MS = 5 * 60 * 1000;
+// Debounce window before emitting the "discarded N stale messages" notice, so a
+// burst of replayed events collapses into a single reply.
+const STALE_NOTICE_DEBOUNCE_MS = 2000;
+
 function isDuplicate(messageId: string): boolean {
   const now = Date.now();
-  // Prune old entries
-  if (seenMessages.size > 500) {
-    const before = seenMessages.size;
-    for (const [id, ts] of seenMessages) {
-      if (now - ts > DEDUP_TTL_MS) seenMessages.delete(id);
-    }
-    logger.debug("pruned dedup cache", { before, after: seenMessages.size });
-  }
   if (seenMessages.has(messageId)) return true;
+  // FIFO eviction: drop oldest entries once we exceed capacity or they expire.
+  if (seenMessages.size >= DEDUP_MAX_ENTRIES) {
+    const oldestKey = seenMessages.keys().next().value;
+    if (oldestKey !== undefined) seenMessages.delete(oldestKey);
+  }
+  // Opportunistic TTL sweep of head entries (they're the oldest in insertion order).
+  for (const [id, ts] of seenMessages) {
+    if (now - ts <= DEDUP_TTL_MS) break;
+    seenMessages.delete(id);
+  }
   seenMessages.set(messageId, now);
-  logger.debug("added to dedup cache", { messageId, cacheSize: seenMessages.size });
   return false;
+}
+
+interface StaleBuffer {
+  count: number;
+  lastMessageId: string;
+  timer: NodeJS.Timeout;
+}
+const staleBuffers = new Map<string, StaleBuffer>();
+
+function enqueueStaleNotice(
+  ctx: LarkEventContext,
+  chatId: string,
+  messageId: string
+): void {
+  const existing = staleBuffers.get(chatId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.count += 1;
+    existing.lastMessageId = messageId;
+    existing.timer = setTimeout(() => flushStaleNotice(ctx, chatId), STALE_NOTICE_DEBOUNCE_MS);
+    return;
+  }
+  const buf: StaleBuffer = {
+    count: 1,
+    lastMessageId: messageId,
+    timer: setTimeout(() => flushStaleNotice(ctx, chatId), STALE_NOTICE_DEBOUNCE_MS),
+  };
+  staleBuffers.set(chatId, buf);
+}
+
+async function flushStaleNotice(ctx: LarkEventContext, chatId: string): Promise<void> {
+  const buf = staleBuffers.get(chatId);
+  if (!buf) return;
+  staleBuffers.delete(chatId);
+  const text = `⏱️ Discarded ${buf.count} stale message${buf.count > 1 ? "s" : ""} from offline period. Please resend if you still need them.`;
+  try {
+    await ctx.channel.sendReply(chatId, text);
+  } catch (err) {
+    logger.warn("failed to send stale-notice reply", { err, chatId });
+  }
+}
+
+export function clearStaleBuffers(): void {
+  for (const buf of staleBuffers.values()) clearTimeout(buf.timer);
+  staleBuffers.clear();
 }
 
 export interface LarkEventContext {
@@ -198,6 +253,15 @@ async function handleMessageEvent(
   // --- P2P access control ---
   if (chatType === "p2p" && !ownerCheck) {
     logger.debug("ignoring p2p message from non-owner", { messageId, chatId, senderId });
+    return;
+  }
+
+  // Running-state stale check: the message passed access control but its
+  // createTime is older than OLD_MESSAGE_THRESHOLD_MS — likely a replay burst
+  // after a reconnect. Coalesce into a single user-visible notice per chat.
+  if (createTime > 0 && Date.now() - createTime > OLD_MESSAGE_THRESHOLD_MS) {
+    logger.debug("enqueuing stale notice", { messageId, chatId, age: Date.now() - createTime });
+    enqueueStaleNotice(ctx, chatId, messageId);
     return;
   }
 
