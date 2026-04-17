@@ -20,6 +20,9 @@ const DEDUP_MAX_ENTRIES = 5000;
 // Chat name cache: chat_id -> name
 const chatNameCache = new Map<string, string>();
 
+// User name cache: open_id -> name
+const userNameCache = new Map<string, string>();
+
 // Startup time: drop messages that predate cork startup (reconnect replay batch).
 const startupTime = Date.now();
 const STALE_THRESHOLD_MS = 30_000; // 30 seconds grace period
@@ -282,8 +285,14 @@ async function handleMessageEvent(
     preview: textPreview || undefined,
   };
 
-  // Name resolver for sender names
-  const resolveName = (openId: string) => ctx.channel.getUserName(openId);
+  // Name resolver for sender names (cached)
+  const resolveName = async (openId: string): Promise<string> => {
+    const cached = userNameCache.get(openId);
+    if (cached !== undefined) return cached;
+    const name = await ctx.channel.getUserName(openId);
+    userNameCache.set(openId, name);
+    return name;
+  };
 
   // Parse message content
   let text = "";

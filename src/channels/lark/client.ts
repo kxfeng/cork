@@ -202,13 +202,14 @@ export async function getUserName(
   openId: string
 ): Promise<string> {
   try {
-    const res = await client.contact.user.get({
-      path: { user_id: openId },
+    const res = (await client.request({
+      method: "POST",
+      url: "/open-apis/contact/v3/users/basic_batch",
+      data: { user_ids: [openId] },
       params: { user_id_type: "open_id" },
-    });
-    if (res.code === 0 && res.data?.user?.name) {
-      return res.data.user.name;
-    }
+    })) as { data?: { users?: Array<{ name?: string }> } };
+    const name = res?.data?.users?.[0]?.name;
+    if (name) return name;
   } catch (err) {
     logger.debug("failed to get user name", { err, openId });
   }
