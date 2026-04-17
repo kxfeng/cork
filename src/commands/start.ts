@@ -239,7 +239,7 @@ export async function startBackground(): Promise<void> {
     const pid = getLaunchdPid();
     if (pid) {
       console.log(`Cork daemon is already running via launchd (pid: ${pid}).`);
-      console.log(`Stop it first with 'cork stop', or use 'cork start --daemon'.`);
+      console.log(`Stop it first with 'cork stop' if you want to restart.`);
       return;
     }
     // Service loaded but not running — unload stale entry first
@@ -256,7 +256,7 @@ export async function startBackground(): Promise<void> {
       `Found other cork process(es) already running:\n` +
       others.map((p) => `  pid ${p.pid}: ${p.command}`).join("\n") +
       `\n\nRun the following to stop them first:\n` +
-      `  kill ${pids.join(" ")} && cork start --daemon`
+      `  kill ${pids.join(" ")} && cork start`
     );
     process.exit(1);
   }

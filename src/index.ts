@@ -23,7 +23,7 @@ program
   .command("start")
   .description("Start the cork daemon")
   .option("--foreground", "Run in foreground mode (interactive)")
-  .option("--daemon", "Run in foreground mode (launched by launchd)")
+  .option("--daemon", "Daemon mode invoked by launchd (internal)")
   .action(async (opts) => {
     if (opts.foreground || opts.daemon) {
       const { startForeground } = await import("./commands/start.js");
