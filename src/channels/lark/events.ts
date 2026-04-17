@@ -341,20 +341,31 @@ async function handleMessageEvent(
     logger.warn("failed to add ack reaction", { err, messageId });
   }
 
+  let result: { syncReplied: boolean } = { syncReplied: false };
+  let dispatchError: unknown;
   try {
     logger.debug("dispatching to claude", { messageId });
-    await ctx.dispatcher.handleMessage(ctx.channel, incoming);
-    logger.debug("dispatch completed", { messageId });
-  } finally {
-    // Remove ack emoji after processing
-    if (reactionId) {
-      try {
-        await ctx.channel.removeReaction(chatId, messageId, reactionId);
-        logger.debug("ack reaction removed", { messageId });
-      } catch (err) {
-        logger.debug("failed to remove ack reaction", { err });
-      }
+    result = await ctx.dispatcher.handleMessage(ctx.channel, incoming);
+    logger.debug("dispatch completed", { messageId, syncReplied: result.syncReplied });
+  } catch (err) {
+    dispatchError = err;
+  }
+
+  if (!reactionId) return;
+
+  // For sync replies (commands) or dispatch errors, remove emoji now.
+  // For async replies (Claude), defer removal until reply arrives.
+  if (result.syncReplied || dispatchError) {
+    try {
+      await ctx.channel.removeReaction(chatId, messageId, reactionId);
+      logger.debug("ack reaction removed (sync)", { messageId });
+    } catch (err) {
+      logger.debug("failed to remove ack reaction", { err });
     }
+    if (dispatchError) throw dispatchError;
+  } else {
+    ctx.dispatcher.trackPendingReaction?.(chatId, messageId, reactionId);
+    logger.debug("ack reaction tracked for async removal", { messageId });
   }
 }
 

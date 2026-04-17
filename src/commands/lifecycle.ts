@@ -84,6 +84,7 @@ export async function showStatus(): Promise<void> {
     console.log(`  Claude session: ${meta.sessionId}`);
     console.log(`  Last active:   ${meta.lastActiveAt}`);
     console.log(`  Last msg:      ${meta.lastMessagePreview || "(none)"}`);
+    console.log(`  View:          tmux attach -t cork_${key}`);
     console.log();
   }
 }

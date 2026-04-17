@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import crypto from "node:crypto";
 import { paths } from "../config/paths.js";
 
 export interface SessionMeta {
@@ -12,14 +11,18 @@ export interface SessionMeta {
   createdAt: string;
   lastActiveAt: string;
   lastMessagePreview: string;
+  // Whether Claude Code session was ever successfully started with this sessionId
+  claudeSessionStarted: boolean;
+  // Chat settings (previously in separate chat_setting_ files)
+  mentionRequired: boolean;
 }
 
-export function sessionKey(chatId: string, workspace: string): string {
-  const hash = crypto
-    .createHash("sha256")
-    .update(chatId + ":" + workspace)
-    .digest("hex");
-  return hash.slice(0, 16);
+/**
+ * Generate session key from channel and chat ID.
+ * Format: {channelId}_{chatId}, e.g. "lark_oc_e21e11a61c56575e557f73370733c6de"
+ */
+export function sessionKey(channelId: string, chatId: string): string {
+  return `${channelId}_${chatId}`;
 }
 
 export function loadSession(key: string): SessionMeta | null {
@@ -41,7 +44,7 @@ export function deleteSession(key: string): void {
 
 export function listSessions(): Array<{ key: string; meta: SessionMeta }> {
   if (!fs.existsSync(paths.sessionsDir)) return [];
-  const files = fs.readdirSync(paths.sessionsDir).filter((f) => f.endsWith(".json") && !f.startsWith("chat_setting_"));
+  const files = fs.readdirSync(paths.sessionsDir).filter((f) => f.endsWith(".json"));
   const results: Array<{ key: string; meta: SessionMeta }> = [];
   for (const file of files) {
     const key = file.replace(".json", "");

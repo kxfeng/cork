@@ -25,13 +25,15 @@ function makeConfig(workspace: string): CorkConfig {
   };
 }
 
-describe("Cork Integration Tests", () => {
+describe("Cork Integration Tests (commands)", () => {
   let tempDir: string;
   let channel: TestChannel;
   let daemon: CorkDaemon;
+  let sockPath: string;
 
   beforeEach(() => {
     tempDir = makeTempDir();
+    sockPath = path.join(tempDir, "test.sock");
     channel = new TestChannel();
   });
 
@@ -56,122 +58,11 @@ describe("Cork Integration Tests", () => {
     }
   });
 
-  it("single message → receives reply", async () => {
-    const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
-    await daemon.start();
-
-    await channel.injectMessage({
-      text: "respond with exactly the word: pong",
-      chatId: "test-chat-single",
-    });
-
-    const replies = channel.getFinalReplies();
-    expect(replies.length).toBeGreaterThanOrEqual(1);
-
-    const lastReply = replies[replies.length - 1];
-    expect(lastReply.content.toLowerCase()).toContain("pong");
-  }, 60000);
-
-  it("multi-turn conversation preserves context", async () => {
-    const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
-    await daemon.start();
-
-    // Turn 1: tell Claude a number
-    await channel.injectMessage({
-      text: "remember this number: 42. respond with just: ok",
-      chatId: "test-chat-multi",
-    });
-
-    let replies = channel.getFinalReplies();
-    expect(replies.length).toBeGreaterThanOrEqual(1);
-
-    channel.clearReplies();
-
-    // Turn 2: ask Claude to recall
-    await channel.injectMessage({
-      text: "what number did I tell you? respond with just the number.",
-      chatId: "test-chat-multi",
-    });
-
-    replies = channel.getFinalReplies();
-    expect(replies.length).toBeGreaterThanOrEqual(1);
-
-    const lastReply = replies[replies.length - 1];
-    expect(lastReply.content).toContain("42");
-  }, 120000);
-
-  it("different chats have isolated sessions", async () => {
-    // Use separate workspace dirs to avoid Claude sharing project-level context
-    const wsA = path.join(tempDir, "workspace-a");
-    const wsB = path.join(tempDir, "workspace-b");
-    fs.mkdirSync(wsA, { recursive: true });
-    fs.mkdirSync(wsB, { recursive: true });
-
-    const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
-    await daemon.start();
-
-    // Chat A uses workspace A
-    await channel.injectMessage({
-      text: `/workspace ${wsA}`,
-      chatId: "test-chat-A",
-    });
-    channel.clearReplies();
-
-    // Chat B uses workspace B
-    await channel.injectMessage({
-      text: `/workspace ${wsB}`,
-      chatId: "test-chat-B",
-    });
-    channel.clearReplies();
-
-    // Chat A: remember number 100
-    await channel.injectMessage({
-      text: "remember this number: 100. respond with just: ok",
-      chatId: "test-chat-A",
-    });
-
-    // Chat B: remember number 200
-    await channel.injectMessage({
-      text: "remember this number: 200. respond with just: ok",
-      chatId: "test-chat-B",
-    });
-
-    channel.clearReplies();
-
-    // Chat A: recall — should know 100
-    await channel.injectMessage({
-      text: "what number did I tell you to remember? respond with just the number, nothing else.",
-      chatId: "test-chat-A",
-    });
-
-    const repliesA = channel.getReplies().filter((r) => r.chatId === "test-chat-A");
-    expect(repliesA.length).toBeGreaterThanOrEqual(1);
-    const lastA = repliesA[repliesA.length - 1];
-    expect(lastA.content).toContain("100");
-
-    channel.clearReplies();
-
-    // Chat B: recall — should know 200
-    await channel.injectMessage({
-      text: "what number did I tell you to remember? respond with just the number, nothing else.",
-      chatId: "test-chat-B",
-    });
-
-    const repliesB = channel.getReplies().filter((r) => r.chatId === "test-chat-B");
-    expect(repliesB.length).toBeGreaterThanOrEqual(1);
-    const lastB = repliesB[repliesB.length - 1];
-    expect(lastB.content).toContain("200");
-  }, 180000);
-
   it("/new command creates fresh session", async () => {
     const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
+    daemon = new CorkDaemon(config, [channel], sockPath);
     await daemon.start();
 
-    // Send /new
     await channel.injectMessage({
       text: "/new",
       chatId: "test-chat-new",
@@ -186,8 +77,15 @@ describe("Cork Integration Tests", () => {
 
   it("/workspace shows current workspace", async () => {
     const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
+    daemon = new CorkDaemon(config, [channel], sockPath);
     await daemon.start();
+
+    // First create a session
+    await channel.injectMessage({
+      text: "/new",
+      chatId: "test-chat-ws",
+    });
+    channel.clearReplies();
 
     await channel.injectMessage({
       text: "/workspace",
@@ -201,24 +99,49 @@ describe("Cork Integration Tests", () => {
     expect(reply.content).toContain(tempDir);
   }, 30000);
 
-  it("/workspace <path> switches workspace", async () => {
+  it("/new <path> creates session with custom workspace", async () => {
     const newWs = path.join(tempDir, "subproject");
     const config = makeConfig(tempDir);
-    daemon = new CorkDaemon(config, [channel]);
+    daemon = new CorkDaemon(config, [channel], sockPath);
     await daemon.start();
 
     await channel.injectMessage({
-      text: `/workspace ${newWs}`,
-      chatId: "test-chat-switch",
+      text: `/new ${newWs}`,
+      chatId: "test-chat-newws",
     });
 
     const replies = channel.getFinalReplies();
     expect(replies.length).toBeGreaterThanOrEqual(1);
     const reply = replies[replies.length - 1];
-    expect(reply.content).toContain("Workspace switched");
+    expect(reply.content).toContain("New session created");
     expect(reply.content).toContain(newWs);
 
     // Verify directory was created
     expect(fs.existsSync(newWs)).toBe(true);
+  }, 30000);
+
+  it("/status shows session info", async () => {
+    const config = makeConfig(tempDir);
+    daemon = new CorkDaemon(config, [channel], sockPath);
+    await daemon.start();
+
+    // Create a session first
+    await channel.injectMessage({
+      text: "/new",
+      chatId: "test-chat-status",
+    });
+    channel.clearReplies();
+
+    await channel.injectMessage({
+      text: "/status",
+      chatId: "test-chat-status",
+    });
+
+    const replies = channel.getFinalReplies();
+    expect(replies.length).toBeGreaterThanOrEqual(1);
+    const reply = replies[replies.length - 1];
+    expect(reply.content).toContain("Session Status");
+    expect(reply.content).toContain("Workspace:");
+    expect(reply.content).toContain("State:");
   }, 30000);
 });

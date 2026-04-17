@@ -1,15 +1,18 @@
-import fs from "node:fs";
-import path from "node:path";
-import { paths } from "../../config/paths.js";
+import {
+  loadSession,
+  saveSession,
+  sessionKey,
+  type SessionMeta,
+} from "../../session/store.js";
 
-interface ChatSettings {
+export interface ChatSettings {
   mentionRequired: boolean;
 }
 
 const cache = new Map<string, ChatSettings>();
 
-function settingsPath(chatId: string): string {
-  return path.join(paths.sessionsDir, `chat_setting_lark_${chatId}.json`);
+function getSessionKey(chatId: string): string {
+  return sessionKey("lark", chatId);
 }
 
 function defaultSettings(): ChatSettings {
@@ -20,16 +23,14 @@ export function getChatSettings(chatId: string): ChatSettings {
   const cached = cache.get(chatId);
   if (cached) return cached;
 
-  const filePath = settingsPath(chatId);
-  if (fs.existsSync(filePath)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-      const settings = { ...defaultSettings(), ...data };
-      cache.set(chatId, settings);
-      return settings;
-    } catch {
-      // Corrupted file, use defaults
-    }
+  const key = getSessionKey(chatId);
+  const meta = loadSession(key);
+  if (meta) {
+    const settings: ChatSettings = {
+      mentionRequired: meta.mentionRequired ?? true,
+    };
+    cache.set(chatId, settings);
+    return settings;
   }
 
   const defaults = defaultSettings();
@@ -42,6 +43,10 @@ export function updateChatSettings(chatId: string, update: Partial<ChatSettings>
   const updated = { ...current, ...update };
   cache.set(chatId, updated);
 
-  fs.mkdirSync(paths.sessionsDir, { recursive: true });
-  fs.writeFileSync(settingsPath(chatId), JSON.stringify(updated, null, 2), "utf-8");
+  const key = getSessionKey(chatId);
+  const meta = loadSession(key);
+  if (meta) {
+    meta.mentionRequired = updated.mentionRequired;
+    saveSession(key, meta);
+  }
 }

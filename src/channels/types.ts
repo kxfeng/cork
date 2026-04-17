@@ -18,9 +18,20 @@ export interface ReplyResult {
   messageId: string;
 }
 
+export interface DispatchResult {
+  /** True if the reply was sent synchronously (e.g. command); false if reply will arrive async via Claude. */
+  syncReplied: boolean;
+}
+
 export interface Dispatcher {
-  handleMessage(channel: Channel, message: IncomingMessage): Promise<void>;
+  handleMessage(channel: Channel, message: IncomingMessage): Promise<DispatchResult>;
   resolveSessionKey?(chatId: string): string;
+  /** Track an ack reaction to be removed when Claude replies. */
+  trackPendingReaction?(
+    chatId: string,
+    messageId: string,
+    reactionId: string
+  ): void;
 }
 
 export interface Channel {

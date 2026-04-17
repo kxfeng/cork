@@ -1,4 +1,9 @@
-import type { Channel, IncomingMessage, Dispatcher } from "../channels/types.js";
+import type {
+  Channel,
+  IncomingMessage,
+  Dispatcher,
+  DispatchResult,
+} from "../channels/types.js";
 import type { CorkConfig } from "../config/schema.js";
 import { SessionManager } from "../session/manager.js";
 import { sessionKey } from "../session/store.js";
@@ -16,8 +21,12 @@ export class MessageRouter implements Dispatcher {
     this.sessionManager = new SessionManager(config);
   }
 
-  async handleMessage(channel: Channel, message: IncomingMessage): Promise<void> {
+  async handleMessage(
+    channel: Channel,
+    message: IncomingMessage
+  ): Promise<DispatchResult> {
     logger.debug("enqueuing message", { messageId: message.messageId, chatId: message.chatId });
+    let syncReplied = false;
     await this.queue.enqueue(message.chatId, async () => {
       logger.debug("dequeued, processing", { messageId: message.messageId });
       try {
@@ -30,10 +39,13 @@ export class MessageRouter implements Dispatcher {
           message,
           this.sessionManager
         );
-        if (cmdResult.handled) return;
+        if (cmdResult.handled) {
+          syncReplied = true;
+          return;
+        }
 
-        // Route to session
-        await this.sessionManager.processMessage(channel, message);
+        // Route to session via UDS
+        await this.sessionManager.dispatch(message);
       } catch (err) {
         logger.error("error handling message", { err, chatId: message.chatId });
         try {
@@ -41,16 +53,22 @@ export class MessageRouter implements Dispatcher {
             message.chatId,
             `❌ Internal error: ${(err as Error).message}`
           );
+          syncReplied = true;
         } catch {
           logger.error("failed to send error reply");
         }
       }
     });
+    return { syncReplied };
   }
 
   resolveSessionKey(chatId: string): string {
-    const workspace = this.sessionManager.getCurrentWorkspace(chatId);
-    return sessionKey(chatId, workspace);
+    return sessionKey("lark", chatId);
+  }
+
+  trackPendingReaction(chatId: string, messageId: string, reactionId: string): void {
+    const key = sessionKey("lark", chatId);
+    this.sessionManager.trackPendingReaction(key, messageId, reactionId);
   }
 
   async shutdown(): Promise<void> {
