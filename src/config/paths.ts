@@ -6,6 +6,7 @@ const CORK_DIR_NAME = ".cork";
 export const paths = {
   corkDir: path.join(os.homedir(), CORK_DIR_NAME),
   configFile: path.join(os.homedir(), CORK_DIR_NAME, "config.jsonc"),
+  envFile: path.join(os.homedir(), CORK_DIR_NAME, "env"),
   sessionsDir: path.join(os.homedir(), CORK_DIR_NAME, "sessions"),
   socketPath: path.join(os.homedir(), CORK_DIR_NAME, "cork.sock"),
   logsDir: path.join(os.homedir(), CORK_DIR_NAME, "logs"),

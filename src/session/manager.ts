@@ -14,6 +14,7 @@ import type { CorkConfig } from "../config/schema.js";
 import type { IncomingMessage } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
+import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
 
 const logger = getLogger("session-manager");
@@ -272,11 +273,16 @@ export class SessionManager extends EventEmitter {
       resume,
     });
 
+    // ~/.cork/env values augment the daemon's env so shell-only exports
+    // (e.g. ANTHROPIC_MODEL) reach claude even though launchd does not
+    // source the user's shell rc files.
+    const corkEnv = loadCorkEnv();
+
     try {
       execSync(
         `tmux new-session -d -s "${tmuxName}" -x 200 -y 50 ` +
           `"cd '${meta.workspace}' && ${claudeCmd}"`,
-        { stdio: "pipe", env: { ...process.env } }
+        { stdio: "pipe", env: { ...process.env, ...corkEnv } }
       );
     } catch (err) {
       logger.error("failed to start tmux session", { key, err });
