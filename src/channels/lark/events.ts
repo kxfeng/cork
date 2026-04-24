@@ -110,6 +110,7 @@ export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatch
 
   dispatcher.register({
     "im.message.receive_v1": async (data: any) => {
+      ctx.channel.markEventReceived();
       const callId = ++handlerCallCount;
       const msgId = data?.message?.message_id || "unknown";
       logger.debug("handler invoked by SDK", { callId, messageId: msgId });
@@ -119,10 +120,11 @@ export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatch
         logger.error("error handling lark message event", { err, callId });
       }
     },
-    // Register no-op handlers to suppress Lark SDK warnings
-    "im.message.message_read_v1": async () => {},
-    "im.message.reaction.created_v1": async () => {},
-    "im.message.reaction.deleted_v1": async () => {},
+    // Register no-op handlers to suppress Lark SDK warnings.
+    // They still count as liveness signals for the watchdog.
+    "im.message.message_read_v1": async () => { ctx.channel.markEventReceived(); },
+    "im.message.reaction.created_v1": async () => { ctx.channel.markEventReceived(); },
+    "im.message.reaction.deleted_v1": async () => { ctx.channel.markEventReceived(); },
   });
 
   return dispatcher;
