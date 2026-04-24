@@ -43,6 +43,14 @@ program
   });
 
 program
+  .command("restart")
+  .description("Restart the cork daemon (stop + start)")
+  .action(async () => {
+    const { restartDaemon } = await import("./commands/lifecycle.js");
+    await restartDaemon();
+  });
+
+program
   .command("status")
   .description("Show daemon and session status")
   .action(async () => {

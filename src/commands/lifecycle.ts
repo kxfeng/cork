@@ -51,6 +51,20 @@ export async function stopDaemon(): Promise<void> {
   console.log("Cork daemon is not running.");
 }
 
+export async function restartDaemon(): Promise<void> {
+  const wasLoaded = isLaunchdLoaded();
+  if (wasLoaded) {
+    await stopDaemon();
+    // Give launchd a moment to fully release the label and the daemon to
+    // release its UDS / log file handles before we relaunch.
+    await new Promise((r) => setTimeout(r, 500));
+  } else {
+    console.log("Cork daemon was not running, starting fresh.");
+  }
+  const { startBackground } = await import("./start.js");
+  await startBackground();
+}
+
 export async function showStatus(): Promise<void> {
   console.log("=== Cork Daemon ===");
 
