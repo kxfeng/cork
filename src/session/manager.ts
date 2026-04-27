@@ -41,12 +41,13 @@ interface ActiveSession {
   state: SessionState;
   messageQueue: QueuedMessage[];
   startingTimer?: ReturnType<typeof setTimeout>;
-  channelEnterSentAt?: number;
-  pendingRegistration?: boolean;
+  // Two independent readiness gates. Connection completes only when both
+  // are true. Decoupled because either event can in principle land first,
+  // and we never want to flush queued messages before the dialog is gone.
+  channelRegistered: boolean;
+  dialogDismissed: boolean;
   pendingReactions: PendingReaction[];
 }
-
-const CHANNEL_READY_DELAY_MS = 1500;
 
 /**
  * Manages Claude Code sessions via tmux + UDS.
@@ -123,7 +124,15 @@ export class SessionManager extends EventEmitter {
       mentionRequired: true,
     };
 
-    session = { key, meta, state: "inactive", messageQueue: [], pendingReactions: [] };
+    session = {
+      key,
+      meta,
+      state: "inactive",
+      messageQueue: [],
+      channelRegistered: false,
+      dialogDismissed: false,
+      pendingReactions: [],
+    };
     this.sessions.set(key, session);
     return session;
   }
@@ -293,30 +302,13 @@ export class SessionManager extends EventEmitter {
     }
 
     session.state = "starting";
+    session.channelRegistered = false;
+    session.dialogDismissed = false;
 
-    // Accept workspace trust dialog after a short delay
-    setTimeout(() => {
-      try {
-        execSync(`tmux send-keys -t "${tmuxName}" Enter`, { stdio: "pipe" });
-      } catch {
-        // Session may have already passed the dialog
-      }
-    }, 3000);
-
-    // Accept development channel confirmation
-    setTimeout(() => {
-      try {
-        execSync(`tmux send-keys -t "${tmuxName}" Enter`, { stdio: "pipe" });
-      } catch {
-        // May not need it
-      }
-      session.channelEnterSentAt = Date.now();
-      // If channel already registered before Enter, complete connection after delay
-      if (session.pendingRegistration) {
-        session.pendingRegistration = false;
-        setTimeout(() => this.completeConnection(key), CHANNEL_READY_DELAY_MS);
-      }
-    }, 5000);
+    // Poll the tmux pane and dismiss the development channel confirmation
+    // dialog. Sends Enter while the dialog text is on screen and stops once
+    // it disappears, so we don't fire stray Enters into the main prompt.
+    this.pollAndDismissChannelDialog(session, tmuxName);
 
     // Starting timeout
     session.startingTimer = setTimeout(() => {
@@ -341,25 +333,26 @@ export class SessionManager extends EventEmitter {
       logger.warn("channel registered for unknown session", { key });
       return;
     }
+    session.channelRegistered = true;
+    this.tryCompleteConnection(session);
+  }
 
-    // Wait until 1.5s after the channel-confirmation Enter was sent.
-    // If Enter has not been sent yet, defer until it is.
-    if (session.channelEnterSentAt === undefined) {
-      logger.debug("channel registered before Enter, deferring", { key });
-      session.pendingRegistration = true;
+  /**
+   * Complete connection only when both readiness gates are satisfied:
+   * the dev-channel dialog has been dismissed AND the channel MCP has
+   * registered over UDS. Either event may fire first.
+   */
+  private tryCompleteConnection(session: ActiveSession): void {
+    if (session.state !== "starting") return;
+    if (!session.channelRegistered || !session.dialogDismissed) {
+      logger.debug("waiting for both gates", {
+        key: session.key,
+        channelRegistered: session.channelRegistered,
+        dialogDismissed: session.dialogDismissed,
+      });
       return;
     }
-
-    const waitMs = Math.max(
-      0,
-      session.channelEnterSentAt + CHANNEL_READY_DELAY_MS - Date.now()
-    );
-    if (waitMs > 0) {
-      logger.debug("channel registered, waiting for ready", { key, waitMs });
-      setTimeout(() => this.completeConnection(key), waitMs);
-    } else {
-      this.completeConnection(key);
-    }
+    this.completeConnection(session.key);
   }
 
   private completeConnection(key: string): void {
@@ -418,6 +411,77 @@ export class SessionManager extends EventEmitter {
       });
       session.state = "inactive";
     }
+  }
+
+  /**
+   * Watch the tmux pane for the dev-channel confirmation dialog and dismiss
+   * it by sending Enter. Stops once the dialog text is no longer visible, so
+   * stray Enters never reach the main prompt.
+   */
+  private pollAndDismissChannelDialog(
+    session: ActiveSession,
+    tmuxName: string
+  ): void {
+    // Match the prompt rendered for `--dangerously-load-development-channels`.
+    // Two strings unique to this dialog — header + option label.
+    const DIALOG_PATTERN =
+      /Loading development channels|I am using this for local development/;
+    const POLL_INTERVAL_MS = 500;
+    const POLL_TIMEOUT_MS = 15_000;
+    const POLL_START_DELAY_MS = 1000;
+
+    const key = session.key;
+    const startedAt = Date.now();
+    let dialogSeen = false;
+
+    const markDismissed = () => {
+      if (session.dialogDismissed) return;
+      session.dialogDismissed = true;
+      this.tryCompleteConnection(session);
+    };
+
+    const tick = () => {
+      if (session.state !== "starting") return;
+
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        logger.warn("channel dialog poll timeout, proceeding", {
+          key,
+          dialogSeen,
+        });
+        markDismissed();
+        return;
+      }
+
+      let pane = "";
+      try {
+        pane = execSync(`tmux capture-pane -t "${tmuxName}" -p`, {
+          encoding: "utf8",
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } catch {
+        // tmux pane not ready yet; keep polling
+      }
+
+      if (DIALOG_PATTERN.test(pane)) {
+        dialogSeen = true;
+        try {
+          execSync(`tmux send-keys -t "${tmuxName}" Enter`, { stdio: "pipe" });
+        } catch {
+          // ignore
+        }
+        setTimeout(tick, POLL_INTERVAL_MS);
+        return;
+      }
+
+      if (dialogSeen) {
+        markDismissed();
+        return;
+      }
+
+      setTimeout(tick, POLL_INTERVAL_MS);
+    };
+
+    setTimeout(tick, POLL_START_DELAY_MS);
   }
 
   /**
