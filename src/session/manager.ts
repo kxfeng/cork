@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from "uuid";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import {
   sessionKey,
@@ -17,6 +19,7 @@ import { paths } from "../config/paths.js";
 import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
 
 const STARTING_TIMEOUT_MS = 30_000;
@@ -67,11 +70,9 @@ interface ActiveSession {
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, ActiveSession>();
   private udsServer: UdsServer | null = null;
-  private channelServerPath: string;
 
   constructor(private config: CorkConfig) {
     super();
-    this.channelServerPath = this.resolveChannelServerPath();
   }
 
   setUdsServer(uds: UdsServer): void {
@@ -246,9 +247,6 @@ export class SessionManager extends EventEmitter {
 
     // Ensure workspace exists
     fs.mkdirSync(meta.workspace, { recursive: true });
-
-    // Ensure the global MCP config exists
-    this.ensureMcpConfig();
 
     // Resume existing Claude session or create a new one with the stored UUID.
     const resume = meta.claudeSessionStarted;
@@ -485,20 +483,24 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Ensure the global MCP config file exists at ~/.cork/mcp-config.json.
-   * This config is the same for all sessions — the per-session identity
-   * (CORK_SESSION_KEY) is passed via environment variable instead.
+   * Write ~/.cork/mcp-config.json. Resolves the bundled channel-mcp script
+   * relative to this module's own location, so it works regardless of
+   * where cork is installed and does not depend on PATH. Called once at
+   * daemon startup so the config always reflects the running cork install.
+   * Per-session identity (CORK_SESSION_KEY) is passed via env on the tmux
+   * command line, not in this file.
    */
-  private ensureMcpConfig(): void {
-    if (fs.existsSync(this.mcpConfigPath)) return;
-
-    const sockPath =
-      process.env.CORK_SOCKET || paths.socketPath;
+  writeMcpConfig(): void {
+    const sockPath = process.env.CORK_SOCKET || paths.socketPath;
+    const channelServerPath = path.join(
+      __dirname,
+      "../channel-mcp/server.js"
+    );
     const mcpConfig = {
       mcpServers: {
         "cork-channel": {
           command: "node",
-          args: [this.channelServerPath],
+          args: [channelServerPath],
           env: {
             CORK_SOCKET: sockPath,
           },
@@ -521,27 +523,5 @@ export class SessionManager extends EventEmitter {
     } catch {
       // Session may not exist
     }
-  }
-
-  private resolveChannelServerPath(): string {
-    const candidates: string[] = [];
-
-    // Resolve relative to this module's location
-    try {
-      const url = new URL("../../dist/channel-mcp/server.js", import.meta.url);
-      candidates.push(url.pathname);
-    } catch {
-      // import.meta.url not available
-    }
-
-    // Installed location
-    candidates.push(`${paths.corkDir}/channel-mcp/server.js`);
-
-    for (const p of candidates) {
-      if (fs.existsSync(p)) return p;
-    }
-
-    // Last resort — use the first candidate (will fail at runtime with a clear error)
-    return candidates[0] || `${paths.corkDir}/channel-mcp/server.js`;
   }
 }

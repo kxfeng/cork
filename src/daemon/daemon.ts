@@ -32,6 +32,10 @@ export class CorkDaemon {
     ensureDirs();
     logger.info("starting cork daemon");
 
+    // Refresh ~/.cork/mcp-config.json so it always points at the channel
+    // MCP shipped with the currently running cork install.
+    this.router.sessionManager.writeMcpConfig();
+
     // Start UDS server
     await this.udsServer.start();
     logger.info("UDS server started");
