@@ -177,9 +177,27 @@ async function connectToCork() {
   }
 }
 
-// Connect to UDS only after Claude Code completes MCP handshake (initialized notification)
+// Settle window between MCP `notifications/initialized` and registering
+// with the cork daemon.
+//
+// Without it, the cork side dumps any queued user messages the instant
+// register lands — which can be tens of milliseconds after `initialized`
+// on a warm machine. Claude code's MCP layer is initialized at that point
+// but its per-channel state machine may not have finished wiring; the
+// channel notification arrives, claude shows the message text in the TUI
+// but treats cork-channel as "not yet open" and refuses to call the
+// reply tool. The next message (seconds later) goes through fine.
+//
+// Anthropic's official telegram channel doesn't need this delay because
+// Telegram polling naturally adds ~1-2s of network latency before the
+// first inbound message arrives. Cork queues messages on the daemon side
+// and floods them on register, collapsing that buffer to ~0ms.
+//
+// 1s is empirically enough; raise if first-message races reappear.
+const REGISTER_SETTLE_MS = 1000;
+
 mcp.oninitialized = () => {
-  connectToCork();
+  setTimeout(connectToCork, REGISTER_SETTLE_MS);
 };
 
 // Start: connect MCP stdio
