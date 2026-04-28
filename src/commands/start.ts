@@ -20,6 +20,10 @@ function generatePlist(): string {
     corkBin = process.argv[1];
   }
 
+  // Exec cork directly (no `node` prefix) so package-manager wrappers like
+  // the pnpm shell shim work — node would choke on their `#!/bin/sh` body.
+  // The dist/index.js shebang routes to node when the symlink resolves
+  // straight to it.
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -28,7 +32,6 @@ function generatePlist(): string {
   <string>${PLIST_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${process.execPath}</string>
     <string>${corkBin}</string>
     <string>start</string>
     <string>--daemon</string>
