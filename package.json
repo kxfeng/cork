@@ -13,7 +13,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "tsc",
-    "bootstrap": "pnpm install && pnpm link --global"
+    "boot": "pnpm install && pnpm link --global"
   },
   "keywords": [
     "claude",
