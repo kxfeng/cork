@@ -32,12 +32,10 @@ Today only the Lark/Feishu adapter ships. The session/router layer is channel‑
 ## Install
 
 ```bash
-pnpm add -g github:kxfeng/cork
-# or with npm:
-npm install -g kxfeng/cork
+pnpm add -g --allow-build=cork github:kxfeng/cork
 ```
 
-`pnpm` will clone the repo, run the `prepare` build, and link the two binaries (`cork` and `cork-channel-mcp`) onto your `PATH`.
+`pnpm` clones the repo, runs the TypeScript build, and links the `cork` binary onto your `PATH`. The `--allow-build=cork` flag is required because pnpm 10+ blocks lifecycle scripts on git‑hosted packages by default — without it the install fails with `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`.
 
 To upgrade, re‑run the same command — pnpm refetches the latest `main`.
 
