@@ -403,7 +403,12 @@ export class SessionManager extends EventEmitter {
       meta: msg.meta,
     });
 
-    if (!sent) {
+    if (sent) {
+      logger.debug("sent message to channel", {
+        key: session.key,
+        contentLen: msg.content.length,
+      });
+    } else {
       logger.warn("failed to send to channel, marking disconnected", {
         key: session.key,
       });

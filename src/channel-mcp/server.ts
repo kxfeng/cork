@@ -16,6 +16,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { UdsClient } from "./uds-client.js";
@@ -29,6 +30,31 @@ if (!sessionKey) {
   process.stderr.write("CORK_SESSION_KEY environment variable is required\n");
   process.exit(1);
 }
+
+// Per-subprocess JSON-line log. Stderr inside an MCP subprocess is captured
+// by claude code and not easy to retrieve, so we keep our own file. All
+// active sessions append to the same file; each line is tagged with
+// sessionKey + pid so it can be grepped per-session and time-aligned with
+// ~/.cork/logs/cork.log when debugging the MCP / channel handshake.
+const logFile = path.join(os.homedir(), ".cork", "logs", "channel-mcp.log");
+fs.mkdirSync(path.dirname(logFile), { recursive: true });
+
+function log(event: string, fields: Record<string, unknown> = {}): void {
+  const line = JSON.stringify({
+    time: new Date().toISOString(),
+    sessionKey,
+    pid: process.pid,
+    event,
+    ...fields,
+  }) + "\n";
+  try {
+    fs.appendFileSync(logFile, line);
+  } catch {
+    // logging must never crash the bridge
+  }
+}
+
+log("subprocess_started", { sockPath });
 
 // Create the MCP server with channel capability
 const mcp = new Server(
@@ -70,14 +96,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "reply") {
     const { text } = req.params.arguments as { text: string };
+    log("reply_tool_called", {
+      contentLen: text.length,
+      udsConnected: udsClient.connected,
+    });
     try {
       udsClient.send({
         type: "reply",
         corkSessionKey: sessionKey!,
         content: text,
       });
+      log("reply_sent_to_uds");
       return { content: [{ type: "text" as const, text: "sent" }] };
     } catch (err) {
+      log("reply_send_failed", { err: (err as Error).message });
       return {
         content: [
           {
@@ -131,15 +163,23 @@ udsClient.on("message", async (msg) => {
         if (typeof v === "string") meta[k] = v;
       }
     }
-    await mcp.notification({
-      method: "notifications/claude/channel",
-      params: {
-        content: (msg.content as string) || "",
-        meta,
-      },
-    });
+    const contentLen = ((msg.content as string) || "").length;
+    log("recv_message_from_cork", { contentLen });
+    try {
+      await mcp.notification({
+        method: "notifications/claude/channel",
+        params: {
+          content: (msg.content as string) || "",
+          meta,
+        },
+      });
+      log("forwarded_to_claude", { contentLen });
+    } catch (err) {
+      log("forward_to_claude_failed", { err: (err as Error).message });
+    }
   } else if (msg.type === "permission_verdict") {
     // Forward permission verdict to Claude Code
+    log("recv_permission_verdict", { requestId: msg.requestId });
     await mcp.notification({
       method: "notifications/claude/channel/permission" as any,
       params: {
@@ -150,18 +190,27 @@ udsClient.on("message", async (msg) => {
   }
 });
 
+udsClient.on("connected", () => log("uds_connected"));
+udsClient.on("disconnected", () => log("uds_disconnected"));
+udsClient.on("error", (err: Error) => log("uds_error", { err: err.message }));
+
 // Connect to cork daemon (called once Claude Code completes MCP handshake)
 async function connectToCork() {
   const maxRetries = 10;
   const retryDelayMs = 1000;
   for (let i = 0; i < maxRetries; i++) {
     try {
+      log("uds_connect_attempt", { attempt: i + 1 });
       await udsClient.connect();
       process.stderr.write(
         `cork-channel: connected to cork daemon (session: ${sessionKey})\n`
       );
       return;
     } catch (err) {
+      log("uds_connect_failed", {
+        attempt: i + 1,
+        err: (err as Error).message,
+      });
       if (i < maxRetries - 1) {
         process.stderr.write(
           `cork-channel: waiting for cork daemon (attempt ${i + 1}/${maxRetries})...\n`
@@ -197,15 +246,22 @@ async function connectToCork() {
 const REGISTER_SETTLE_MS = 1000;
 
 mcp.oninitialized = () => {
-  setTimeout(connectToCork, REGISTER_SETTLE_MS);
+  log("mcp_oninitialized");
+  setTimeout(() => {
+    log("register_settle_elapsed");
+    connectToCork();
+  }, REGISTER_SETTLE_MS);
 };
 
 // Start: connect MCP stdio
 async function main() {
+  log("mcp_connecting_stdio");
   await mcp.connect(new StdioServerTransport());
+  log("mcp_stdio_connected");
 }
 
 main().catch((err) => {
+  log("fatal", { err: (err as Error).message });
   process.stderr.write(`cork-channel fatal: ${err}\n`);
   process.exit(1);
 });
