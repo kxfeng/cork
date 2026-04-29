@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
+import { readLatestUsage, formatModelContext } from "../session/transcript.js";
 
 const PLIST_LABEL = "com.cork.daemon";
 
@@ -92,13 +93,16 @@ export async function showStatus(): Promise<void> {
   for (const { key, meta } of sessions) {
     const typeLabel = meta.chatType === "group" ? "Group" : "P2P";
     const name = meta.chatName && meta.chatName !== meta.chatId ? meta.chatName : meta.chatId;
+    const usage = await readLatestUsage(meta.workspace, meta.sessionId);
+    // Labels padded to a common 15-char column so the colons line up.
     console.log(`[${key}]`);
-    console.log(`  Chat:          ${name} (${typeLabel})`);
-    console.log(`  Workspace:     ${meta.workspace}`);
+    console.log(`  Chat:           ${name} (${typeLabel})`);
+    console.log(`  Workspace:      ${meta.workspace}`);
     console.log(`  Claude session: ${meta.sessionId}`);
-    console.log(`  Last active:   ${meta.lastActiveAt}`);
-    console.log(`  Last msg:      ${meta.lastMessagePreview || "(none)"}`);
-    console.log(`  View:          tmux attach -t cork_${key}`);
+    console.log(`  Claude context: ${formatModelContext(usage)}`);
+    console.log(`  Last active:    ${meta.lastActiveAt}`);
+    console.log(`  Last msg:       ${meta.lastMessagePreview || "(none)"}`);
+    console.log(`  View:           tmux attach -t cork_${key}`);
     console.log();
   }
 }

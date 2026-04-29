@@ -1,6 +1,7 @@
 import type { Channel, IncomingMessage } from "../channels/types.js";
 import type { SessionManager } from "../session/manager.js";
 import { resolveWorkspacePath } from "../config/loader.js";
+import { readLatestUsage, formatModelContext } from "../session/transcript.js";
 import fs from "node:fs";
 
 export interface CommandResult {
@@ -41,14 +42,14 @@ async function handleStatus(
   if (session) {
     // Chat info
     if (session.meta.chatType === "group") {
-      reply += `Mention: ${session.meta.mentionRequired ? "on" : "off"}\n`;
+      reply += `Mention: \`${session.meta.mentionRequired ? "on" : "off"}\`\n`;
     }
 
     reply += `Workspace: \`${session.meta.workspace}\`\n`;
     reply += `Cork session: \`${session.key}\`\n`;
     reply += `Claude session: \`${session.meta.sessionId}\`\n`;
-    reply += `State: ${session.state}\n`;
-    reply += `Last active: ${session.meta.lastActiveAt}\n`;
+    const usage = await readLatestUsage(session.meta.workspace, session.meta.sessionId);
+    reply += `Claude context: \`${formatModelContext(usage)}\`\n`;
     reply += `View: \`tmux attach -t cork_${session.key}\``;
   } else {
     reply += `No session yet (send a message to start one)`;
