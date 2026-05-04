@@ -351,9 +351,19 @@ async function handleMessageEvent(
     try {
       const parentMsg = await ctx.channel.fetchMessage(parentId);
       if (parentMsg) {
-        const quotedText = parentMsg.msgType === "merge_forward"
-          ? "(forwarded messages)"
-          : parseMessageContent(parentMsg.msgType, parentMsg.content);
+        let quotedText: string;
+        if (parentMsg.msgType === "merge_forward") {
+          try {
+            const items = await ctx.channel.fetchSubMessages(parentId);
+            const bot = { openId: ctx.channel.botOpenId, appId: ctx.channel.botAppId, name: ctx.channel.botName };
+            quotedText = await formatMergeForward(items, parentId, resolveName, bot);
+          } catch (err) {
+            logger.debug("failed to fetch quoted merge_forward sub-messages", { err, parentId });
+            quotedText = "(forwarded messages)";
+          }
+        } else {
+          quotedText = parseMessageContent(parentMsg.msgType, parentMsg.content);
+        }
         if (quotedText.trim()) {
           // Resolve sender name for the quoted message
           let senderLabel = "";
