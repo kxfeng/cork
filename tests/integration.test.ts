@@ -142,6 +142,6 @@ describe("Cork Integration Tests (commands)", () => {
     const reply = replies[replies.length - 1];
     expect(reply.content).toContain("Session Status");
     expect(reply.content).toContain("Workspace:");
-    expect(reply.content).toContain("State:");
+    expect(reply.content).toContain("Claude context:");
   }, 30000);
 });
