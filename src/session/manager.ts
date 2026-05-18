@@ -263,6 +263,7 @@ export class SessionManager extends EventEmitter {
     }
 
     claudeArgs.push("--mcp-config", this.mcpConfigPath);
+    claudeArgs.push("--settings", this.settingsPath);
     claudeArgs.push(
       "--dangerously-load-development-channels",
       "server:cork-channel"
@@ -518,6 +519,36 @@ export class SessionManager extends EventEmitter {
 
   private get mcpConfigPath(): string {
     return `${paths.corkDir}/mcp-config.json`;
+  }
+
+  private get settingsPath(): string {
+    return `${paths.corkDir}/claude-settings.json`;
+  }
+
+  /**
+   * Write ~/.cork/claude-settings.json — passed to claude via `--settings`,
+   * which merges it as an *additional* settings layer on top of the user's
+   * own ~/.claude/settings.json and project settings (never replacing them).
+   *
+   * It registers a single `Stop` hook: cork's stop-hook script, which
+   * detects turns where the model answered without going through the
+   * cork-channel reply tool and recovers them. The bundled script is
+   * resolved relative to this module so it works regardless of install
+   * location. Called once at daemon startup, like writeMcpConfig().
+   */
+  writeClaudeSettings(): void {
+    const hookScript = path.join(__dirname, "../hooks/stop-hook.js");
+    const settings = {
+      hooks: {
+        Stop: [
+          {
+            hooks: [{ type: "command", command: `node '${hookScript}'` }],
+          },
+        ],
+      },
+    };
+    fs.mkdirSync(paths.corkDir, { recursive: true });
+    fs.writeFileSync(this.settingsPath, JSON.stringify(settings, null, 2));
   }
 
   private killTmux(key: string): void {

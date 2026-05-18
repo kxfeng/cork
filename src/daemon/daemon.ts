@@ -36,6 +36,9 @@ export class CorkDaemon {
     // MCP shipped with the currently running cork install.
     this.router.sessionManager.writeMcpConfig();
 
+    // Refresh ~/.cork/claude-settings.json (Stop hook) likewise.
+    this.router.sessionManager.writeClaudeSettings();
+
     // Start UDS server
     await this.udsServer.start();
     logger.info("UDS server started");
