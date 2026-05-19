@@ -7,7 +7,6 @@ import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward } from "./merge-forward.js";
 import { parseMessageContent, extractResourceKeys } from "./content.js";
-import { getChatSettings, updateChatSettings } from "./chat-settings.js";
 
 const logger = getLogger("lark-events");
 
@@ -231,8 +230,8 @@ async function handleMessageEvent(
 
   // --- Group chat access control ---
   if (chatType === "group") {
-    const settings = getChatSettings(chatId);
-    const inListenMode = !settings.mentionRequired;
+    const mentionRequired = ctx.dispatcher.getMentionRequired?.(chatId) ?? true;
+    const inListenMode = !mentionRequired;
 
     if (!ownerCheck) {
       // Non-owner in group
@@ -320,14 +319,14 @@ async function handleMessageEvent(
   if (chatType === "group" && mentioned) {
     const trimmed = text.trim();
     if (trimmed === "/mention-off") {
-      updateChatSettings(chatId, { mentionRequired: false });
+      ctx.dispatcher.setMentionRequired?.(chatId, false);
       try {
         await ctx.channel.sendReply(chatId, "✅ Mention requirement disabled. Owner messages will be processed without @bot.");
       } catch {}
       return;
     }
     if (trimmed === "/mention-on") {
-      updateChatSettings(chatId, { mentionRequired: true });
+      ctx.dispatcher.setMentionRequired?.(chatId, true);
       try {
         await ctx.channel.sendReply(chatId, "✅ Mention requirement enabled. @bot is required again.");
       } catch {}

@@ -66,6 +66,14 @@ export class MessageRouter implements Dispatcher {
     return sessionKey("lark", chatId);
   }
 
+  getMentionRequired(chatId: string): boolean {
+    return this.sessionManager.getMentionRequired(chatId);
+  }
+
+  setMentionRequired(chatId: string, value: boolean): void {
+    this.sessionManager.setMentionRequired(chatId, value);
+  }
+
   trackPendingReaction(chatId: string, messageId: string, reactionId: string): void {
     const key = sessionKey("lark", chatId);
     this.sessionManager.trackPendingReaction(key, messageId, reactionId);

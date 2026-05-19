@@ -32,6 +32,10 @@ export interface Dispatcher {
     messageId: string,
     reactionId: string
   ): void;
+  /** Whether a group chat currently requires an @bot mention. */
+  getMentionRequired?(chatId: string): boolean;
+  /** Set a group chat's @bot mention requirement. */
+  setMentionRequired?(chatId: string, value: boolean): void;
 }
 
 export interface Channel {

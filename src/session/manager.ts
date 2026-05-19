@@ -97,6 +97,41 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Whether a group chat requires an @bot mention. Single source of truth:
+   * the in-memory session.meta when the session is live, the persisted
+   * SessionMeta otherwise. Defaults to true for chats with no record yet.
+   */
+  getMentionRequired(chatId: string): boolean {
+    const key = sessionKey("lark", chatId);
+    const session = this.sessions.get(key);
+    if (session) return session.meta.mentionRequired ?? true;
+    return loadSession(key)?.mentionRequired ?? true;
+  }
+
+  /**
+   * Update a chat's @bot requirement. Writes through the same SessionMeta
+   * object the rest of the manager persists, so a later dispatch save can
+   * never clobber it with a stale value.
+   */
+  setMentionRequired(chatId: string, value: boolean): void {
+    const key = sessionKey("lark", chatId);
+    const session = this.sessions.get(key);
+    if (session) {
+      session.meta.mentionRequired = value;
+      saveSession(key, session.meta);
+      return;
+    }
+    // No live session: update the persisted meta directly if one exists.
+    // If none exists yet, there is nothing to act on — the session will be
+    // created with the default on its first message.
+    const meta = loadSession(key);
+    if (meta) {
+      meta.mentionRequired = value;
+      saveSession(key, meta);
+    }
+  }
+
+  /**
    * Ensure session metadata is loaded into memory (from disk or newly created).
    * Does NOT start tmux — just loads metadata.
    */
