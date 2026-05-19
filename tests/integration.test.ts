@@ -1,10 +1,33 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// Redirect every cork path into an isolated temp dir before any source
+// module loads. daemon.start() writes mcp-config.json / claude-settings.json
+// via writeMcpConfig/writeClaudeSettings — without this the suite would
+// overwrite the real ~/.cork. vi.hoisted lets the mock factory use the path.
+const corkHome = vi.hoisted(
+  () =>
+    `${(process.env.TMPDIR || "/tmp").replace(/\/+$/, "")}/cork-test-home-${process.pid}`
+);
+vi.mock("../src/config/paths.js", () => ({
+  paths: {
+    corkDir: corkHome,
+    configFile: `${corkHome}/config.jsonc`,
+    envFile: `${corkHome}/env`,
+    sessionsDir: `${corkHome}/sessions`,
+    socketPath: `${corkHome}/cork.sock`,
+    logsDir: `${corkHome}/logs`,
+    logFile: `${corkHome}/logs/cork.log`,
+    stdoutLog: `${corkHome}/logs/stdout.log`,
+    stderrLog: `${corkHome}/logs/stderr.log`,
+    launchdPlist: `${corkHome}/com.cork.daemon.plist`,
+  },
+}));
+
 import { TestChannel } from "../src/channels/test/index.js";
 import { CorkDaemon } from "../src/daemon/daemon.js";
-import { paths } from "../src/config/paths.js";
 import type { CorkConfig } from "../src/config/schema.js";
 
 // Use a unique temp dir for each test run
@@ -41,21 +64,10 @@ describe("Cork Integration Tests (commands)", () => {
     if (daemon) {
       await daemon.stop();
     }
-    // Clean up temp dir
+    // Wipe the per-test workspace and the isolated cork home. The real
+    // ~/.cork is mocked away, so nothing here can reach it.
     fs.rmSync(tempDir, { recursive: true, force: true });
-    // Clean up test session files (chatId starts with "test-")
-    if (fs.existsSync(paths.sessionsDir)) {
-      for (const file of fs.readdirSync(paths.sessionsDir)) {
-        if (!file.endsWith(".json")) continue;
-        const filePath = path.join(paths.sessionsDir, file);
-        try {
-          const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-          if (data.chatId?.startsWith("test-")) {
-            fs.unlinkSync(filePath);
-          }
-        } catch { /* ignore */ }
-      }
-    }
+    fs.rmSync(corkHome, { recursive: true, force: true });
   });
 
   it("/new command creates fresh session", async () => {
