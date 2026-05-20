@@ -170,6 +170,15 @@ export class SessionManager extends EventEmitter {
       pendingReactions: [],
     };
     this.sessions.set(key, session);
+
+    // Persist newly-minted meta immediately so any accepted message creates
+    // a visible session record — including slash commands that short-circuit
+    // before dispatch (e.g. /mention-off, /status). Existing on-disk meta
+    // already reflects what is persisted, so no rewrite is needed.
+    if (!existingMeta) {
+      saveSession(key, meta);
+    }
+
     return session;
   }
 

@@ -27,6 +27,14 @@ export async function handleCommand(
     return handleWorkspace(channel, message, sessionManager);
   }
 
+  if (text === "/mention-off") {
+    return handleMentionOff(channel, message, sessionManager);
+  }
+
+  if (text === "/mention-on") {
+    return handleMentionOn(channel, message, sessionManager);
+  }
+
   return { handled: false };
 }
 
@@ -99,6 +107,46 @@ async function handleWorkspace(
   await channel.sendReply(
     message.chatId,
     `📂 Current workspace: \`${workspace}\``
+  );
+  return { handled: true };
+}
+
+async function handleMentionOff(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager
+): Promise<CommandResult> {
+  if (message.chatType !== "group") {
+    await channel.sendReply(
+      message.chatId,
+      "ℹ️ /mention-off only applies to group chats."
+    );
+    return { handled: true };
+  }
+  sessionManager.setMentionRequired(message.chatId, false);
+  await channel.sendReply(
+    message.chatId,
+    "✅ Mention requirement disabled. Owner messages will be processed without @bot."
+  );
+  return { handled: true };
+}
+
+async function handleMentionOn(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager
+): Promise<CommandResult> {
+  if (message.chatType !== "group") {
+    await channel.sendReply(
+      message.chatId,
+      "ℹ️ /mention-on only applies to group chats."
+    );
+    return { handled: true };
+  }
+  sessionManager.setMentionRequired(message.chatId, true);
+  await channel.sendReply(
+    message.chatId,
+    "✅ Mention requirement enabled. @bot is required again."
   );
   return { handled: true };
 }

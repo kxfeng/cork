@@ -315,25 +315,6 @@ async function handleMessageEvent(
     text = stripMentions(text, mentions);
   }
 
-  // Handle /listen command in group chat
-  if (chatType === "group" && mentioned) {
-    const trimmed = text.trim();
-    if (trimmed === "/mention-off") {
-      ctx.dispatcher.setMentionRequired?.(chatId, false);
-      try {
-        await ctx.channel.sendReply(chatId, "✅ Mention requirement disabled. Owner messages will be processed without @bot.");
-      } catch {}
-      return;
-    }
-    if (trimmed === "/mention-on") {
-      ctx.dispatcher.setMentionRequired?.(chatId, true);
-      try {
-        await ctx.channel.sendReply(chatId, "✅ Mention requirement enabled. @bot is required again.");
-      } catch {}
-      return;
-    }
-  }
-
   // Download media resources (images, files) to temp dir
   const resources = extractResourceKeys(msgType, message.content || "{}");
   if (resources.length > 0) {

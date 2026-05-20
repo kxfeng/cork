@@ -156,4 +156,38 @@ describe("Cork Integration Tests (commands)", () => {
     expect(reply.content).toContain("Workspace:");
     expect(reply.content).toContain("Claude context:");
   }, 30000);
+
+  // Regression for the "Watchdog Modification" group bug: the first message
+  // is /mention-off. Previously setMentionRequired silently no-op'd (no
+  // session record existed yet), so the ✅ reply lied — the setting never
+  // persisted and the next non-@bot message stayed blocked. Now ensureSession
+  // runs before handleCommand, so the meta exists and gets saved.
+  it("/mention-off on a fresh group persists mentionRequired=false", async () => {
+    const config = makeConfig(tempDir);
+    daemon = new CorkDaemon(config, [channel], sockPath);
+    await daemon.start();
+
+    await channel.injectMessage({
+      text: "/mention-off",
+      chatId: "test-chat-mentionoff",
+      chatType: "group",
+    });
+
+    const replies = channel.getFinalReplies();
+    expect(replies.length).toBeGreaterThanOrEqual(1);
+    expect(replies[replies.length - 1].content).toContain(
+      "Mention requirement disabled"
+    );
+
+    // Session record should now exist on disk with mentionRequired=false.
+    const sessionFile = path.join(
+      corkHome,
+      "sessions",
+      "lark_test-chat-mentionoff.json"
+    );
+    expect(fs.existsSync(sessionFile)).toBe(true);
+    const data = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    expect(data.mentionRequired).toBe(false);
+    expect(data.chatType).toBe("group");
+  }, 30000);
 });
