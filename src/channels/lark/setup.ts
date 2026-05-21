@@ -221,7 +221,6 @@ export async function runLarkSetup(): Promise<LarkChannelConfig> {
     domain: result.domain,
     owners: result.ownerOpenId ? [result.ownerOpenId] : [],
     ackEmoji: "OnIt",
-    streamingIntervalMs: 500,
     idleTimeoutMin: 0,
   };
 

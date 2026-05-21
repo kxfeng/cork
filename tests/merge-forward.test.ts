@@ -1,16 +1,25 @@
 import { describe, it, expect } from "vitest";
 import { formatMergeForward } from "../src/channels/lark/merge-forward.js";
+import type { FormatChannel } from "../src/channels/lark/message-format.js";
 import type { SubMessageItem } from "../src/channels/lark/client.js";
+
+// Stub channel: every download yields a tiny PNG, so media sub-messages
+// resolve to a real [kind: /path] token instead of <unavailable>.
+const stubChannel: FormatChannel = {
+  async downloadResource() {
+    return { buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]), fileName: undefined };
+  },
+};
 
 describe("formatMergeForward", () => {
   const rootId = "root_msg_001";
 
-  it("returns placeholder for empty items", async () => {
-    const result = await formatMergeForward([], rootId);
-    expect(result).toBe("(empty forwarded messages)");
+  it("returns an empty <forwarded_messages> for empty items", async () => {
+    const result = await formatMergeForward([], rootId, stubChannel);
+    expect(result).toBe("<forwarded_messages>\n</forwarded_messages>");
   });
 
-  it("formats single text message", async () => {
+  it("formats a single text message into a <message> unit", async () => {
     const items: SubMessageItem[] = [
       {
         message_id: "msg_001",
@@ -21,10 +30,10 @@ describe("formatMergeForward", () => {
         sender: { id: "user_1", sender_type: "user" },
       },
     ];
-    const result = await formatMergeForward(items, rootId);
+    const result = await formatMergeForward(items, rootId, stubChannel);
     expect(result).toContain("<forwarded_messages>");
+    expect(result).toContain('<message type="text"');
     expect(result).toContain("hello");
-    expect(result).toContain("user_1");
     expect(result).toContain("</forwarded_messages>");
   });
 
@@ -40,8 +49,8 @@ describe("formatMergeForward", () => {
       },
     ];
     const resolveName = async (id: string) => (id === "user_1" ? "Alice" : "");
-    const result = await formatMergeForward(items, rootId, resolveName);
-    expect(result).toContain("Alice");
+    const result = await formatMergeForward(items, rootId, stubChannel, resolveName);
+    expect(result).toContain('sender="Alice"');
   });
 
   it("handles bot sender with own bot context", async () => {
@@ -55,14 +64,13 @@ describe("formatMergeForward", () => {
         sender: { id: "bot_app_id", sender_type: "app" },
       },
     ];
-    // resolveName must be provided for bot name resolution to trigger
-    const noopResolve = async () => "";
+    const noopResolve = async (): Promise<string> => "";
     const bot = { openId: "bot_open_id", appId: "bot_app_id", name: "MyBot" };
-    const result = await formatMergeForward(items, rootId, noopResolve, bot);
-    expect(result).toContain("MyBot");
+    const result = await formatMergeForward(items, rootId, stubChannel, noopResolve, bot);
+    expect(result).toContain('sender="MyBot"');
   });
 
-  it("labels unknown bot as Bot", async () => {
+  it("labels an unknown bot as Bot", async () => {
     const items: SubMessageItem[] = [
       {
         message_id: "msg_001",
@@ -73,10 +81,10 @@ describe("formatMergeForward", () => {
         sender: { id: "other_bot", sender_type: "app" },
       },
     ];
-    const noopResolve = async () => "";
+    const noopResolve = async (): Promise<string> => "";
     const bot = { openId: "my_bot", appId: "my_app", name: "MyBot" };
-    const result = await formatMergeForward(items, rootId, noopResolve, bot);
-    expect(result).toContain("Bot");
+    const result = await formatMergeForward(items, rootId, stubChannel, noopResolve, bot);
+    expect(result).toContain('sender="Bot"');
     expect(result).not.toContain("MyBot");
   });
 
@@ -99,10 +107,8 @@ describe("formatMergeForward", () => {
         sender: { id: "user_1" },
       },
     ];
-    const result = await formatMergeForward(items, rootId);
-    const firstIdx = result.indexOf("first");
-    const secondIdx = result.indexOf("second");
-    expect(firstIdx).toBeLessThan(secondIdx);
+    const result = await formatMergeForward(items, rootId, stubChannel);
+    expect(result.indexOf("first")).toBeLessThan(result.indexOf("second"));
   });
 
   it("formats nested merge_forward recursively", async () => {
@@ -124,14 +130,14 @@ describe("formatMergeForward", () => {
         sender: { id: "user_2" },
       },
     ];
-    const result = await formatMergeForward(items, rootId);
+    const result = await formatMergeForward(items, rootId, stubChannel);
     expect(result).toContain("nested msg");
-    // Should have nested forwarded_messages tags
+    expect(result).toContain('<message type="merge_forward"');
     const count = (result.match(/<forwarded_messages>/g) || []).length;
     expect(count).toBeGreaterThanOrEqual(2);
   });
 
-  it("handles various message types", async () => {
+  it("downloads forwarded media, falling back to the outer forward id", async () => {
     const items: SubMessageItem[] = [
       {
         message_id: "msg_img",
@@ -150,12 +156,24 @@ describe("formatMergeForward", () => {
         sender: { id: "user_1" },
       },
     ];
-    const result = await formatMergeForward(items, rootId);
-    expect(result).toContain("(image)");
-    expect(result).toContain("(file: doc.pdf)");
+    // Stub: the sub-message ids fail (as Lark does when the forwarded
+    // original is inaccessible); only the outer forward id works.
+    const forwardOnlyChannel: FormatChannel = {
+      async downloadResource(messageId) {
+        if (messageId !== rootId) throw new Error("File not in msg");
+        return { buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]), fileName: undefined };
+      },
+    };
+    const result = await formatMergeForward(items, rootId, forwardOnlyChannel);
+    expect(result).toContain("[image: ");
+    expect(result).toContain("[file: ");
+    expect(result).toContain("doc.pdf");
+    // Fell back to the outer forward id → saved path is prefixed with rootId.
+    expect(result).toContain(`${rootId}_`);
+    expect(result).not.toContain("<unavailable>");
   });
 
-  it("skips root message from items", async () => {
+  it("skips the root message from items", async () => {
     const items: SubMessageItem[] = [
       {
         message_id: rootId,
@@ -172,7 +190,7 @@ describe("formatMergeForward", () => {
         sender: { id: "user_1" },
       },
     ];
-    const result = await formatMergeForward(items, rootId);
+    const result = await formatMergeForward(items, rootId, stubChannel);
     expect(result).toContain("child msg");
   });
 });

@@ -1,5 +1,10 @@
+import { convertCard, extractCardImageKeys } from "./card-converter.js";
+
 export interface ResourceKey {
+  /** Resource type for the Lark download API (audio/video download as "file"). */
   type: "image" | "file";
+  /** Display kind, used to build the `[kind: path]` token. */
+  kind: "image" | "file" | "audio" | "video";
   fileKey: string;
   fileName?: string;
 }
@@ -16,28 +21,34 @@ export function extractResourceKeys(
     switch (msgType) {
       case "image":
         if (content.image_key) {
-          return [{ type: "image", fileKey: content.image_key }];
+          return [{ type: "image", kind: "image", fileKey: content.image_key }];
         }
         break;
       case "file":
         if (content.file_key) {
-          return [{ type: "file", fileKey: content.file_key, fileName: content.file_name }];
+          return [{ type: "file", kind: "file", fileKey: content.file_key, fileName: content.file_name }];
         }
         break;
       case "audio":
         if (content.file_key) {
-          return [{ type: "file", fileKey: content.file_key, fileName: content.file_name || "audio.opus" }];
+          return [{ type: "file", kind: "audio", fileKey: content.file_key, fileName: content.file_name || "audio.opus" }];
         }
         break;
       case "media":
         if (content.file_key) {
-          return [{ type: "file", fileKey: content.file_key, fileName: content.file_name }];
+          return [{ type: "file", kind: "video", fileKey: content.file_key, fileName: content.file_name }];
         }
         break;
       case "post": {
         const images = extractPostImages(content);
-        return images.map((key) => ({ type: "image" as const, fileKey: key }));
+        return images.map((key) => ({ type: "image" as const, kind: "image" as const, fileKey: key }));
       }
+      case "interactive":
+        return extractCardImageKeys(rawContent).map((key) => ({
+          type: "image" as const,
+          kind: "image" as const,
+          fileKey: key,
+        }));
     }
   } catch {}
   return [];
@@ -91,28 +102,28 @@ export function parseMessageContent(
       case "post":
         return extractPostText(content);
       case "image":
-        return "(image)";
+        return "[image]";
       case "file":
-        return `(file: ${content.file_name || "unknown"})`;
+        return `[file: ${content.file_name || "unknown"}]`;
       case "audio":
-        return "(audio message)";
+        return "[audio]";
       case "media":
-        return `(video: ${content.file_name || "unknown"})`;
+        return `[video: ${content.file_name || "unknown"}]`;
       case "sticker":
-        return "(sticker)";
+        return "[sticker]";
       case "interactive":
-        return extractCardText(content);
+        return convertCard(rawContent);
       case "share_chat":
-        return `(shared chat: ${content.chat_name || content.chat_id || "unknown"})`;
+        return `[shared chat: ${content.chat_name || content.chat_id || "unknown"}]`;
       case "share_user":
-        return `(shared user: ${content.user_id || "unknown"})`;
+        return `[shared user: ${content.user_id || "unknown"}]`;
       case "location":
-        return `(location: ${content.name || "unknown"})`;
+        return `[location: ${content.name || "unknown"}]`;
       default:
-        return `(${msgType} message)`;
+        return `[unsupported message: ${msgType}]`;
     }
   } catch {
-    return `(${msgType} message)`;
+    return `[unsupported message: ${msgType}]`;
   }
 }
 
@@ -142,7 +153,7 @@ function extractPostText(content: Record<string, unknown>): string {
     parts.unshift(content.title);
   }
 
-  return parts.join("\n").trim() || "(post message)";
+  return parts.join("\n").trim() || "[post]";
 }
 
 function collectPostLines(blocks: unknown[], parts: string[]): void {
@@ -157,88 +168,12 @@ function collectPostLines(blocks: unknown[], parts: string[]): void {
       if (item.tag === "a" && typeof item.href === "string") {
         lineParts.push(item.href);
       }
-      if (item.tag === "img") lineParts.push("(image)");
+      // Emit an [image: <key>] marker; formatLeafContent swaps in the
+      // downloaded local path (same scheme as card images).
+      if (item.tag === "img" && typeof item.image_key === "string") {
+        lineParts.push(`[image: ${item.image_key}]`);
+      }
     }
     if (lineParts.length > 0) parts.push(lineParts.join(""));
-  }
-}
-
-function extractCardText(content: Record<string, unknown>): string {
-  const parts: string[] = [];
-
-  // Header title
-  const header = content.header as Record<string, unknown> | undefined;
-  if (header) {
-    const title = header.title as Record<string, unknown> | undefined;
-    if (title && typeof title.content === "string") {
-      parts.push(title.content);
-    }
-  }
-
-  // v2: body.elements
-  const body = content.body as Record<string, unknown> | undefined;
-  if (body && Array.isArray(body.elements)) {
-    collectCardElements(body.elements, parts);
-  }
-
-  // v1: top-level elements
-  if (Array.isArray(content.elements)) {
-    for (const item of content.elements) {
-      if (Array.isArray(item)) {
-        collectCardElements(item, parts);
-      } else {
-        collectCardElements([item], parts);
-      }
-    }
-  }
-
-  return parts.join("\n").trim() || "(card message)";
-}
-
-function collectCardElements(elements: unknown[], parts: string[]): void {
-  for (const el of elements) {
-    if (!el || typeof el !== "object") continue;
-    const node = el as Record<string, unknown>;
-
-    switch (node.tag) {
-      case "markdown":
-      case "plain_text":
-      case "lark_md":
-        if (typeof node.content === "string") parts.push(node.content);
-        break;
-      case "div": {
-        const divText = node.text as Record<string, unknown> | undefined;
-        if (divText && typeof divText.content === "string") {
-          parts.push(divText.content);
-        }
-        if (Array.isArray(node.fields)) {
-          for (const field of node.fields) {
-            if (field && typeof field === "object") {
-              const f = field as Record<string, unknown>;
-              const ft = f.text as Record<string, unknown> | undefined;
-              if (ft && typeof ft.content === "string") parts.push(ft.content);
-            }
-          }
-        }
-        break;
-      }
-      case "column_set":
-        if (Array.isArray(node.columns)) {
-          for (const col of node.columns) {
-            if (col && typeof col === "object") {
-              const c = col as Record<string, unknown>;
-              if (Array.isArray(c.elements)) {
-                collectCardElements(c.elements, parts);
-              }
-            }
-          }
-        }
-        break;
-      default:
-        if (Array.isArray(node.elements)) {
-          collectCardElements(node.elements, parts);
-        }
-        break;
-    }
   }
 }

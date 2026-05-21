@@ -1,30 +1,25 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Resolver } from "node:dns/promises";
 import { getLogger } from "../../logger.js";
-import type {
-  Channel,
-  Dispatcher,
-  ReplyOptions,
-  ReplyResult,
-} from "../types.js";
+import type { Channel, Dispatcher, ReplyResult } from "../types.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import {
   createLarkClient,
   createSdkLogger,
   sendMessage,
-  updateMessage,
   addReaction as larkAddReaction,
   removeReaction as larkRemoveReaction,
   getChatName as larkGetChatName,
   fetchSubMessages as larkFetchSubMessages,
   fetchMessage as larkFetchMessage,
+  fetchCardContent as larkFetchCardContent,
   downloadMessageResource as larkDownloadResource,
   getBotInfo,
   getUserName as larkGetUserName,
   type SubMessageItem,
   type FetchedMessage,
 } from "./client.js";
-import { buildMarkdownCard, buildPostContent } from "./card.js";
+import { buildPostContent } from "./card.js";
 import { createEventDispatcher, clearStaleBuffers } from "./events.js";
 
 const logger = getLogger("lark-channel");
@@ -222,31 +217,8 @@ export class LarkChannel implements Channel {
     }
   }
 
-  async sendReply(
-    chatId: string,
-    content: string,
-    opts?: ReplyOptions
-  ): Promise<ReplyResult> {
-    if (opts?.updateMessageId) {
-      // Update existing card
-      const cardContent = buildMarkdownCard(content);
-      await updateMessage(this.client, opts.updateMessageId, cardContent);
-      return { messageId: opts.updateMessageId };
-    }
-
-    if (opts?.streaming) {
-      // Create new streaming card
-      const cardContent = buildMarkdownCard(content);
-      const messageId = await sendMessage(
-        this.client,
-        chatId,
-        "interactive",
-        cardContent
-      );
-      return { messageId };
-    }
-
-    // Short reply: use post rich text
+  async sendReply(chatId: string, content: string): Promise<ReplyResult> {
+    // Every channel reply is sent as a Feishu post rich-text message.
     const postContent = buildPostContent(content);
     const messageId = await sendMessage(this.client, chatId, "post", postContent);
     return { messageId };
@@ -278,6 +250,10 @@ export class LarkChannel implements Channel {
 
   async fetchMessage(messageId: string): Promise<FetchedMessage | null> {
     return larkFetchMessage(this.client, messageId);
+  }
+
+  async fetchCardContent(messageId: string): Promise<string> {
+    return larkFetchCardContent(this.client, messageId);
   }
 
   async getUserName(openId: string): Promise<string> {

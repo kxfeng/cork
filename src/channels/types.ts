@@ -7,13 +7,6 @@ export interface IncomingMessage {
   chatName?: string;
 }
 
-export interface ReplyOptions {
-  /** If set, update this message instead of creating a new one */
-  updateMessageId?: string;
-  /** Whether this is a streaming (card) reply */
-  streaming?: boolean;
-}
-
 export interface ReplyResult {
   messageId: string;
 }
@@ -42,11 +35,7 @@ export interface Channel {
   readonly name: string;
   start(dispatcher: Dispatcher): Promise<void>;
   stop(): Promise<void>;
-  sendReply(
-    chatId: string,
-    content: string,
-    opts?: ReplyOptions
-  ): Promise<ReplyResult>;
+  sendReply(chatId: string, content: string): Promise<ReplyResult>;
   addReaction(
     chatId: string,
     messageId: string,

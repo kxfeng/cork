@@ -1,4 +1,10 @@
 import type { SubMessageItem } from "./client.js";
+import {
+  formatLeafContent,
+  wrapAsMessage,
+  formatTime,
+  type FormatChannel,
+} from "./message-format.js";
 
 export type NameResolver = (openId: string) => Promise<string>;
 
@@ -8,22 +14,27 @@ export interface BotContext {
   name: string;
 }
 
+const EMPTY_FORWARD = "<forwarded_messages>\n</forwarded_messages>";
+
 /**
- * Format merge_forward sub-messages into readable text.
+ * Format merge_forward sub-messages into the channel message format.
  *
- * Builds a tree from the flat API response (using upper_message_id)
- * and recursively formats it. Only one API call is needed regardless
- * of nesting depth since the API returns ALL nested items.
+ * Each sub-message becomes a `<message type sender time>…</message>` unit,
+ * and the whole bundle is wrapped in `<forwarded_messages>`. Nested forwards
+ * recurse through the same tree (built from `upper_message_id`) with no extra
+ * API calls. Media inside a sub-message is downloaded via that sub-message's
+ * own `message_id`.
  */
 export async function formatMergeForward(
   items: SubMessageItem[],
   rootMessageId: string,
+  channel: FormatChannel,
   resolveName?: NameResolver,
   bot?: BotContext
 ): Promise<string> {
-  if (items.length === 0) return "(empty forwarded messages)";
+  if (items.length === 0) return EMPTY_FORWARD;
 
-  // Collect unique sender IDs and resolve names in batch
+  // Collect unique sender IDs and resolve names in batch.
   const nameMap = new Map<string, string>();
   if (resolveName) {
     const senderIds = new Set<string>();
@@ -31,18 +42,15 @@ export async function formatMergeForward(
     for (const item of items) {
       const sid = item.sender?.id;
       if (!sid) continue;
-      if (item.sender?.sender_type === "app") {
-        botIds.add(sid);
-      } else {
-        senderIds.add(sid);
-      }
+      if (item.sender?.sender_type === "app") botIds.add(sid);
+      else senderIds.add(sid);
     }
-    // Bot senders: current bot uses its name, others show "bot"
+    // Bot senders: the current bot uses its name, others show "Bot".
     for (const sid of botIds) {
       const isOwnBot = bot && (sid === bot.openId || sid === bot.appId);
       nameMap.set(sid, isOwnBot ? bot.name : "Bot");
     }
-    // User senders: resolve names via API
+    // User senders: resolve names via API.
     await Promise.all(
       [...senderIds].map(async (sid) => {
         const name = await resolveName(sid);
@@ -52,7 +60,10 @@ export async function formatMergeForward(
   }
 
   const childrenMap = buildChildrenMap(items, rootMessageId);
-  return formatSubTree(rootMessageId, childrenMap, nameMap);
+  // rootMessageId is the outer forward the bot received — it's threaded
+  // through as the entry-message id, a media-download candidate for resources
+  // nested anywhere in the bundle (however deep).
+  return formatSubTree(rootMessageId, childrenMap, nameMap, channel, rootMessageId);
 }
 
 function buildChildrenMap(
@@ -65,7 +76,6 @@ function buildChildrenMap(
     if (item.message_id === rootMessageId && !item.upper_message_id) {
       continue;
     }
-
     const parentId = item.upper_message_id || rootMessageId;
     let children = map.get(parentId);
     if (!children) {
@@ -75,7 +85,7 @@ function buildChildrenMap(
     children.push(item);
   }
 
-  // Sort by create_time ascending
+  // Sort each sibling group by create_time ascending.
   for (const children of map.values()) {
     children.sort((a, b) => {
       const ta = parseInt(a.create_time || "0", 10);
@@ -87,108 +97,46 @@ function buildChildrenMap(
   return map;
 }
 
-function formatSubTree(
+async function formatSubTree(
   parentId: string,
   childrenMap: Map<string, SubMessageItem[]>,
-  nameMap: Map<string, string>
-): string {
+  nameMap: Map<string, string>,
+  channel: FormatChannel,
+  entryMessageId: string
+): Promise<string> {
   const children = childrenMap.get(parentId);
-  if (!children || children.length === 0) return "(empty forwarded messages)";
+  if (!children || children.length === 0) return EMPTY_FORWARD;
 
   const parts: string[] = [];
-
   for (const item of children) {
     const msgType = item.msg_type || "unknown";
-    const senderId = item.sender?.id || "unknown";
-    const senderName = nameMap.get(senderId) || senderId;
-    const createTime = parseInt(item.create_time || "0", 10);
-    const timestamp = createTime > 0 ? formatTimestamp(createTime) : "unknown";
+    const senderId = item.sender?.id || "";
+    const senderName = nameMap.get(senderId) || senderId || "unknown";
+    const time = formatTime(parseInt(item.create_time || "0", 10));
 
     let content: string;
-
     if (msgType === "merge_forward") {
-      // Recurse into nested merge_forward via tree (no extra API call)
+      // Nested forward — recurse through the same tree, no extra API call.
       content = item.message_id
-        ? formatSubTree(item.message_id, childrenMap, nameMap)
-        : "(empty forwarded messages)";
+        ? await formatSubTree(item.message_id, childrenMap, nameMap, channel, entryMessageId)
+        : EMPTY_FORWARD;
     } else {
-      content = extractTextContent(item);
+      // entryMessageId (the outer forward the bot received) is passed as a
+      // media-download candidate alongside the sub-message's own id — see
+      // formatLeafContent / downloadMedia for the try-order.
+      content = await formatLeafContent(
+        channel,
+        {
+          messageId: item.message_id || "",
+          msgType,
+          content: item.body?.content || "{}",
+        },
+        entryMessageId
+      );
     }
 
-    parts.push(`[${timestamp}] ${senderName}:\n    ${content}`);
+    parts.push(wrapAsMessage({ type: msgType, sender: senderName, time }, content));
   }
 
   return `<forwarded_messages>\n${parts.join("\n")}\n</forwarded_messages>`;
-}
-
-function extractTextContent(item: SubMessageItem): string {
-  const rawContent = item.body?.content || "{}";
-  const msgType = item.msg_type || "unknown";
-
-  try {
-    const parsed = JSON.parse(rawContent);
-    switch (msgType) {
-      case "text":
-        return parsed.text || "(empty)";
-      case "post":
-        return extractPostText(parsed);
-      case "image":
-        return "(image)";
-      case "file":
-        return `(file: ${parsed.file_name || "unknown"})`;
-      case "audio":
-        return "(audio)";
-      case "media":
-        return "(video)";
-      case "sticker":
-        return "(sticker)";
-      case "interactive":
-        return "(card message)";
-      default:
-        return `(${msgType})`;
-    }
-  } catch {
-    return `(${msgType})`;
-  }
-}
-
-function extractPostText(content: Record<string, unknown>): string {
-  const parts: string[] = [];
-
-  // Flat structure: content.content
-  if (Array.isArray(content.content)) {
-    collectPostLines(content.content, parts);
-  }
-
-  // Nested structure: content.post.{locale}.content
-  const post = content.post;
-  if (parts.length === 0 && post && typeof post === "object") {
-    for (const locale of Object.values(post as Record<string, unknown>)) {
-      const rec = locale as { content?: unknown };
-      if (Array.isArray(rec.content)) {
-        collectPostLines(rec.content, parts);
-        if (parts.length > 0) break;
-      }
-    }
-  }
-
-  return parts.join(" ").trim() || "(post message)";
-}
-
-function collectPostLines(blocks: unknown[], parts: string[]): void {
-  for (const line of blocks) {
-    if (!Array.isArray(line)) continue;
-    for (const node of line) {
-      if (!node || typeof node !== "object") continue;
-      const item = node as Record<string, unknown>;
-      if (typeof item.text === "string") parts.push(item.text);
-      if (typeof item.user_name === "string") parts.push(`@${item.user_name}`);
-    }
-  }
-}
-
-function formatTimestamp(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }

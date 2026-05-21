@@ -1,12 +1,10 @@
 import * as lark from "@larksuiteoapi/node-sdk";
-import fs from "node:fs";
-import path from "node:path";
-import os from "node:os";
 import type { Dispatcher, IncomingMessage } from "../types.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward } from "./merge-forward.js";
-import { parseMessageContent, extractResourceKeys } from "./content.js";
+import { parseMessageContent } from "./content.js";
+import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
 
@@ -137,12 +135,6 @@ function truncate(text: string, maxLen = 80): string {
 function formatCreateTime(ms: number): string {
   if (ms <= 0) return "unknown";
   return new Date(ms).toISOString();
-}
-
-function formatLocalTime(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 /**
@@ -295,19 +287,42 @@ async function handleMessageEvent(
     return name;
   };
 
-  // Parse message content
+  // For interactive (card) messages the WebSocket event only carries a
+  // degraded placeholder; fetch the full raw card body so it can be parsed
+  // and its images downloaded. Falls back to the event content on failure.
+  let effectiveContent = message.content || "{}";
+  if (msgType === "interactive") {
+    const raw = await ctx.channel.fetchCardContent(messageId);
+    if (raw) {
+      effectiveContent = raw;
+    } else {
+      logger.warn("failed to fetch raw card content", logCtx);
+    }
+  }
+
+  const bot = {
+    openId: ctx.channel.botOpenId,
+    appId: ctx.channel.botAppId,
+    name: ctx.channel.botName,
+  };
+
+  // Format the message content per the channel message format. formatLeafContent
+  // and formatMergeForward download any media (images/files) themselves.
   let text = "";
   if (msgType === "merge_forward") {
     try {
       const items = await ctx.channel.fetchSubMessages(messageId);
-      const bot = { openId: ctx.channel.botOpenId, appId: ctx.channel.botAppId, name: ctx.channel.botName };
-      text = await formatMergeForward(items, messageId, resolveName, bot);
+      text = await formatMergeForward(items, messageId, ctx.channel, resolveName, bot);
     } catch (err) {
       logger.warn("failed to fetch merge_forward sub-messages", { ...logCtx, err });
-      text = "(failed to load forwarded messages)";
+      text = "[failed to load forwarded messages]";
     }
   } else {
-    text = parseMessageContent(msgType, message.content || "{}");
+    text = await formatLeafContent(ctx.channel, {
+      messageId,
+      msgType,
+      content: effectiveContent,
+    });
   }
 
   // Strip @bot mentions from text in group chats
@@ -315,57 +330,50 @@ async function handleMessageEvent(
     text = stripMentions(text, mentions);
   }
 
-  // Download media resources (images, files) to temp dir
-  const resources = extractResourceKeys(msgType, message.content || "{}");
-  if (resources.length > 0) {
-    const downloadedPaths = await downloadResources(ctx, messageId, resources);
-    if (downloadedPaths.length > 0) {
-      const fileList = downloadedPaths.map((p) => `[File: ${p}]`).join("\n");
-      text = text ? `${text}\n${fileList}` : fileList;
-    }
-  }
-
-  // Resolve quoted/replied-to message (parent_id)
+  // Resolve quoted/replied-to message (parent_id) into <quote><message>…</message></quote>
   const parentId = message.parent_id || "";
   if (parentId) {
     try {
       const parentMsg = await ctx.channel.fetchMessage(parentId);
       if (parentMsg) {
-        let quotedText: string;
+        let quotedContent: string;
         if (parentMsg.msgType === "merge_forward") {
           try {
             const items = await ctx.channel.fetchSubMessages(parentId);
-            const bot = { openId: ctx.channel.botOpenId, appId: ctx.channel.botAppId, name: ctx.channel.botName };
-            quotedText = await formatMergeForward(items, parentId, resolveName, bot);
+            quotedContent = await formatMergeForward(items, parentId, ctx.channel, resolveName, bot);
           } catch (err) {
             logger.debug("failed to fetch quoted merge_forward sub-messages", { err, parentId });
-            quotedText = "(forwarded messages)";
+            quotedContent = "[forwarded messages]";
           }
         } else {
-          quotedText = parseMessageContent(parentMsg.msgType, parentMsg.content);
+          quotedContent = await formatLeafContent(ctx.channel, {
+            messageId: parentId,
+            msgType: parentMsg.msgType,
+            content: parentMsg.content,
+          });
         }
-        if (quotedText.trim()) {
-          // Resolve sender name for the quoted message
-          let senderLabel = "";
+        if (quotedContent.trim()) {
+          // Resolve sender name for the quoted message.
+          let senderName = "";
           if (parentMsg.senderId) {
             if (parentMsg.senderType === "app") {
               // mget API returns app_id (cli_xxx) as sender.id for bots
               const isOwnBot = parentMsg.senderId === ctx.channel.botOpenId
                 || parentMsg.senderId === ctx.channel.botAppId;
-              senderLabel = isOwnBot ? ctx.channel.botName : "Bot";
+              senderName = isOwnBot ? ctx.channel.botName : "Bot";
             } else {
-              const name = await resolveName(parentMsg.senderId);
-              senderLabel = name || parentMsg.senderId;
+              senderName = (await resolveName(parentMsg.senderId)) || parentMsg.senderId;
             }
           }
-          // Format: > [timestamp] sender:
-          //         > quoted content
-          const timeStr = parentMsg.createTime
-            ? `[${formatLocalTime(parentMsg.createTime)}] `
-            : "";
-          const header = `> ${timeStr}${senderLabel}${senderLabel ? ":" : ""}`;
-          const quotedLines = quotedText.split("\n").map((l: string) => `> ${l}`).join("\n");
-          text = `${header}\n${quotedLines}\n${text}`;
+          const quotedMsg = wrapAsMessage(
+            {
+              type: parentMsg.msgType,
+              sender: senderName || "unknown",
+              time: formatTime(parentMsg.createTime || 0),
+            },
+            quotedContent
+          );
+          text = `<quote>\n${quotedMsg}\n</quote>\n${text}`;
         }
       }
     } catch (err) {
@@ -434,59 +442,3 @@ async function handleMessageEvent(
   }
 }
 
-// Media download temp directory
-const MEDIA_DIR = path.join(os.tmpdir(), "cork-media");
-
-const MIME_TO_EXT: Record<string, string> = {
-  "image/png": ".png",
-  "image/jpeg": ".jpg",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-  "image/bmp": ".bmp",
-  "image/svg+xml": ".svg",
-};
-
-function inferExtension(buffer: Buffer, fileName?: string): string {
-  if (fileName) {
-    const ext = path.extname(fileName);
-    if (ext) return ext;
-  }
-  // Detect from magic bytes
-  if (buffer[0] === 0x89 && buffer[1] === 0x50) return ".png";
-  if (buffer[0] === 0xFF && buffer[1] === 0xD8) return ".jpg";
-  if (buffer[0] === 0x47 && buffer[1] === 0x49) return ".gif";
-  if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) return ".webp";
-  if (buffer[0] === 0x25 && buffer[1] === 0x50 && buffer[2] === 0x44 && buffer[3] === 0x46) return ".pdf";
-  return "";
-}
-
-async function downloadResources(
-  ctx: LarkEventContext,
-  messageId: string,
-  resources: import("./content.js").ResourceKey[]
-): Promise<string[]> {
-  fs.mkdirSync(MEDIA_DIR, { recursive: true });
-  const paths: string[] = [];
-
-  for (const res of resources) {
-    try {
-      const { buffer, fileName } = await ctx.channel.downloadResource(
-        messageId,
-        res.fileKey,
-        res.type
-      );
-
-      const ext = inferExtension(buffer, res.fileName || fileName);
-      const saveName = res.fileName || fileName || `${res.fileKey}${ext}`;
-      const savePath = path.join(MEDIA_DIR, `${messageId}_${saveName}`);
-
-      fs.writeFileSync(savePath, buffer);
-      paths.push(savePath);
-      logger.info("downloaded media resource", { messageId, fileKey: res.fileKey, path: savePath });
-    } catch (err) {
-      logger.warn("failed to download media resource", { err, messageId, fileKey: res.fileKey });
-    }
-  }
-
-  return paths;
-}

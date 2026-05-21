@@ -71,32 +71,32 @@ describe("parseMessageContent", () => {
 
   it("returns placeholder for image message", () => {
     const result = parseMessageContent("image", JSON.stringify({ image_key: "img_xxx" }));
-    expect(result).toBe("(image)");
+    expect(result).toBe("[image]");
   });
 
   it("returns file name for file message", () => {
     const result = parseMessageContent("file", JSON.stringify({ file_key: "f_xxx", file_name: "doc.pdf" }));
-    expect(result).toBe("(file: doc.pdf)");
+    expect(result).toBe("[file: doc.pdf]");
   });
 
   it("returns unknown for file without name", () => {
     const result = parseMessageContent("file", JSON.stringify({ file_key: "f_xxx" }));
-    expect(result).toBe("(file: unknown)");
+    expect(result).toBe("[file: unknown]");
   });
 
   it("returns placeholder for audio message", () => {
     const result = parseMessageContent("audio", JSON.stringify({ file_key: "f_xxx" }));
-    expect(result).toBe("(audio message)");
+    expect(result).toBe("[audio]");
   });
 
   it("returns video info for media message", () => {
     const result = parseMessageContent("media", JSON.stringify({ file_key: "f_xxx", file_name: "video.mp4" }));
-    expect(result).toBe("(video: video.mp4)");
+    expect(result).toBe("[video: video.mp4]");
   });
 
   it("returns placeholder for sticker", () => {
     const result = parseMessageContent("sticker", JSON.stringify({ file_key: "f_xxx" }));
-    expect(result).toBe("(sticker)");
+    expect(result).toBe("[sticker]");
   });
 
   it("parses interactive card v2 with markdown element", () => {
@@ -120,8 +120,10 @@ describe("parseMessageContent", () => {
         ],
       },
     };
+    // Bare card object (no json_card envelope) → legacy fallback path,
+    // which emphasises the header title.
     const result = parseMessageContent("interactive", JSON.stringify(content));
-    expect(result).toBe("Card Title\nbody text");
+    expect(result).toBe("**Card Title**\nbody text");
   });
 
   it("parses interactive card with div element", () => {
@@ -138,27 +140,27 @@ describe("parseMessageContent", () => {
 
   it("parses share_chat message", () => {
     const result = parseMessageContent("share_chat", JSON.stringify({ chat_name: "Test Group" }));
-    expect(result).toBe("(shared chat: Test Group)");
+    expect(result).toBe("[shared chat: Test Group]");
   });
 
   it("parses share_user message", () => {
     const result = parseMessageContent("share_user", JSON.stringify({ user_id: "ou_xxx" }));
-    expect(result).toBe("(shared user: ou_xxx)");
+    expect(result).toBe("[shared user: ou_xxx]");
   });
 
   it("parses location message", () => {
     const result = parseMessageContent("location", JSON.stringify({ name: "Beijing" }));
-    expect(result).toBe("(location: Beijing)");
+    expect(result).toBe("[location: Beijing]");
   });
 
   it("returns placeholder for unknown message type", () => {
     const result = parseMessageContent("unknown_type", "{}");
-    expect(result).toBe("(unknown_type message)");
+    expect(result).toBe("[unsupported message: unknown_type]");
   });
 
   it("handles malformed JSON gracefully", () => {
     const result = parseMessageContent("text", "not json");
-    expect(result).toBe("(text message)");
+    expect(result).toBe("[unsupported message: text]");
   });
 
   it("handles empty content string", () => {
@@ -171,22 +173,22 @@ describe("parseMessageContent", () => {
 describe("extractResourceKeys", () => {
   it("extracts image key", () => {
     const result = extractResourceKeys("image", JSON.stringify({ image_key: "img_xxx" }));
-    expect(result).toEqual([{ type: "image", fileKey: "img_xxx" }]);
+    expect(result).toEqual([{ type: "image", kind: "image", fileKey: "img_xxx" }]);
   });
 
   it("extracts file key with name", () => {
     const result = extractResourceKeys("file", JSON.stringify({ file_key: "f_xxx", file_name: "doc.pdf" }));
-    expect(result).toEqual([{ type: "file", fileKey: "f_xxx", fileName: "doc.pdf" }]);
+    expect(result).toEqual([{ type: "file", kind: "file", fileKey: "f_xxx", fileName: "doc.pdf" }]);
   });
 
   it("extracts audio key with default name", () => {
     const result = extractResourceKeys("audio", JSON.stringify({ file_key: "f_xxx" }));
-    expect(result).toEqual([{ type: "file", fileKey: "f_xxx", fileName: "audio.opus" }]);
+    expect(result).toEqual([{ type: "file", kind: "audio", fileKey: "f_xxx", fileName: "audio.opus" }]);
   });
 
   it("extracts media/video key", () => {
     const result = extractResourceKeys("media", JSON.stringify({ file_key: "f_xxx", file_name: "video.mp4" }));
-    expect(result).toEqual([{ type: "file", fileKey: "f_xxx", fileName: "video.mp4" }]);
+    expect(result).toEqual([{ type: "file", kind: "video", fileKey: "f_xxx", fileName: "video.mp4" }]);
   });
 
   it("extracts images from post content", () => {
@@ -198,8 +200,8 @@ describe("extractResourceKeys", () => {
     };
     const result = extractResourceKeys("post", JSON.stringify(content));
     expect(result).toEqual([
-      { type: "image", fileKey: "img_001" },
-      { type: "image", fileKey: "img_002" },
+      { type: "image", kind: "image", fileKey: "img_001" },
+      { type: "image", kind: "image", fileKey: "img_002" },
     ]);
   });
 
@@ -214,7 +216,7 @@ describe("extractResourceKeys", () => {
       },
     };
     const result = extractResourceKeys("post", JSON.stringify(content));
-    expect(result).toEqual([{ type: "image", fileKey: "img_nested" }]);
+    expect(result).toEqual([{ type: "image", kind: "image", fileKey: "img_nested" }]);
   });
 
   it("returns empty for text message", () => {

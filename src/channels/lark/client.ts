@@ -142,38 +142,6 @@ export async function sendMessage(
   }
 }
 
-export async function updateMessage(
-  client: lark.Client,
-  messageId: string,
-  content: string
-): Promise<void> {
-  try {
-    const res = await client.im.message.patch({
-      path: { message_id: messageId },
-      data: { content },
-    });
-
-    if (res.code !== 0) {
-      logger.warn("lark update message failed", { code: res.code, msg: res.msg });
-    }
-  } catch (err) {
-    if (isContentAuditError(err)) {
-      logger.warn("content audit failed on update, retrying with masked content");
-      let maskedContent = maskSensitiveContent(content);
-      maskedContent = appendMaskedNotice(maskedContent, "interactive");
-      const res = await client.im.message.patch({
-        path: { message_id: messageId },
-        data: { content: maskedContent },
-      });
-      if (res.code !== 0) {
-        logger.warn("lark update message failed after masking", { code: res.code, msg: res.msg });
-      }
-    } else {
-      throw err;
-    }
-  }
-}
-
 export async function getChatName(
   client: lark.Client,
   chatId: string,
@@ -236,6 +204,9 @@ export async function fetchMessage(
       params: {
         message_ids: messageId,
         user_id_type: "open_id",
+        // Return the full card body for interactive messages instead of the
+        // degraded "请升级客户端" placeholder. Ignored for non-card types.
+        card_msg_content_type: "raw_card_content",
       },
     });
 
@@ -256,6 +227,39 @@ export async function fetchMessage(
   }
 }
 
+/**
+ * Fetch the full raw card content of an interactive message.
+ *
+ * The WebSocket event for an `interactive` message only carries a degraded
+ * placeholder ("请升级客户端"); the real card requires this call with
+ * `card_msg_content_type=raw_card_content`. Returns the body content string
+ * (a `{json_card,...}` envelope) or "" on failure.
+ */
+export async function fetchCardContent(
+  client: lark.Client,
+  messageId: string
+): Promise<string> {
+  try {
+    const res = await (client as any).request({
+      method: "GET",
+      url: `/open-apis/im/v1/messages/${messageId}`,
+      params: { card_msg_content_type: "raw_card_content" },
+    });
+    if (res?.code !== 0) {
+      logger.debug("fetchCardContent non-zero code", {
+        code: res?.code,
+        msg: res?.msg,
+        messageId,
+      });
+      return "";
+    }
+    return res?.data?.items?.[0]?.body?.content || "";
+  } catch (err) {
+    logger.debug("failed to fetch card content", { err, messageId });
+    return "";
+  }
+}
+
 export interface SubMessageItem {
   message_id?: string;
   msg_type?: string;
@@ -269,6 +273,9 @@ export async function fetchSubMessages(
   client: lark.Client,
   messageId: string
 ): Promise<SubMessageItem[]> {
+  // Primary fetch is plain: `card_msg_content_type=raw_card_content` makes the
+  // API silently drop thread sub-messages from the bundle, so it must NOT be
+  // used here. This call returns the complete nested tree.
   const res = await (client as any).request({
     method: "GET",
     url: `/open-apis/im/v1/messages/${messageId}`,
@@ -279,7 +286,43 @@ export async function fetchSubMessages(
     throw new Error(`fetch sub-messages failed: ${res?.code} ${res?.msg}`);
   }
 
-  return res?.data?.items ?? [];
+  const items: SubMessageItem[] = res?.data?.items ?? [];
+
+  // If the bundle contains cards, do a second fetch *with*
+  // card_msg_content_type to obtain their raw card bodies, then splice those
+  // into the (complete) item list by message_id. The second fetch's dropped
+  // thread messages don't matter — we only read its interactive items.
+  if (items.some((it) => it.msg_type === "interactive")) {
+    try {
+      const withCard = await (client as any).request({
+        method: "GET",
+        url: `/open-apis/im/v1/messages/${messageId}`,
+        params: {
+          user_id_type: "open_id",
+          card_msg_content_type: "raw_card_content",
+        },
+      });
+      const cardBody = new Map<string, string>();
+      for (const it of (withCard?.data?.items ?? []) as SubMessageItem[]) {
+        if (it.msg_type === "interactive" && it.message_id && it.body?.content) {
+          cardBody.set(it.message_id, it.body.content);
+        }
+      }
+      for (const it of items) {
+        if (it.msg_type === "interactive" && it.message_id) {
+          const raw = cardBody.get(it.message_id);
+          if (raw) {
+            it.body = it.body ?? {};
+            it.body.content = raw;
+          }
+        }
+      }
+    } catch (err) {
+      logger.debug("card content enrichment failed", { err, messageId });
+    }
+  }
+
+  return items;
 }
 
 export async function downloadMessageResource(

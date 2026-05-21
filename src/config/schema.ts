@@ -19,7 +19,6 @@ export interface LarkChannelConfig {
   domain: "feishu" | "lark";
   owners: string[];
   ackEmoji: string;
-  streamingIntervalMs: number;
   idleTimeoutMin: number;
 }
 

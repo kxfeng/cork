@@ -69,7 +69,8 @@ const mcp = new Server(
     },
     instructions:
       "Messages from Lark arrive as <channel source=\"cork-channel\" ...>. " +
-      "Reply using the cork-channel__reply tool. Always reply to every message.",
+      "Reply using the cork-channel__reply tool. Always reply to every message. " +
+      "Reply text supports Markdown — it is rendered as rich text in Lark.",
   }
 );
 
@@ -78,13 +79,15 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "reply",
-      description: "Send a reply message back to the Lark chat",
+      description:
+        "Send a reply message back to the Lark chat. The reply text " +
+        "supports Markdown and is rendered as rich text in Lark.",
       inputSchema: {
         type: "object" as const,
         properties: {
           text: {
             type: "string",
-            description: "The message text to send",
+            description: "The reply text. Markdown is supported.",
           },
         },
         required: ["text"],
