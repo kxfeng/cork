@@ -368,12 +368,15 @@ async function handleMessageEvent(
           const quotedMsg = wrapAsMessage(
             {
               type: parentMsg.msgType,
+              messageId: parentId,
               sender: senderName || "unknown",
               time: formatTime(parentMsg.createTime || 0),
             },
             quotedContent
           );
-          text = `<quote>\n${quotedMsg}\n</quote>\n${text}`;
+          // Current message first, quoted context after — so the Claude Code
+          // UI shows the actual message up top instead of a (truncated) quote.
+          text = `${text}\n<quote>\n${quotedMsg}\n</quote>`;
         }
       }
     } catch (err) {

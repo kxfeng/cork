@@ -35,6 +35,18 @@ export interface FormatChannel {
     fileKey: string,
     type: "image" | "file"
   ): Promise<{ buffer: Buffer; fileName?: string }>;
+  /**
+   * Optional — fetch a single message by id. Used to expand the content of a
+   * quoted parent that is NOT inside the current merge_forward bundle.
+   */
+  fetchMessage?(messageId: string): Promise<{
+    messageId: string;
+    msgType: string;
+    content: string;
+    senderId?: string;
+    senderType?: string;
+    createTime?: number;
+  } | null>;
 }
 
 /** A message unit to format — top-level message, sub-message, or quoted parent. */
@@ -153,11 +165,12 @@ function attrSafe(s: string): string {
  * `<forwarded_messages>` and `<quote>`.
  */
 export function wrapAsMessage(
-  attrs: { type: string; sender: string; time: string },
+  attrs: { type: string; messageId: string; sender: string; time: string },
   content: string
 ): string {
   return (
     `<message type="${attrSafe(attrs.type)}" ` +
+    `message_id="${attrSafe(attrs.messageId)}" ` +
     `sender="${attrSafe(attrs.sender)}" time="${attrSafe(attrs.time)}">\n` +
     `${content}\n</message>`
   );

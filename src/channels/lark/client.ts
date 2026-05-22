@@ -265,6 +265,8 @@ export interface SubMessageItem {
   msg_type?: string;
   create_time?: string;
   upper_message_id?: string;
+  /** The message this one replied to (quote), when it is a reply. */
+  parent_id?: string;
   body?: { content?: string };
   sender?: { id?: string; sender_type?: string };
 }

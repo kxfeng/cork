@@ -193,4 +193,93 @@ describe("formatMergeForward", () => {
     const result = await formatMergeForward(items, rootId, stubChannel);
     expect(result).toContain("child msg");
   });
+
+  it("tags each message with message_id and adds an id-only <quote> for replies", async () => {
+    const items: SubMessageItem[] = [
+      {
+        message_id: "om_root",
+        msg_type: "text",
+        create_time: "1713260400000",
+        upper_message_id: rootId,
+        body: { content: JSON.stringify({ text: "原始问题" }) },
+        sender: { id: "user_1" },
+      },
+      {
+        message_id: "om_reply",
+        msg_type: "text",
+        create_time: "1713260500000",
+        upper_message_id: rootId,
+        parent_id: "om_root",
+        body: { content: JSON.stringify({ text: "这是回复" }) },
+        sender: { id: "user_2" },
+      },
+    ];
+    const result = await formatMergeForward(items, rootId, stubChannel);
+    // Every <message> carries its own message_id.
+    expect(result).toContain('message_id="om_root"');
+    expect(result).toContain('message_id="om_reply"');
+    // The reply carries an id-only <quote> pointing at the parent — no content.
+    expect(result).toContain('<quote message_id="om_root"/>');
+    expect(result).toContain("这是回复");
+    expect(result).toContain("原始问题");
+  });
+
+  it("embeds fetched content for a quote parent outside the bundle", async () => {
+    const items: SubMessageItem[] = [
+      {
+        message_id: "om_reply",
+        msg_type: "text",
+        create_time: "1713260500000",
+        upper_message_id: rootId,
+        parent_id: "om_outside",
+        body: { content: JSON.stringify({ text: "回复一条外部消息" }) },
+        sender: { id: "user_2" },
+      },
+    ];
+    // Parent is not in `items` — channel.fetchMessage supplies its content.
+    const fetchChannel: FormatChannel = {
+      ...stubChannel,
+      async fetchMessage(messageId) {
+        if (messageId !== "om_outside") return null;
+        return {
+          messageId,
+          msgType: "text",
+          content: JSON.stringify({ text: "桶外的原始消息" }),
+          senderId: "user_9",
+          createTime: 1713260400000,
+        };
+      },
+    };
+    const resolveName = async (id: string) => (id === "user_9" ? "Carol" : "");
+    const result = await formatMergeForward(items, rootId, fetchChannel, resolveName);
+    // Out-of-bundle parent → <quote> embeds a full <message> with content.
+    expect(result).toContain("<quote>");
+    expect(result).toContain('message_id="om_outside"');
+    expect(result).toContain("桶外的原始消息");
+    expect(result).toContain('sender="Carol"');
+    // Not the id-only form.
+    expect(result).not.toContain('<quote message_id="om_outside"/>');
+  });
+
+  it("degrades to an id-only quote when the out-of-bundle parent cannot be fetched", async () => {
+    const items: SubMessageItem[] = [
+      {
+        message_id: "om_reply",
+        msg_type: "text",
+        create_time: "1713260500000",
+        upper_message_id: rootId,
+        parent_id: "om_missing",
+        body: { content: JSON.stringify({ text: "回复" }) },
+        sender: { id: "user_2" },
+      },
+    ];
+    const failChannel: FormatChannel = {
+      ...stubChannel,
+      async fetchMessage() {
+        throw new Error("Bot can NOT be out of the chat");
+      },
+    };
+    const result = await formatMergeForward(items, rootId, failChannel);
+    expect(result).toContain('<quote message_id="om_missing"/>');
+  });
 });

@@ -60,10 +60,72 @@ export async function formatMergeForward(
   }
 
   const childrenMap = buildChildrenMap(items, rootMessageId);
-  // rootMessageId is the outer forward the bot received — it's threaded
-  // through as the entry-message id, a media-download candidate for resources
-  // nested anywhere in the bundle (however deep).
-  return formatSubTree(rootMessageId, childrenMap, nameMap, channel, rootMessageId);
+  // Ids present in this bundle — used to decide whether a reply's quoted
+  // parent is in-bundle (reference by id) or outside it (embed fetched content).
+  const idSet = new Set(
+    items.map((it) => it.message_id).filter((id): id is string => !!id)
+  );
+  // rootMessageId is the outer forward the bot received — threaded through as
+  // the entry-message id, a media-download candidate for nested resources.
+  return formatSubTree(
+    rootMessageId,
+    childrenMap,
+    nameMap,
+    channel,
+    rootMessageId,
+    idSet,
+    resolveName
+  );
+}
+
+/**
+ * Render the `<quote>` for a reply sub-message.
+ * - Parent in this same bundle → reference it by id only (it is rendered
+ *   elsewhere in the bundle, identifiable by its message_id attribute).
+ * - Parent outside the bundle → fetch and embed its content (best-effort;
+ *   degrades to an id-only quote if the fetch is unavailable or fails).
+ */
+async function formatQuote(
+  parentId: string,
+  idSet: Set<string>,
+  channel: FormatChannel,
+  resolveName?: NameResolver
+): Promise<string> {
+  if (idSet.has(parentId)) {
+    return `<quote message_id="${parentId}"/>`;
+  }
+  if (!channel.fetchMessage) {
+    return `<quote message_id="${parentId}"/>`;
+  }
+  let parent;
+  try {
+    parent = await channel.fetchMessage(parentId);
+  } catch {
+    parent = null;
+  }
+  // Can't fetch, or parent is itself a forward (don't deep-expand) → id only.
+  if (!parent || parent.msgType === "merge_forward") {
+    return `<quote message_id="${parentId}"/>`;
+  }
+  const content = await formatLeafContent(channel, {
+    messageId: parentId,
+    msgType: parent.msgType,
+    content: parent.content,
+  });
+  let senderName = "unknown";
+  if (parent.senderId) {
+    senderName = (await resolveName?.(parent.senderId)) || parent.senderId;
+  }
+  const inner = wrapAsMessage(
+    {
+      type: parent.msgType,
+      messageId: parentId,
+      sender: senderName,
+      time: formatTime(parent.createTime || 0),
+    },
+    content
+  );
+  return `<quote>\n${inner}\n</quote>`;
 }
 
 function buildChildrenMap(
@@ -102,7 +164,9 @@ async function formatSubTree(
   childrenMap: Map<string, SubMessageItem[]>,
   nameMap: Map<string, string>,
   channel: FormatChannel,
-  entryMessageId: string
+  entryMessageId: string,
+  idSet: Set<string>,
+  resolveName?: NameResolver
 ): Promise<string> {
   const children = childrenMap.get(parentId);
   if (!children || children.length === 0) return EMPTY_FORWARD;
@@ -118,7 +182,15 @@ async function formatSubTree(
     if (msgType === "merge_forward") {
       // Nested forward — recurse through the same tree, no extra API call.
       content = item.message_id
-        ? await formatSubTree(item.message_id, childrenMap, nameMap, channel, entryMessageId)
+        ? await formatSubTree(
+            item.message_id,
+            childrenMap,
+            nameMap,
+            channel,
+            entryMessageId,
+            idSet,
+            resolveName
+          )
         : EMPTY_FORWARD;
     } else {
       // entryMessageId (the outer forward the bot received) is passed as a
@@ -135,7 +207,23 @@ async function formatSubTree(
       );
     }
 
-    parts.push(wrapAsMessage({ type: msgType, sender: senderName, time }, content));
+    // If this sub-message was a reply, append a <quote>: an id-only reference
+    // when the parent is elsewhere in this bundle, embedded content when not.
+    if (item.parent_id) {
+      content = `${content}\n${await formatQuote(item.parent_id, idSet, channel, resolveName)}`;
+    }
+
+    parts.push(
+      wrapAsMessage(
+        {
+          type: msgType,
+          messageId: item.message_id || "",
+          sender: senderName,
+          time,
+        },
+        content
+      )
+    );
   }
 
   return `<forwarded_messages>\n${parts.join("\n")}\n</forwarded_messages>`;
