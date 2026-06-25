@@ -120,8 +120,9 @@ function findOtherCorkProcesses(): { pid: number; command: string }[] {
 
 /**
  * Find orphaned claude processes from previous cork sessions.
- * Matches processes that have cork-specific args (--output-format stream-json)
- * AND whose session-id matches a known cork session.
+ * Matches claude processes carrying cork's development-channel arg
+ * (`server:cork-channel`, only ever added by SessionManager) AND whose
+ * session-id matches a known cork session.
  */
 function findOrphanedClaudeProcesses(): { pid: number; sessionId: string; command: string }[] {
   try {
@@ -130,9 +131,12 @@ function findOrphanedClaudeProcesses(): { pid: number; sessionId: string; comman
 
     const sessionIds = new Set(sessions.map((s) => s.meta.sessionId));
 
-    // Match claude processes with cork-specific argument pattern
+    // Match claude processes spawned by cork — `server:cork-channel` is the
+    // dev-channel marker SessionManager always passes via
+    // `--dangerously-load-development-channels`. It is specific enough to
+    // never collide with user-launched claude.
     const output = execSync(
-      `ps -eo pid,command | grep -E '[c]laude.*--output-format stream-json' || true`,
+      `ps -eo pid,command | grep -E '[c]laude.*server:cork-channel' || true`,
       { encoding: "utf-8" }
     ).trim();
     if (!output) return [];
