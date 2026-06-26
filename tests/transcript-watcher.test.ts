@@ -137,6 +137,10 @@ const turnDurationRow = () =>
     durationMs: 1234,
   });
 
+// A non-assistant marker row claude code writes (e.g. when preparing a
+// fresh request after an error). Not an assistant row, not user input.
+const markerRow = () => JSON.stringify({ type: "last-prompt", leafUuid: "x" });
+
 // --- Test harness ---
 
 let injectCalls: { text: string; senderId: string }[] = [];
@@ -272,12 +276,28 @@ describe("TranscriptWatcher retry scheduling", () => {
 
   it("does NOT retry when claude code self-recovered after the error", () => {
     // Mid-stream error followed by a normal assistant row (claude code
-    // re-requested and continued) → the error is NOT the last assistant row.
+    // re-requested and continued) → the row before turn_duration is not
+    // the error.
     const w = makeWatcher();
     w.ingest(
       `${larkUserRow("ou_user", "do something")}\n` +
         `${midStreamErrorRow()}\n` +
         `${normalAssistantRow("...resumed and finished the task")}\n` +
+        `${turnDurationRow()}\n`
+    );
+    advance(BACKOFF_START_MS * 10);
+    expect(injectCalls).toHaveLength(0);
+  });
+
+  it("does NOT retry when a non-assistant row sits between the error and turn_duration", () => {
+    // Only the row IMMEDIATELY before turn_duration counts. A marker (or any
+    // non-error row) right before turn_duration means the turn did not die
+    // on the error.
+    const w = makeWatcher();
+    w.ingest(
+      `${larkUserRow("ou_user", "do something")}\n` +
+        `${midStreamErrorRow()}\n` +
+        `${markerRow()}\n` +
         `${turnDurationRow()}\n`
     );
     advance(BACKOFF_START_MS * 10);

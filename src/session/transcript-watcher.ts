@@ -9,21 +9,23 @@ import { getLogger, type Logger } from "../logger.js";
  * Detection — the single decisive signal:
  *   At each `{type:"system", subtype:"turn_duration"}` (written at every
  *   turn end, clean or errored — 100% coverage, unlike the Stop hook which
- *   claude code skips on errored turns), check whether the LAST assistant
- *   row of the turn is a mid-stream error (`isApiErrorMessage:true` whose
- *   text contains "Connection closed mid-response").
+ *   claude code skips on errored turns), check whether the row IMMEDIATELY
+ *   before it is a mid-stream error (`isApiErrorMessage:true` whose text
+ *   contains "Connection closed mid-response").
  *
- *   - last assistant row IS the error  → the turn really died on it → retry
- *   - the error has a normal assistant row after it → claude code already
- *     self-recovered (it re-requests after a clean boundary like a
- *     tool_result and continues) → do nothing
+ *   - immediate predecessor IS the error → the turn died right on it → retry
+ *   - anything else immediately before turn_duration (a recovered assistant
+ *     row, a marker, a tool_result, …) → do nothing
+ *
+ *   Verified against real transcripts: a turn truly killed by the error has
+ *   the error row directly followed by turn_duration. When claude code
+ *   self-recovers (it re-requests after a clean boundary like a tool_result
+ *   and continues), other rows sit between the error and turn_duration, so
+ *   the predecessor is no longer the error and we stay out of its way.
  *
  *   This subsumes the older "did it reply / did it work after replying"
- *   heuristics: if claude code resumed on its own, the last assistant row
- *   is the resumed content, not the error, so we stay out of its way. We
- *   only step in when the turn genuinely ended on the error. Whether the
- *   turn replied first is irrelevant — the model knows it already replied
- *   and will continue the interrupted work appropriately.
+ *   heuristics. Whether the turn replied first is irrelevant — the model
+ *   knows it already replied and continues the interrupted work when nudged.
  *
  *   Other API errors (500, 401, "Request timed out", …) are ignored: only
  *   the mid-stream case has the "model produced partial output; ask it to
@@ -103,10 +105,10 @@ export class TranscriptWatcher {
   private buffer = "";
   private watching = false;
 
-  // Whether the most recent assistant row seen is a mid-stream error.
-  // Flips false as soon as any normal assistant row follows (claude code
-  // self-recovered). Read at turn_duration to decide whether to retry.
-  private lastAssistantWasMidStreamError = false;
+  // Whether the immediately preceding row was a mid-stream error. Updated
+  // on every row; read when a turn_duration row arrives to decide whether
+  // the turn died right on the error.
+  private prevRowWasMidStreamError = false;
 
   // Backoff state — survives across turns.
   private lastRetryAt = 0;
@@ -215,32 +217,24 @@ export class TranscriptWatcher {
   }
 
   private handleRow(row: TranscriptRow): void {
+    if (row.type === "system" && row.subtype === "turn_duration") {
+      // Turn ended — retry iff the row right before it was the mid-stream
+      // error. turn_duration itself is not an error, so clear the flag after.
+      if (this.prevRowWasMidStreamError) this.scheduleRetry();
+      this.prevRowWasMidStreamError = false;
+      return;
+    }
+
     if (isFreshUserInput(row)) {
       // New turn started — a real user input also cancels any pending retry
       // (the user is handling it themselves).
-      this.lastAssistantWasMidStreamError = false;
+      this.prevRowWasMidStreamError = false;
       this.cancelPendingRetry("real user input arrived");
       return;
     }
 
-    // Track only assistant rows: a mid-stream error sets the flag; any
-    // normal assistant row after it (claude code self-recovered) clears it.
-    // Non-assistant rows (markers, tool_result) leave the flag untouched.
-    if (row.type === "assistant") {
-      this.lastAssistantWasMidStreamError = isMidStreamErrorRow(row);
-    }
-
-    if (row.type === "system" && row.subtype === "turn_duration") {
-      this.onTurnEnd();
-    }
-  }
-
-  private onTurnEnd(): void {
-    // Retry only when the turn's final assistant row is the mid-stream error
-    // — i.e. claude code did not self-recover. If a normal assistant row
-    // followed the error, it already continued and we stay out of the way.
-    if (!this.lastAssistantWasMidStreamError) return;
-    this.scheduleRetry();
+    // Every other row updates "was the immediately preceding row the error".
+    this.prevRowWasMidStreamError = isMidStreamErrorRow(row);
   }
 
   private scheduleRetry(): void {
