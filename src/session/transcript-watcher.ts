@@ -4,25 +4,36 @@ import { getLogger, type Logger } from "../logger.js";
 
 /**
  * Per-session watcher that tails claude code's JSONL transcript and
- * auto-retries when a turn ends due to a mid-stream API error.
+ * auto-retries when a turn is truly killed by a mid-stream API error.
  *
- * Auto-retry contract:
- *   - Detects `{type:"system", subtype:"turn_duration"}` rows. These are
- *     written at every turn end (clean OR errored) — empirically 100%
- *     coverage, unlike the Stop hook which claude code skips for errored
- *     turns.
- *   - On detection, scans the turn just ended for an assistant row with
- *     `isApiErrorMessage:true` whose text contains "Connection closed
- *     mid-response". Other API errors (500, 401, "Request timed out", …)
- *     are intentionally ignored: only the mid-stream case has the
- *     "model already produced partial output; ask it to continue"
- *     semantics that makes auto-retry safe.
- *   - Skips retry if the same turn already called the cork-channel reply
- *     tool — the user has at least a partial answer; no auto-resume needed.
- *   - Schedules retry with exponential backoff (10s base, doubles within
- *     a 5-min window, capped at 5min, resets after a 5-min quiet period).
- *   - Before retry fires, any real user message arriving in the meantime
- *     cancels the retry and resets backoff state.
+ * Detection — the single decisive signal:
+ *   At each `{type:"system", subtype:"turn_duration"}` (written at every
+ *   turn end, clean or errored — 100% coverage, unlike the Stop hook which
+ *   claude code skips on errored turns), check whether the LAST assistant
+ *   row of the turn is a mid-stream error (`isApiErrorMessage:true` whose
+ *   text contains "Connection closed mid-response").
+ *
+ *   - last assistant row IS the error  → the turn really died on it → retry
+ *   - the error has a normal assistant row after it → claude code already
+ *     self-recovered (it re-requests after a clean boundary like a
+ *     tool_result and continues) → do nothing
+ *
+ *   This subsumes the older "did it reply / did it work after replying"
+ *   heuristics: if claude code resumed on its own, the last assistant row
+ *   is the resumed content, not the error, so we stay out of its way. We
+ *   only step in when the turn genuinely ended on the error. Whether the
+ *   turn replied first is irrelevant — the model knows it already replied
+ *   and will continue the interrupted work appropriately.
+ *
+ *   Other API errors (500, 401, "Request timed out", …) are ignored: only
+ *   the mid-stream case has the "model produced partial output; ask it to
+ *   continue" semantics that makes auto-retry safe.
+ *
+ * Backoff:
+ *   - 10s base, doubles within a 5-min window, capped at 5min, resets to
+ *     10s after a 5-min quiet period.
+ *   - A real user message arriving before the retry fires cancels it and
+ *     resets backoff state.
  *
  * The injected retry message is a synthetic channel notification with
  * sender `cork:watcher`, distinguishable from real Lark users in the
@@ -49,7 +60,6 @@ export const WATCHER_CONSTANTS = {
   BACKOFF_START_MS,
   BACKOFF_MAX_MS,
   BACKOFF_RESET_WINDOW_MS,
-  REPLY_TOOL_NAME,
   WATCHER_SENDER_ID,
   WATCHER_SENDER_MARKER,
   STOP_HOOK_PREFIX,
@@ -93,9 +103,10 @@ export class TranscriptWatcher {
   private buffer = "";
   private watching = false;
 
-  // Reset on each fresh user input (turn boundary).
-  private turnHadReply = false;
-  private turnHadMidStreamError = false;
+  // Whether the most recent assistant row seen is a mid-stream error.
+  // Flips false as soon as any normal assistant row follows (claude code
+  // self-recovered). Read at turn_duration to decide whether to retry.
+  private lastAssistantWasMidStreamError = false;
 
   // Backoff state — survives across turns.
   private lastRetryAt = 0;
@@ -205,16 +216,19 @@ export class TranscriptWatcher {
 
   private handleRow(row: TranscriptRow): void {
     if (isFreshUserInput(row)) {
-      // New turn started — reset turn-local flags. A real user input also
-      // cancels any pending retry (the user is handling it themselves).
-      this.turnHadReply = false;
-      this.turnHadMidStreamError = false;
+      // New turn started — a real user input also cancels any pending retry
+      // (the user is handling it themselves).
+      this.lastAssistantWasMidStreamError = false;
       this.cancelPendingRetry("real user input arrived");
       return;
     }
 
-    if (isReplyToolCallRow(row)) this.turnHadReply = true;
-    if (isMidStreamErrorRow(row)) this.turnHadMidStreamError = true;
+    // Track only assistant rows: a mid-stream error sets the flag; any
+    // normal assistant row after it (claude code self-recovered) clears it.
+    // Non-assistant rows (markers, tool_result) leave the flag untouched.
+    if (row.type === "assistant") {
+      this.lastAssistantWasMidStreamError = isMidStreamErrorRow(row);
+    }
 
     if (row.type === "system" && row.subtype === "turn_duration") {
       this.onTurnEnd();
@@ -222,17 +236,10 @@ export class TranscriptWatcher {
   }
 
   private onTurnEnd(): void {
-    if (!this.turnHadMidStreamError) {
-      // Clean turn end OR a non-mid-stream error (timeout, 5xx, 401, …).
-      // Both are intentionally ignored.
-      return;
-    }
-    if (this.turnHadReply) {
-      this.log.info(
-        "mid-stream error in a turn that already replied — not retrying"
-      );
-      return;
-    }
+    // Retry only when the turn's final assistant row is the mid-stream error
+    // — i.e. claude code did not self-recover. If a normal assistant row
+    // followed the error, it already continued and we stay out of the way.
+    if (!this.lastAssistantWasMidStreamError) return;
     this.scheduleRetry();
   }
 
@@ -326,24 +333,6 @@ export function isMidStreamErrorRow(row: TranscriptRow): boolean {
       typeof (b as { text?: unknown }).text === "string"
     ) {
       if ((b as { text: string }).text.includes(MID_STREAM_MARKER)) return true;
-    }
-  }
-  return false;
-}
-
-/** An assistant row carrying a `mcp__cork-channel__reply` tool_use block. */
-export function isReplyToolCallRow(row: TranscriptRow): boolean {
-  if (row.type !== "assistant") return false;
-  const content = row.message?.content;
-  if (!Array.isArray(content)) return false;
-  for (const b of content) {
-    if (
-      b &&
-      typeof b === "object" &&
-      (b as { type?: string }).type === "tool_use" &&
-      (b as { name?: string }).name === REPLY_TOOL_NAME
-    ) {
-      return true;
     }
   }
   return false;

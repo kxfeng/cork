@@ -3,7 +3,6 @@ import {
   TranscriptWatcher,
   WATCHER_CONSTANTS,
   isMidStreamErrorRow,
-  isReplyToolCallRow,
   isFreshUserInput,
 } from "../src/session/transcript-watcher.js";
 
@@ -120,6 +119,17 @@ const replyToolCallRow = () =>
     },
   });
 
+// A normal (non-error) assistant row — e.g. claude code's self-recovered
+// continuation after a mid-stream error.
+const normalAssistantRow = (text: string) =>
+  JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text }],
+    },
+  });
+
 const turnDurationRow = () =>
   JSON.stringify({
     type: "system",
@@ -178,14 +188,6 @@ describe("TranscriptWatcher pure helpers", () => {
 
   it("isMidStreamErrorRow rejects 500 server_error", () => {
     expect(isMidStreamErrorRow(JSON.parse(fiveHundredErrorRow()))).toBe(false);
-  });
-
-  it("isReplyToolCallRow recognises the cork-channel reply tool", () => {
-    expect(isReplyToolCallRow(JSON.parse(replyToolCallRow()))).toBe(true);
-  });
-
-  it("isReplyToolCallRow rejects an error row", () => {
-    expect(isReplyToolCallRow(JSON.parse(midStreamErrorRow()))).toBe(false);
   });
 
   it("isFreshUserInput accepts a real Lark message (isMeta:true, channel-wrapped)", () => {
@@ -253,12 +255,29 @@ describe("TranscriptWatcher retry scheduling", () => {
     expect(injectCalls).toHaveLength(0);
   });
 
-  it("does NOT retry when the reply tool was called earlier in the same turn", () => {
+  it("DOES retry when a reply happened earlier but the turn still died on the error", () => {
+    // Long task: replied an interim update, then kept working, then the
+    // stream died with no self-recovery. The error is the last assistant row.
+    const w = makeWatcher();
+    w.ingest(
+      `${larkUserRow("ou_user", "do something long")}\n` +
+        `${replyToolCallRow()}\n` +
+        `${normalAssistantRow("still working...")}\n` +
+        `${midStreamErrorRow()}\n` +
+        `${turnDurationRow()}\n`
+    );
+    advance(BACKOFF_START_MS);
+    expect(injectCalls).toHaveLength(1);
+  });
+
+  it("does NOT retry when claude code self-recovered after the error", () => {
+    // Mid-stream error followed by a normal assistant row (claude code
+    // re-requested and continued) → the error is NOT the last assistant row.
     const w = makeWatcher();
     w.ingest(
       `${larkUserRow("ou_user", "do something")}\n` +
-        `${replyToolCallRow()}\n` +
         `${midStreamErrorRow()}\n` +
+        `${normalAssistantRow("...resumed and finished the task")}\n` +
         `${turnDurationRow()}\n`
     );
     advance(BACKOFF_START_MS * 10);
