@@ -18,6 +18,7 @@ import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
+import { TranscriptWatcher } from "./transcript-watcher.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
@@ -50,6 +51,8 @@ interface ActiveSession {
   channelRegistered: boolean;
   dialogDismissed: boolean;
   pendingReactions: PendingReaction[];
+  /** Per-session transcript watcher — created at spawn, stopped at killTmux. */
+  transcriptWatcher?: TranscriptWatcher;
 }
 
 /**
@@ -244,6 +247,36 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Inject a synthetic user message (e.g. an auto-retry from the
+   * transcript watcher) into the session over the same UDS path a real
+   * Lark message would take, bypassing the meta updates and the queue.
+   * Returns false if the session is not currently connected — the caller
+   * (typically the watcher) should treat that as "drop silently".
+   */
+  dispatchSystemMessage(chatId: string, text: string, senderId: string): boolean {
+    const key = sessionKey("lark", chatId);
+    const session = this.sessions.get(key);
+    if (!session || session.state !== "connected") {
+      logger.info("system message skipped — session not connected", {
+        key,
+        state: session?.state,
+      });
+      return false;
+    }
+    const udsMsg: QueuedMessage = {
+      chatId,
+      content: text,
+      meta: {
+        chatId,
+        senderId,
+        messageId: `cork-watcher-${Date.now()}`,
+      },
+    };
+    this.sendToChannel(session, udsMsg);
+    return true;
+  }
+
   createNewSession(chatId: string, workspace?: string): SessionMeta {
     const key = sessionKey("lark", chatId);
     const ws = workspace
@@ -352,6 +385,18 @@ export class SessionManager extends EventEmitter {
     // dialog. Sends Enter while the dialog text is on screen and stops once
     // it disappears, so we don't fire stray Enters into the main prompt.
     this.pollAndDismissChannelDialog(session, tmuxName);
+
+    // Start the transcript watcher for this session. fs.watchFile handles
+    // the not-yet-existing transcript gracefully (claude code creates it
+    // after the first row); watcher reads only rows written from now on.
+    session.transcriptWatcher = new TranscriptWatcher({
+      workspace: meta.workspace,
+      sessionId: meta.sessionId,
+      sessionKey: key,
+      inject: (text, senderId) =>
+        this.dispatchSystemMessage(meta.chatId, text, senderId),
+    });
+    session.transcriptWatcher.start();
 
     // Starting timeout
     session.startingTimer = setTimeout(() => {
@@ -596,6 +641,15 @@ export class SessionManager extends EventEmitter {
   }
 
   private killTmux(key: string): void {
+    // Tear down the watcher first — the underlying jsonl will stop being
+    // written to as soon as claude code exits, but the poll is harmless
+    // either way. Stop here so the timer + fs handle are released.
+    const session = this.sessions.get(key);
+    if (session?.transcriptWatcher) {
+      session.transcriptWatcher.stop();
+      session.transcriptWatcher = undefined;
+    }
+
     const tmuxName = `${TMUX_PREFIX}${key}`;
     try {
       execSync(`tmux kill-session -t "${tmuxName}"`, { stdio: "pipe" });
