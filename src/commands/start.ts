@@ -7,6 +7,7 @@ import { setupSignalHandlers } from "../daemon/signal.js";
 import { LarkChannel } from "../channels/lark/index.js";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
+import { TMUX_PREFIX } from "../session/manager.js";
 import type { Channel } from "../channels/types.js";
 import { enableLogFile, getLogger } from "../logger.js";
 
@@ -119,43 +120,40 @@ function findOtherCorkProcesses(): { pid: number; command: string }[] {
 }
 
 /**
- * Find orphaned claude processes from previous cork sessions.
- * Matches claude processes carrying cork's development-channel arg
- * (`server:cork-channel`, only ever added by SessionManager) AND whose
- * session-id matches a known cork session.
+ * Find orphaned tmux sessions left behind by a previous daemon that died
+ * without graceful shutdown (e.g. SIGKILL). Returns the tmux session names
+ * to reap.
+ *
+ * A normal `cork stop`/`restart` sends SIGTERM; the daemon's handler tears
+ * each session down via `tmux kill-session` using its in-memory table.
+ * After a SIGKILL that table is gone, so on the next startup we rebuild the
+ * set of *our* session names from the persisted metas and intersect it with
+ * what tmux currently reports. The name match (only `cork_<known-key>`)
+ * guarantees we never touch another user's or a non-cork tmux session.
+ *
+ * Reaping is done with the same `tmux kill-session` mechanism as the
+ * graceful path — killing the session closes its claude pane; when the last
+ * session goes, the tmux server exits on its own.
  */
-function findOrphanedClaudeProcesses(): { pid: number; sessionId: string; command: string }[] {
+function findOrphanedTmuxSessions(): string[] {
   try {
     const sessions = listSessions();
     if (sessions.length === 0) return [];
 
-    const sessionIds = new Set(sessions.map((s) => s.meta.sessionId));
+    const known = new Set(sessions.map((s) => `${TMUX_PREFIX}${s.key}`));
 
-    // Match claude processes spawned by cork — `server:cork-channel` is the
-    // dev-channel marker SessionManager always passes via
-    // `--dangerously-load-development-channels`. It is specific enough to
-    // never collide with user-launched claude.
+    // `tmux ls` exits non-zero when no server is running — `|| true` keeps
+    // execSync from throwing in that (normal) case.
     const output = execSync(
-      `ps -eo pid,command | grep -E '[c]laude.*server:cork-channel' || true`,
+      `tmux ls -F '#{session_name}' 2>/dev/null || true`,
       { encoding: "utf-8" }
     ).trim();
     if (!output) return [];
 
-    const orphans: { pid: number; sessionId: string; command: string }[] = [];
-    for (const line of output.split("\n")) {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (!match) continue;
-      const pid = parseInt(match[1], 10);
-      const cmd = match[2];
-      // Must also match a known cork session ID
-      for (const sid of sessionIds) {
-        if (cmd.includes(sid)) {
-          orphans.push({ pid, sessionId: sid, command: cmd });
-          break;
-        }
-      }
-    }
-    return orphans;
+    return output
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((name) => known.has(name));
   } catch {
     return [];
   }
@@ -194,14 +192,16 @@ export async function startForeground(): Promise<void> {
     }
   }
 
-  // Kill orphaned claude processes from previous cork sessions
-  const orphans = findOrphanedClaudeProcesses();
-  for (const orphan of orphans) {
+  // Reap orphaned tmux sessions from a previous daemon that was SIGKILL'd
+  // (graceful shutdown already tears these down). Same mechanism as the
+  // graceful path: tmux kill-session, which closes the claude pane.
+  const orphanSessions = findOrphanedTmuxSessions();
+  for (const name of orphanSessions) {
     try {
-      process.kill(orphan.pid, "SIGTERM");
-      console.log(`Killed orphaned claude process (pid: ${orphan.pid}, session: ${orphan.sessionId})`);
+      execSync(`tmux kill-session -t "${name}"`, { stdio: "pipe" });
+      console.log(`Killed orphaned tmux session: ${name}`);
     } catch {
-      // Process already gone
+      // Session may already be gone
     }
   }
 

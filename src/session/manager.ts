@@ -24,7 +24,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
 
 const STARTING_TIMEOUT_MS = 30_000;
-const TMUX_PREFIX = "cork_";
+export const TMUX_PREFIX = "cork_";
 
 type SessionState = "inactive" | "starting" | "connected";
 
