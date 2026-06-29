@@ -2,6 +2,7 @@ import type { Channel, IncomingMessage } from "../channels/types.js";
 import type { SessionManager } from "../session/manager.js";
 import { resolveWorkspacePath } from "../config/loader.js";
 import { readLatestUsage, formatModelContext } from "../session/transcript.js";
+import { TMUX_PREFIX, tmuxAttachHint } from "../session/tmux.js";
 import fs from "node:fs";
 
 export interface CommandResult {
@@ -58,7 +59,7 @@ async function handleStatus(
     reply += `Claude session: \`${session.meta.sessionId}\`\n`;
     const usage = await readLatestUsage(session.meta.workspace, session.meta.sessionId);
     reply += `Claude context: \`${formatModelContext(usage)}\`\n`;
-    reply += `View: \`tmux attach -t cork_${session.key}\``;
+    reply += `View: \`${tmuxAttachHint(`${TMUX_PREFIX}${session.key}`)}\``;
   } else {
     reply += `No session yet (send a message to start one)`;
   }

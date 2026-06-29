@@ -58,12 +58,16 @@ describe("Cork Integration Tests (commands)", () => {
     tempDir = makeTempDir();
     sockPath = path.join(tempDir, "test.sock");
     channel = new TestChannel();
+    // Give this daemon its own tmux server, distinct from production's
+    // `-L cork`, so daemon.stop()'s kill-server can't reap the real sessions.
+    process.env.CORK_TMUX_LABEL = `cork-test-${process.pid}`;
   });
 
   afterEach(async () => {
     if (daemon) {
       await daemon.stop();
     }
+    delete process.env.CORK_TMUX_LABEL;
     // Wipe the per-test workspace and the isolated cork home. The real
     // ~/.cork is mocked away, so nothing here can reach it.
     fs.rmSync(tempDir, { recursive: true, force: true });

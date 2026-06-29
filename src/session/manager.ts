@@ -19,12 +19,19 @@ import { paths } from "../config/paths.js";
 import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
 import { TranscriptWatcher } from "./transcript-watcher.js";
+import {
+  TMUX_PREFIX,
+  corkTmux,
+  ensureCorkTmuxServer,
+  killCorkTmuxServer,
+} from "./tmux.js";
+
+export { TMUX_PREFIX };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
 
 const STARTING_TIMEOUT_MS = 30_000;
-export const TMUX_PREFIX = "cork_";
 
 type SessionState = "inactive" | "starting" | "connected";
 
@@ -310,11 +317,20 @@ export class SessionManager extends EventEmitter {
   }
 
   async shutdown(): Promise<void> {
-    for (const [key, session] of this.sessions) {
+    // Stop each session's watcher (timer + fs handle) — their panes are torn
+    // down wholesale by the single kill-server below, so we don't need a
+    // per-session kill-session here.
+    for (const [, session] of this.sessions) {
       if (session.startingTimer) clearTimeout(session.startingTimer);
-      this.killTmux(key);
+      if (session.transcriptWatcher) {
+        session.transcriptWatcher.stop();
+        session.transcriptWatcher = undefined;
+      }
     }
     this.sessions.clear();
+    // One kill-server closes every cork pane AND the (exit-empty off) server
+    // process itself, leaving nothing behind on the cork socket.
+    killCorkTmuxServer();
   }
 
   // --- Private ---
@@ -363,10 +379,17 @@ export class SessionManager extends EventEmitter {
     // source the user's shell rc files.
     const corkEnv = loadCorkEnv();
 
+    // Ensure cork's dedicated tmux server is up (with exit-empty off, clean
+    // process line) before the new-session, so the session never forks the
+    // server itself and inherit a dirty argv.
+    ensureCorkTmuxServer();
+
     try {
       execSync(
-        `tmux new-session -d -s "${tmuxName}" -x 200 -y 50 ` +
-          `"cd '${meta.workspace}' && ${claudeCmd}"`,
+        corkTmux(
+          `new-session -d -s "${tmuxName}" -x 200 -y 50 ` +
+            `"cd '${meta.workspace}' && ${claudeCmd}"`
+        ),
         { stdio: "pipe", env: { ...process.env, ...corkEnv } }
       );
     } catch (err) {
@@ -547,7 +570,7 @@ export class SessionManager extends EventEmitter {
 
       let pane = "";
       try {
-        pane = execSync(`tmux capture-pane -t "${tmuxName}" -p`, {
+        pane = execSync(corkTmux(`capture-pane -t "${tmuxName}" -p`), {
           encoding: "utf8",
           stdio: ["pipe", "pipe", "pipe"],
         });
@@ -558,7 +581,7 @@ export class SessionManager extends EventEmitter {
       if (DIALOG_PATTERN.test(pane)) {
         dialogSeen = true;
         try {
-          execSync(`tmux send-keys -t "${tmuxName}" Enter`, { stdio: "pipe" });
+          execSync(corkTmux(`send-keys -t "${tmuxName}" Enter`), { stdio: "pipe" });
         } catch {
           // ignore
         }
@@ -652,7 +675,7 @@ export class SessionManager extends EventEmitter {
 
     const tmuxName = `${TMUX_PREFIX}${key}`;
     try {
-      execSync(`tmux kill-session -t "${tmuxName}"`, { stdio: "pipe" });
+      execSync(corkTmux(`kill-session -t "${tmuxName}"`), { stdio: "pipe" });
       logger.info("killed tmux session", { tmuxName });
     } catch {
       // Session may not exist

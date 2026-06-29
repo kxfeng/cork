@@ -1,228 +1,136 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { execSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
-import { UdsServer, type ReplyMessage } from "../src/daemon/uds-server.js";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import type { CorkDaemon as CorkDaemonType } from "../src/daemon/daemon.js";
+import type { TestChannel as TestChannelType } from "../src/channels/test/index.js";
+import type { CorkConfig } from "../src/config/schema.js";
 
 /**
- * Integration test for the full Cork ↔ Channel MCP ↔ Claude Code chain.
+ * End-to-end integration test driving the REAL production chain — only Lark is
+ * swapped for TestChannel; everything else is production code:
  *
- * Setup:
- * 1. Cork side: start UDS server on a temp socket
- * 2. Launch Claude Code in a tmux session (provides real TTY for interactive mode)
- * 3. Channel MCP connects to UDS and registers
- * 4. Test sends messages through UDS → channel MCP → Claude Code
- * 5. Claude replies via reply tool → channel MCP → UDS → test collects reply
+ *   TestChannel.injectMessage → MessageRouter → SessionManager.startSession
+ *     → real claude in tmux (-L cork) → channel-mcp → UDS
+ *     → daemon.handleReply → TestChannel.sendReply
+ *
+ * This exercises the production readiness gating, dev-channel dialog handling,
+ * Stop hook and reply round-trip — unlike the old hand-rolled harness that
+ * reimplemented (a weaker version of) all of it and was flaky as a result.
+ *
+ * Isolation — keeps the user's real claude install fully functional (login,
+ * onboarding, install path all live under the real HOME) while making sure the
+ * test daemon can't touch the running production daemon:
+ *   - CORK_DIR        → temp dir ⇒ mcp-config / claude-settings / socket /
+ *                       sessions all isolated; real ~/.cork is never written.
+ *   - CORK_TMUX_LABEL → cork-test-<pid> ⇒ the daemon's tmux server is a
+ *                       separate one from production's `-L cork`, so this
+ *                       daemon's kill-server can't reap the real sessions.
+ *   - workspace       → the cork repo root, which the real claude already
+ *                       trusts, so no first-run trust dialog blocks startup.
+ *
+ * The daemon is loaded from built dist so the spawned claude resolves the real
+ * channel-mcp/server.js + hooks/stop-hook.js (paths are relative to the
+ * daemon's own module dir).
  */
 
-const testDir = path.join(os.tmpdir(), `cork-channel-test-${process.pid}`);
-const sockPath = path.join(testDir, "test.sock");
-const workDir = path.join(testDir, "workspace");
+const repoRoot = path.resolve(".");
+const tmpRoot = path.join(os.tmpdir(), `cork-e2e-${process.pid}`);
+const corkDir = path.join(tmpRoot, "cork");
 
-// Path to the compiled channel MCP server
-const channelServerPath = path.resolve("dist/channel-mcp/server.js");
+const TMUX_LABEL = `cork-test-${process.pid}`;
+let savedCorkDir: string | undefined;
+let savedTmuxLabel: string | undefined;
+let CorkDaemon: typeof CorkDaemonType;
+let TestChannel: typeof TestChannelType;
 
-const SESSION_KEY = "test_integration_session";
-const TMUX_SESSION = `cork-test-${process.pid}`;
+function makeConfig(): CorkConfig {
+  return {
+    defaultWorkspace: repoRoot,
+    claude: { permissionMode: "bypassPermissions", extraArgs: [] },
+    channels: {},
+  };
+}
 
-describe("Channel Integration (real Claude Code)", () => {
-  let udsServer: UdsServer;
-  let registered = false;
-  let replies: ReplyMessage[] = [];
+const CHAT_ID = "e2e-chat";
+
+describe("Cork E2E (real claude via the production daemon)", () => {
+  let channel: TestChannelType;
+  let daemon: CorkDaemonType;
 
   beforeAll(async () => {
-    // Build the project first
-    const buildResult = await runCommand("npx", ["tsc"], { cwd: path.resolve(".") });
-    if (buildResult.code !== 0) {
-      throw new Error(`Build failed: ${buildResult.stderr}`);
+    // Build dist so the spawned claude loads the real channel-mcp + stop-hook.
+    execSync("npx tsc", { cwd: repoRoot, stdio: "pipe" });
+    const distChannelMcp = path.join(repoRoot, "dist/channel-mcp/server.js");
+    if (!fs.existsSync(distChannelMcp)) {
+      throw new Error(`dist channel-mcp not found at ${distChannelMcp}`);
     }
 
-    // Verify the channel server was built
-    if (!fs.existsSync(channelServerPath)) {
-      throw new Error(`Channel server not found at ${channelServerPath}`);
-    }
+    // Set CORK_DIR BEFORE importing dist (config/paths.js reads it at import
+    // time) to isolate everything cork writes. CORK_TMUX_LABEL gives this
+    // daemon its own tmux server, distinct from production's `-L cork`.
+    savedCorkDir = process.env.CORK_DIR;
+    savedTmuxLabel = process.env.CORK_TMUX_LABEL;
+    fs.mkdirSync(corkDir, { recursive: true });
+    process.env.CORK_DIR = corkDir;
+    process.env.CORK_TMUX_LABEL = TMUX_LABEL;
 
-    // Create test directories
-    fs.mkdirSync(workDir, { recursive: true });
+    ({ CorkDaemon } = await import(
+      pathToFileURL(path.join(repoRoot, "dist/daemon/daemon.js")).href
+    ));
+    ({ TestChannel } = await import(
+      pathToFileURL(path.join(repoRoot, "dist/channels/test/index.js")).href
+    ));
 
-    // 1. Start UDS server
-    udsServer = new UdsServer(sockPath);
-    await udsServer.start();
-
-    udsServer.on("register", (key: string) => {
-      if (key === SESSION_KEY) registered = true;
-    });
-
-    udsServer.on("reply", (msg: ReplyMessage) => {
-      replies.push(msg);
-    });
-
-    // 2. Write MCP config to a temp file (session key is passed via env, not in config)
-    const mcpConfigPath = path.join(testDir, "mcp-config.json");
-    const mcpConfig = {
-      mcpServers: {
-        "cork-channel": {
-          command: "node",
-          args: [channelServerPath],
-          env: {
-            CORK_SOCKET: sockPath,
-          },
-        },
-      },
-    };
-    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
-
-    // 3. Launch Claude Code inside a tmux session.
-    // tmux provides a real PTY so Claude runs in interactive mode,
-    // which is required for channels to work.
-    // CORK_SESSION_KEY is passed via env var, inherited by Claude → MCP subprocess.
-    const claudeCmd = [
-      `CORK_SESSION_KEY='${SESSION_KEY}'`,
-      "claude",
-      "--verbose",
-      "--dangerously-skip-permissions",
-      "--mcp-config", mcpConfigPath,
-      "--dangerously-load-development-channels", "server:cork-channel",
-    ].join(" ");
-
-    try {
-      execSync(
-        `tmux new-session -d -s ${TMUX_SESSION} -x 120 -y 40 "cd ${workDir} && ${claudeCmd}"`,
-        { env: { ...process.env }, stdio: "pipe" }
-      );
-    } catch (err) {
-      throw new Error(`Failed to start tmux session: ${(err as Error).message}`);
-    }
-
-    // 4. Accept the workspace trust dialog.
-    // Claude shows a trust prompt for new workspaces even with --dangerously-skip-permissions.
-    // Wait for the dialog to appear, then send Enter to accept the default "Yes, I trust".
-    await new Promise((r) => setTimeout(r, 3000));
-    try {
-      execSync(`tmux send-keys -t ${TMUX_SESSION} Enter`, { stdio: "pipe" });
-    } catch {
-      // Session may have already passed the dialog
-    }
-
-    // Also accept the development channel confirmation prompt
-    await new Promise((r) => setTimeout(r, 2000));
-    try {
-      execSync(`tmux send-keys -t ${TMUX_SESSION} Enter`, { stdio: "pipe" });
-    } catch {
-      // May not need it
-    }
-
-    // 5. Wait for channel MCP to register via UDS
-    await waitFor(() => registered, 40_000, "channel MCP registration");
-  }, 60_000);
-
-  afterAll(async () => {
-    // Kill tmux session
-    try {
-      execSync(`tmux kill-session -t ${TMUX_SESSION}`, { stdio: "pipe" });
-    } catch {
-      // Session may already be dead
-    }
-
-    // Stop UDS server
-    await udsServer?.stop();
-
-    // Cleanup
-    fs.rmSync(testDir, { recursive: true, force: true });
-  }, 15_000);
-
-  it("channel MCP registers on startup", () => {
-    expect(registered).toBe(true);
-    expect(udsServer.isConnected(SESSION_KEY)).toBe(true);
-  });
-
-  it("sends message to Claude and receives reply", async () => {
-    replies = [];
-
-    // Send a message through UDS → channel MCP → Claude Code
-    udsServer.sendToChannel(SESSION_KEY, {
-      type: "message",
-      content: "Reply with exactly the word: pong",
-      meta: { chatId: "test_chat", senderId: "test_user" },
-    });
-
-    // Wait for reply via UDS
-    await waitFor(() => replies.length > 0, 90_000, "Claude reply");
-
-    const reply = replies[replies.length - 1];
-    expect(reply.type).toBe("reply");
-    expect(reply.corkSessionKey).toBe(SESSION_KEY);
-    expect(reply.content.toLowerCase()).toContain("pong");
+    channel = new TestChannel();
+    daemon = new CorkDaemon(makeConfig(), [channel]);
+    await daemon.start();
+    // No warm-up: the first assertion's message IS the cold-start first
+    // message, exactly like production (send → spawn → deliver when ready →
+    // reply). This is what we want to exercise.
   }, 120_000);
 
-  it("handles multi-turn conversation", async () => {
-    replies = [];
-
-    // Turn 1: tell Claude a number
-    udsServer.sendToChannel(SESSION_KEY, {
-      type: "message",
-      content: "Remember this number: 42. Reply with just: ok",
-      meta: { chatId: "test_chat", senderId: "test_user" },
-    });
-
-    await waitFor(() => replies.length > 0, 90_000, "turn 1 reply");
-    replies = [];
-
-    // Turn 2: recall the number
-    udsServer.sendToChannel(SESSION_KEY, {
-      type: "message",
-      content: "What number did I tell you? Reply with just the number.",
-      meta: { chatId: "test_chat", senderId: "test_user" },
-    });
-
-    await waitFor(() => replies.length > 0, 90_000, "turn 2 reply");
-
-    const reply = replies[replies.length - 1];
-    expect(reply.content).toContain("42");
-  }, 200_000);
-});
-
-// --- Helpers ---
-
-function waitFor(
-  condition: () => boolean,
-  timeoutMs: number,
-  label: string
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (condition()) {
-      resolve();
-      return;
+  afterAll(async () => {
+    try {
+      await daemon?.stop();
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+      if (savedCorkDir === undefined) delete process.env.CORK_DIR;
+      else process.env.CORK_DIR = savedCorkDir;
+      if (savedTmuxLabel === undefined) delete process.env.CORK_TMUX_LABEL;
+      else process.env.CORK_TMUX_LABEL = savedTmuxLabel;
     }
-    const interval = setInterval(() => {
-      if (condition()) {
-        clearInterval(interval);
-        clearTimeout(timer);
-        resolve();
-      }
-    }, 500);
-    const timer = setTimeout(() => {
-      clearInterval(interval);
-      reject(new Error(`Timed out waiting for ${label} (${timeoutMs}ms)`));
-    }, timeoutMs);
-  });
-}
+  }, 30_000);
 
-function runCommand(
-  cmd: string,
-  args: string[],
-  opts: { cwd?: string } = {}
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
-    const proc = spawn(cmd, args, {
-      cwd: opts.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
+  it("round-trips a reply from a normal message", async () => {
+    channel.clearReplies();
+    const replyP = channel.waitForReply(90_000);
+    await channel.injectMessage({
+      text: "Reply with exactly the word: pong",
+      chatId: CHAT_ID,
     });
-    let stdout = "";
-    let stderr = "";
-    proc.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
-    proc.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
-    proc.on("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-  });
-}
+    const reply = await replyP;
+    expect(reply.content.toLowerCase()).toContain("pong");
+  }, 100_000);
+
+  it("keeps context across turns in the same session", async () => {
+    channel.clearReplies();
+
+    let replyP = channel.waitForReply(90_000);
+    await channel.injectMessage({
+      text: "Remember this number: 42. Reply with just: ok",
+      chatId: CHAT_ID,
+    });
+    await replyP;
+
+    replyP = channel.waitForReply(90_000);
+    await channel.injectMessage({
+      text: "What number did I tell you? Reply with just the number.",
+      chatId: CHAT_ID,
+    });
+    const reply = await replyP;
+    expect(reply.content).toContain("42");
+  }, 100_000);
+});

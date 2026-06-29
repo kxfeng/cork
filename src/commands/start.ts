@@ -6,8 +6,7 @@ import { CorkDaemon } from "../daemon/daemon.js";
 import { setupSignalHandlers } from "../daemon/signal.js";
 import { LarkChannel } from "../channels/lark/index.js";
 import { paths } from "../config/paths.js";
-import { listSessions } from "../session/store.js";
-import { TMUX_PREFIX } from "../session/manager.js";
+import { killCorkTmuxServer } from "../session/tmux.js";
 import type { Channel } from "../channels/types.js";
 import { enableLogFile, getLogger } from "../logger.js";
 
@@ -119,46 +118,6 @@ function findOtherCorkProcesses(): { pid: number; command: string }[] {
   }
 }
 
-/**
- * Find orphaned tmux sessions left behind by a previous daemon that died
- * without graceful shutdown (e.g. SIGKILL). Returns the tmux session names
- * to reap.
- *
- * A normal `cork stop`/`restart` sends SIGTERM; the daemon's handler tears
- * each session down via `tmux kill-session` using its in-memory table.
- * After a SIGKILL that table is gone, so on the next startup we rebuild the
- * set of *our* session names from the persisted metas and intersect it with
- * what tmux currently reports. The name match (only `cork_<known-key>`)
- * guarantees we never touch another user's or a non-cork tmux session.
- *
- * Reaping is done with the same `tmux kill-session` mechanism as the
- * graceful path — killing the session closes its claude pane; when the last
- * session goes, the tmux server exits on its own.
- */
-function findOrphanedTmuxSessions(): string[] {
-  try {
-    const sessions = listSessions();
-    if (sessions.length === 0) return [];
-
-    const known = new Set(sessions.map((s) => `${TMUX_PREFIX}${s.key}`));
-
-    // `tmux ls` exits non-zero when no server is running — `|| true` keeps
-    // execSync from throwing in that (normal) case.
-    const output = execSync(
-      `tmux ls -F '#{session_name}' 2>/dev/null || true`,
-      { encoding: "utf-8" }
-    ).trim();
-    if (!output) return [];
-
-    return output
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((name) => known.has(name));
-  } catch {
-    return [];
-  }
-}
-
 export async function startForeground(): Promise<void> {
   ensureDirs();
 
@@ -192,18 +151,12 @@ export async function startForeground(): Promise<void> {
     }
   }
 
-  // Reap orphaned tmux sessions from a previous daemon that was SIGKILL'd
-  // (graceful shutdown already tears these down). Same mechanism as the
-  // graceful path: tmux kill-session, which closes the claude pane.
-  const orphanSessions = findOrphanedTmuxSessions();
-  for (const name of orphanSessions) {
-    try {
-      execSync(`tmux kill-session -t "${name}"`, { stdio: "pipe" });
-      console.log(`Killed orphaned tmux session: ${name}`);
-    } catch {
-      // Session may already be gone
-    }
-  }
+  // Reap any cork tmux sessions left behind by a previous daemon that was
+  // SIGKILL'd (graceful shutdown already tears these down). They all live on
+  // cork's dedicated `-L cork` socket, so killing that whole server can only
+  // affect cork's own sessions — never a tmux server the user runs for their
+  // own work. The daemon brings a fresh server back up on boot.
+  killCorkTmuxServer();
 
   enableLogFile();
   const logger = getLogger("start");

@@ -4,6 +4,7 @@ import type { CorkConfig } from "../config/schema.js";
 import { ensureDirs } from "../config/loader.js";
 import { UdsServer, type ReplyMessage, type PermissionRequestMessage } from "./uds-server.js";
 import { paths } from "../config/paths.js";
+import { ensureCorkTmuxServer } from "../session/tmux.js";
 import { getLogger } from "../logger.js";
 
 const logger = getLogger("daemon");
@@ -38,6 +39,10 @@ export class CorkDaemon {
 
     // Refresh ~/.cork/claude-settings.json (Stop hook) likewise.
     this.router.sessionManager.writeClaudeSettings();
+
+    // Bring up cork's dedicated tmux server before any session spawns, so its
+    // process line stays clean (forked by start-server, not by a session).
+    ensureCorkTmuxServer();
 
     // Start UDS server
     await this.udsServer.start();

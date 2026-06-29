@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
+import { TMUX_PREFIX, tmuxAttachHint } from "../session/tmux.js";
 import { readLatestUsage, formatModelContext } from "../session/transcript.js";
 
 const PLIST_LABEL = "com.cork.daemon";
@@ -102,7 +103,7 @@ export async function showStatus(): Promise<void> {
     console.log(`  Claude context: ${formatModelContext(usage)}`);
     console.log(`  Last active:    ${meta.lastActiveAt}`);
     console.log(`  Last msg:       ${meta.lastMessagePreview || "(none)"}`);
-    console.log(`  View:           tmux attach -t cork_${key}`);
+    console.log(`  View:           ${tmuxAttachHint(`${TMUX_PREFIX}${key}`)}`);
     console.log();
   }
 }
