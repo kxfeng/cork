@@ -22,6 +22,10 @@
 import fs from "node:fs";
 
 const REPLY_TOOL = "mcp__cork-channel__reply";
+// Claude Code wraps every inbound Lark message as `<channel source="cork-channel" …>`
+// — the envelope is the harness's, not cork's (cork sends only raw content). This
+// marker is the one reliable signal that a real user input started a turn.
+const CHANNEL_MARKER = '<channel source="cork-channel"';
 // Read at most this many trailing bytes of the transcript. A single turn
 // is far smaller; this only needs to comfortably contain the last turn.
 const TAIL_BYTES = 8 * 1024 * 1024;
@@ -95,21 +99,32 @@ function contentBlocks(row: TranscriptRow): Record<string, unknown>[] {
   return c.filter((b): b is Record<string, unknown> => !!b && typeof b === "object");
 }
 
-/** A `user` row carrying a tool_result is a turn-internal row, not an input. */
-function isToolResultRow(row: TranscriptRow): boolean {
-  return contentBlocks(row).some((b) => b.type === "tool_result");
+/** The text of a `user` row, whether its content is a plain string or blocks. */
+function userText(row: TranscriptRow): string | null {
+  const c = row.message?.content;
+  if (typeof c === "string") return c;
+  if (Array.isArray(c)) {
+    const texts = contentBlocks(row)
+      .filter((b) => b.type === "text")
+      .map((b) => String(b.text ?? ""));
+    if (texts.length) return texts.join("\n");
+  }
+  return null;
 }
 
 /**
- * Index of the row that started the most recent turn — the last real input,
- * i.e. a `user` row that is not just tool results. A compaction summary or a
- * prior block reason also count as an input, which is fine: the reply we
- * care about always lands after them.
+ * Index of the row that started the most recent turn — the last cork-channel
+ * message. Anchoring to `<channel source="cork-channel" …>` (the real user
+ * input) makes the reply scan immune to harness-injected meta rows — the
+ * "no visible output" nudge and prior Stop hook feedback — which land AFTER the
+ * reply and would otherwise be mistaken for a fresh turn start, hiding the
+ * reply and triggering a spurious re-reply.
  */
 function turnStartIndex(rows: TranscriptRow[]): number {
   for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i];
-    if (row.type === "user" && !isToolResultRow(row)) return i;
+    if (rows[i].type !== "user") continue;
+    const t = userText(rows[i]);
+    if (t && t.includes(CHANNEL_MARKER)) return i;
   }
   return 0;
 }
