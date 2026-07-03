@@ -116,14 +116,27 @@ export class CorkDaemon {
       return;
     }
 
+    // For a thread session, send the reply back INTO the thread by replying to
+    // the last inbound message (im.message.reply + reply_in_thread). Falls back
+    // to a plain chat message when there is no thread or no message to reply to.
+    const replyOpts =
+      session.meta.threadId && session.lastInboundMessageId
+        ? {
+            replyToMessageId: session.lastInboundMessageId,
+            replyInThread: true,
+          }
+        : undefined;
+
     logger.info("forwarding reply to lark", {
       sessionKey,
       chatId,
+      threadId: session.meta.threadId,
+      inThread: !!replyOpts,
       contentLen: content.length,
     });
 
     channel
-      .sendReply(chatId, content)
+      .sendReply(chatId, content, replyOpts)
       .then(() => {
         // Remove the ack emoji for the oldest pending message in this session
         const pending = this.router.sessionManager.popPendingReaction(sessionKey);

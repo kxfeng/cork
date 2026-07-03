@@ -2,7 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import type { Dispatcher, IncomingMessage } from "../types.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
-import { formatMergeForward } from "./merge-forward.js";
+import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
@@ -97,7 +97,7 @@ export interface LarkEventContext {
   config: LarkChannelConfig;
   dispatcher: Dispatcher;
   channel: import("./index.js").LarkChannel;
-  resolveSessionKey?: (chatId: string) => string;
+  resolveSessionKey?: (chatId: string, threadId?: string) => string;
 }
 
 export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatcher {
@@ -169,6 +169,38 @@ function stripMentions(text: string, mentions: any[]): string {
   return text;
 }
 
+// Cache of "is this thread rooted by the bot" per thread_id, so the @-gate
+// resolves it with at most one fetchMessage per thread.
+const threadBotRootedCache = new Map<string, boolean>();
+
+/**
+ * Whether a thread's root message was authored by this bot. Used to waive the
+ * @bot requirement inside threads the bot itself started — the user replying in
+ * such a thread is already addressing the bot. At most one fetch per thread.
+ */
+async function isThreadBotRooted(
+  ctx: LarkEventContext,
+  threadId: string,
+  rootId: string
+): Promise<boolean> {
+  const cached = threadBotRootedCache.get(threadId);
+  if (cached !== undefined) return cached;
+  if (!rootId) return false;
+  let rooted = false;
+  try {
+    const root = await ctx.channel.fetchMessage(rootId);
+    if (root && root.senderType === "app") {
+      rooted =
+        root.senderId === ctx.channel.botAppId ||
+        root.senderId === ctx.channel.botOpenId;
+    }
+  } catch (err) {
+    logger.debug("failed to resolve thread root author", { err, threadId, rootId });
+  }
+  threadBotRootedCache.set(threadId, rooted);
+  return rooted;
+}
+
 async function handleMessageEvent(
   ctx: LarkEventContext,
   data: any
@@ -189,7 +221,11 @@ async function handleMessageEvent(
   const msgType = message.message_type || "";
   const createTime = parseInt(message.create_time || "0", 10);
   const mentions = message.mentions || [];
-  const corkSession = ctx.resolveSessionKey?.(chatId) || "";
+  // Lark stamps thread_id on any message that belongs to a thread (present on
+  // the raw receive event even though the get/mget API omits it). Empty for
+  // ordinary whole-chat messages → routes to the plain `lark_<chatId>` session.
+  const threadId = message.thread_id || "";
+  const corkSession = ctx.resolveSessionKey?.(chatId, threadId) || "";
 
   // --- Early filtering (before content parsing, minimal logging) ---
 
@@ -222,7 +258,16 @@ async function handleMessageEvent(
 
   // --- Group chat access control ---
   if (chatType === "group") {
-    const mentionRequired = ctx.dispatcher.getMentionRequired?.(chatId) ?? true;
+    let mentionRequired = ctx.dispatcher.getMentionRequired?.(chatId) ?? true;
+    // A thread the bot itself started needs no @mention — the user replying in
+    // it is already addressing the bot. Only checked when the group otherwise
+    // requires a mention and the user didn't @ the bot this message.
+    if (mentionRequired && threadId && !mentioned) {
+      const rootId = message.root_id || message.parent_id || "";
+      if (await isThreadBotRooted(ctx, threadId, rootId)) {
+        mentionRequired = false;
+      }
+    }
     const inListenMode = !mentionRequired;
 
     if (!ownerCheck) {
@@ -330,9 +375,36 @@ async function handleMessageEvent(
     text = stripMentions(text, mentions);
   }
 
+  // Lark thread handling. A threaded message routes to its own per-thread
+  // session. On the FIRST message of a thread cork hasn't seen yet, seed the
+  // model with the bounded thread context (root + head/tail replies) so it
+  // isn't amnesiac about a thread it just cold-joined. Later messages in the
+  // thread arrive plain, one by one — and the per-message <quote> below is
+  // suppressed for threads (the thread context replaces it).
+  if (threadId && !ctx.dispatcher.sessionExists?.(chatId, threadId)) {
+    try {
+      const rootId = message.root_id || message.parent_id || "";
+      const root = rootId ? await ctx.channel.fetchMessage(rootId) : null;
+      const replies = await ctx.channel.fetchThreadMessages(threadId);
+      if (root || replies.length > 0) {
+        text = await formatThreadSeed(
+          root,
+          replies,
+          threadId,
+          ctx.channel,
+          resolveName,
+          bot
+        );
+      }
+    } catch (err) {
+      logger.debug("failed to seed thread context", { err, threadId });
+    }
+  }
+
   // Resolve quoted/replied-to message (parent_id) into <quote><message>…</message></quote>
+  // Skipped for threads — thread context is handled by the seeding above.
   const parentId = message.parent_id || "";
-  if (parentId) {
+  if (!threadId && parentId) {
     try {
       const parentMsg = await ctx.channel.fetchMessage(parentId);
       if (parentMsg) {
@@ -400,6 +472,7 @@ async function handleMessageEvent(
     senderId,
     text: text.trim(),
     chatName: chatName || undefined,
+    threadId: threadId || undefined,
   };
 
   logger.info(
@@ -440,7 +513,7 @@ async function handleMessageEvent(
     }
     if (dispatchError) throw dispatchError;
   } else {
-    ctx.dispatcher.trackPendingReaction?.(chatId, messageId, reactionId);
+    ctx.dispatcher.trackPendingReaction?.(chatId, messageId, reactionId, threadId);
     logger.debug("ack reaction tracked for async removal", { messageId });
   }
 }

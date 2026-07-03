@@ -27,7 +27,13 @@ export class MessageRouter implements Dispatcher {
   ): Promise<DispatchResult> {
     logger.debug("enqueuing message", { messageId: message.messageId, chatId: message.chatId });
     let syncReplied = false;
-    await this.queue.enqueue(message.chatId, async () => {
+    // Serialize per session (chat, or thread within a chat), not per chat — so
+    // different threads in the same group run concurrently instead of blocking
+    // each other, while messages within one thread stay ordered.
+    const queueKey = message.threadId
+      ? `${message.chatId}:${message.threadId}`
+      : message.chatId;
+    await this.queue.enqueue(queueKey, async () => {
       logger.debug("dequeued, processing", { messageId: message.messageId });
       try {
         // Ensure session is loaded into memory for both commands and messages
@@ -62,8 +68,12 @@ export class MessageRouter implements Dispatcher {
     return { syncReplied };
   }
 
-  resolveSessionKey(chatId: string): string {
-    return sessionKey("lark", chatId);
+  resolveSessionKey(chatId: string, threadId?: string): string {
+    return sessionKey("lark", chatId, threadId);
+  }
+
+  sessionExists(chatId: string, threadId?: string): boolean {
+    return this.sessionManager.sessionExists(chatId, threadId);
   }
 
   getMentionRequired(chatId: string): boolean {
@@ -74,8 +84,13 @@ export class MessageRouter implements Dispatcher {
     this.sessionManager.setMentionRequired(chatId, value);
   }
 
-  trackPendingReaction(chatId: string, messageId: string, reactionId: string): void {
-    const key = sessionKey("lark", chatId);
+  trackPendingReaction(
+    chatId: string,
+    messageId: string,
+    reactionId: string,
+    threadId?: string
+  ): void {
+    const key = sessionKey("lark", chatId, threadId);
     this.sessionManager.trackPendingReaction(key, messageId, reactionId);
   }
 

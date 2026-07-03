@@ -5,6 +5,9 @@ import { paths } from "../config/paths.js";
 export interface SessionMeta {
   sessionId: string;
   chatId: string;
+  /** Lark thread id (omt_…) when this session is a thread; absent for a
+   * whole-chat session. Part of the session key when present. */
+  threadId?: string;
   chatType: "p2p" | "group";
   chatName: string;
   workspace: string;
@@ -18,11 +21,22 @@ export interface SessionMeta {
 }
 
 /**
- * Generate session key from channel and chat ID.
- * Format: {channelId}_{chatId}, e.g. "lark_oc_e21e11a61c56575e557f73370733c6de"
+ * Generate session key from channel, chat ID, and optional thread ID.
+ * Format: {channelId}_{chatId} for a whole chat, or
+ * {channelId}_{chatId}_{threadId} for a Lark thread — e.g.
+ * "lark_oc_e21e…" / "lark_oc_e21e…_omt_1922af5c1bcf4764".
+ * The composite makes each thread its own session (own tmux pane, store file,
+ * Claude --session-id) while staying byte-identical to the old key when no
+ * thread is involved (backward compatible).
  */
-export function sessionKey(channelId: string, chatId: string): string {
-  return `${channelId}_${chatId}`;
+export function sessionKey(
+  channelId: string,
+  chatId: string,
+  threadId?: string
+): string {
+  return threadId
+    ? `${channelId}_${chatId}_${threadId}`
+    : `${channelId}_${chatId}`;
 }
 
 export function loadSession(key: string): SessionMeta | null {

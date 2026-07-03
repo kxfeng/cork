@@ -103,36 +103,39 @@ export async function sendMessage(
   client: lark.Client,
   chatId: string,
   msgType: "post" | "interactive",
-  content: string
+  content: string,
+  opts?: { replyToMessageId?: string; replyInThread?: boolean }
 ): Promise<string> {
-  try {
-    const res = await client.im.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chatId,
-        msg_type: msgType,
-        content,
-      },
-    });
+  // When replyToMessageId is set, reply to that message (im.message.reply) so
+  // the reply lands in its thread; otherwise create a fresh chat message. Both
+  // share one masking-retry path for the content-audit (230028) error.
+  const doSend = (body: string) =>
+    opts?.replyToMessageId
+      ? client.im.message.reply({
+          path: { message_id: opts.replyToMessageId },
+          data: {
+            content: body,
+            msg_type: msgType,
+            reply_in_thread: opts.replyInThread ?? false,
+          },
+        })
+      : client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: chatId, msg_type: msgType, content: body },
+        });
 
+  try {
+    const res = await doSend(content);
     if (res.code !== 0) {
       throw new Error(`Lark send message failed: ${res.code} ${res.msg}`);
     }
-
     return res.data?.message_id || "";
   } catch (err) {
     if (isContentAuditError(err)) {
       logger.warn("content audit failed, retrying with masked content");
       let maskedContent = maskSensitiveContent(content);
       maskedContent = appendMaskedNotice(maskedContent, msgType);
-      const res = await client.im.message.create({
-        params: { receive_id_type: "chat_id" },
-        data: {
-          receive_id: chatId,
-          msg_type: msgType,
-          content: maskedContent,
-        },
-      });
+      const res = await doSend(maskedContent);
       if (res.code !== 0) {
         throw new Error(`Lark send message failed after masking: ${res.code} ${res.msg}`);
       }
@@ -191,6 +194,58 @@ export interface FetchedMessage {
   senderId?: string;
   senderType?: string;
   createTime?: number;
+}
+
+export interface ThreadMessageItem {
+  messageId: string;
+  msgType: string;
+  content: string;
+  senderId?: string;
+  senderType?: string;
+  createTime?: number;
+  /** Position within the thread: -1 = root, 0,1,2… = replies. */
+  position?: number;
+}
+
+/**
+ * List the messages of a Lark thread (the replies; the root itself is NOT
+ * returned by this container query — fetch it separately via fetchMessage).
+ * Sorted oldest-first. Best-effort: returns [] on failure.
+ */
+export async function fetchThreadMessages(
+  client: lark.Client,
+  threadId: string,
+  pageSize = 50
+): Promise<ThreadMessageItem[]> {
+  try {
+    const res: any = await (client as any).request({
+      method: "GET",
+      url: "/open-apis/im/v1/messages",
+      params: {
+        container_id_type: "thread",
+        container_id: threadId,
+        sort_type: "ByCreateTimeAsc",
+        page_size: pageSize,
+        card_msg_content_type: "raw_card_content",
+      },
+    });
+    const items: any[] = res?.data?.items || res?.data?.messages || [];
+    return items.map((it) => ({
+      messageId: it.message_id || "",
+      msgType: it.msg_type || "",
+      content: it.body?.content || it.content || "",
+      senderId: it.sender?.id,
+      senderType: it.sender?.sender_type,
+      createTime: parseInt(it.create_time || "0", 10),
+      position:
+        it.thread_message_position != null
+          ? parseInt(it.thread_message_position, 10)
+          : undefined,
+    }));
+  } catch (err) {
+    logger.debug("failed to fetch thread messages", { err, threadId });
+    return [];
+  }
 }
 
 export async function fetchMessage(

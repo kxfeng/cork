@@ -1,4 +1,8 @@
-import type { SubMessageItem } from "./client.js";
+import type {
+  SubMessageItem,
+  FetchedMessage,
+  ThreadMessageItem,
+} from "./client.js";
 import {
   formatLeafContent,
   wrapAsMessage,
@@ -15,6 +19,95 @@ export interface BotContext {
 }
 
 const EMPTY_FORWARD = "<forwarded_messages>\n</forwarded_messages>";
+
+// How many messages to render at the head and tail of a long bundle/thread
+// before collapsing the middle into an omitted-count hint.
+export const BOUND_HEAD = 4;
+export const BOUND_TAIL = 4;
+
+/**
+ * Bound a list of already-rendered `<message>` strings to head + tail, with a
+ * single `<omitted count=N>` hint in the middle when the middle is non-empty.
+ * ≤ head+tail messages are returned unchanged. Shared by thread seeding and
+ * merge_forward rendering so both truncate identically.
+ */
+export function boundMessageParts(parts: string[], pullHint: string): string[] {
+  const total = parts.length;
+  if (total <= BOUND_HEAD + BOUND_TAIL) return parts;
+  const omitted = total - BOUND_HEAD - BOUND_TAIL;
+  return [
+    ...parts.slice(0, BOUND_HEAD),
+    `<omitted count="${omitted}">${pullHint}</omitted>`,
+    ...parts.slice(total - BOUND_TAIL),
+  ];
+}
+
+/**
+ * Render a Lark thread (root + its replies) into the channel format, bounded to
+ * head+tail. Used to seed a brand-new thread session so the model sees the
+ * thread's context (root + recent messages) instead of just the latest one.
+ * `root` may be null when it can't be resolved — the replies still render.
+ */
+export async function formatThreadSeed(
+  root: FetchedMessage | null,
+  replies: ThreadMessageItem[],
+  threadId: string,
+  channel: FormatChannel,
+  resolveName?: NameResolver,
+  bot?: BotContext
+): Promise<string> {
+  const ordered: ThreadMessageItem[] = [];
+  if (root) {
+    ordered.push({
+      messageId: root.messageId,
+      msgType: root.msgType,
+      content: root.content,
+      senderId: root.senderId,
+      senderType: root.senderType,
+      createTime: root.createTime,
+      position: -1,
+    });
+  }
+  ordered.push(...replies);
+
+  const nameFor = async (
+    senderId?: string,
+    senderType?: string
+  ): Promise<string> => {
+    if (!senderId) return "unknown";
+    if (senderType === "app") {
+      const isOwnBot = bot && (senderId === bot.openId || senderId === bot.appId);
+      return isOwnBot ? bot.name : "Bot";
+    }
+    return (await resolveName?.(senderId)) || senderId;
+  };
+
+  const parts: string[] = [];
+  for (const m of ordered) {
+    const content = await formatLeafContent(channel, {
+      messageId: m.messageId,
+      msgType: m.msgType,
+      content: m.content || "{}",
+    });
+    parts.push(
+      wrapAsMessage(
+        {
+          type: m.msgType,
+          messageId: m.messageId,
+          sender: await nameFor(m.senderId, m.senderType),
+          time: formatTime(m.createTime || 0),
+        },
+        content
+      )
+    );
+  }
+
+  const hint =
+    `use \`lark-cli im +threads-messages-list --thread ${threadId}\` ` +
+    `to fetch the full thread`;
+  const bounded = boundMessageParts(parts, hint);
+  return `<thread id="${threadId}">\n${bounded.join("\n")}\n</thread>`;
+}
 
 /**
  * Format merge_forward sub-messages into the channel message format.
@@ -226,5 +319,17 @@ async function formatSubTree(
     );
   }
 
-  return `<forwarded_messages>\n${parts.join("\n")}\n</forwarded_messages>`;
+  // Bound only the top level of the forward (parentId === entry). Nested
+  // forwards render in full — they are rare and small. A very large forward is
+  // collapsed to head+tail with an omitted hint.
+  const finalParts =
+    parentId === entryMessageId
+      ? boundMessageParts(
+          parts,
+          `use \`lark-cli im +messages-mget --message-ids ${entryMessageId}\` ` +
+            `to fetch the full forward`
+        )
+      : parts;
+
+  return `<forwarded_messages>\n${finalParts.join("\n")}\n</forwarded_messages>`;
 }

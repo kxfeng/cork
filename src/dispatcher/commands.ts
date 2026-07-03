@@ -44,7 +44,7 @@ async function handleStatus(
   message: IncomingMessage,
   sessionManager: SessionManager
 ): Promise<CommandResult> {
-  const session = sessionManager.getSession(message.chatId);
+  const session = sessionManager.getSession(message.chatId, message.threadId);
 
   let reply = `📊 **Session Status**\n`;
 
@@ -88,7 +88,11 @@ async function handleNew(
     fs.mkdirSync(workspace, { recursive: true });
   }
 
-  const meta = sessionManager.createNewSession(message.chatId, workspace);
+  const meta = sessionManager.createNewSession(
+    message.chatId,
+    message.threadId,
+    workspace
+  );
 
   let reply = `✅ New session created\n`;
   reply += `Workspace: \`${meta.workspace}\`\n`;
@@ -103,7 +107,7 @@ async function handleWorkspace(
   message: IncomingMessage,
   sessionManager: SessionManager
 ): Promise<CommandResult> {
-  const session = sessionManager.getSession(message.chatId);
+  const session = sessionManager.getSession(message.chatId, message.threadId);
   const workspace = session?.meta.workspace || "(no session)";
   await channel.sendReply(
     message.chatId,

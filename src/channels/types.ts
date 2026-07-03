@@ -5,10 +5,22 @@ export interface IncomingMessage {
   senderId: string;
   text: string;
   chatName?: string;
+  /** Lark thread id (omt_…) when the message belongs to a thread. Routes the
+   * message to a per-thread session (`lark_<chatId>_<threadId>`). Absent for
+   * ordinary whole-chat messages. */
+  threadId?: string;
 }
 
 export interface ReplyResult {
   messageId: string;
+}
+
+export interface SendReplyOptions {
+  /** Reply to this specific message (Lark `im.message.reply`) instead of
+   * blasting to the chat. Required to land a reply inside a thread. */
+  replyToMessageId?: string;
+  /** Ask Lark to place the reply in the message's thread. */
+  replyInThread?: boolean;
 }
 
 export interface DispatchResult {
@@ -18,12 +30,16 @@ export interface DispatchResult {
 
 export interface Dispatcher {
   handleMessage(channel: Channel, message: IncomingMessage): Promise<DispatchResult>;
-  resolveSessionKey?(chatId: string): string;
+  resolveSessionKey?(chatId: string, threadId?: string): string;
+  /** Whether a session record already exists (in memory or on disk) for this
+   * chat/thread — used to detect a brand-new thread that needs seeding. */
+  sessionExists?(chatId: string, threadId?: string): boolean;
   /** Track an ack reaction to be removed when Claude replies. */
   trackPendingReaction?(
     chatId: string,
     messageId: string,
-    reactionId: string
+    reactionId: string,
+    threadId?: string
   ): void;
   /** Whether a group chat currently requires an @bot mention. */
   getMentionRequired?(chatId: string): boolean;
@@ -35,7 +51,11 @@ export interface Channel {
   readonly name: string;
   start(dispatcher: Dispatcher): Promise<void>;
   stop(): Promise<void>;
-  sendReply(chatId: string, content: string): Promise<ReplyResult>;
+  sendReply(
+    chatId: string,
+    content: string,
+    opts?: SendReplyOptions
+  ): Promise<ReplyResult>;
   addReaction(
     chatId: string,
     messageId: string,

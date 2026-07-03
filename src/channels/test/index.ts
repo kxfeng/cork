@@ -3,6 +3,7 @@ import type {
   Dispatcher,
   IncomingMessage,
   ReplyResult,
+  SendReplyOptions,
 } from "../types.js";
 import { v4 as uuidv4 } from "uuid";
 
@@ -10,6 +11,8 @@ export interface CollectedReply {
   chatId: string;
   content: string;
   messageId: string;
+  /** Reply options passed through (thread targeting), for assertions. */
+  opts?: SendReplyOptions;
 }
 
 export class TestChannel implements Channel {
@@ -26,9 +29,13 @@ export class TestChannel implements Channel {
     this.dispatcher = null;
   }
 
-  async sendReply(chatId: string, content: string): Promise<ReplyResult> {
+  async sendReply(
+    chatId: string,
+    content: string,
+    opts?: SendReplyOptions
+  ): Promise<ReplyResult> {
     const messageId = uuidv4();
-    const reply: CollectedReply = { chatId, content, messageId };
+    const reply: CollectedReply = { chatId, content, messageId, opts };
     this.replies.push(reply);
 
     // Notify any waiters

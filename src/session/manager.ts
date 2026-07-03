@@ -58,6 +58,10 @@ interface ActiveSession {
   channelRegistered: boolean;
   dialogDismissed: boolean;
   pendingReactions: PendingReaction[];
+  /** Most recent real inbound Lark message id for this session. Used to send
+   * the model's reply back into the right thread (im.message.reply). Updated
+   * on each real dispatch; not touched by synthetic system messages. */
+  lastInboundMessageId?: string;
   /** Per-session transcript watcher — created at spawn, stopped at killTmux. */
   transcriptWatcher?: TranscriptWatcher;
 }
@@ -97,13 +101,20 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  getSession(chatId: string): ActiveSession | undefined {
-    const key = sessionKey("lark", chatId);
+  getSession(chatId: string, threadId?: string): ActiveSession | undefined {
+    const key = sessionKey("lark", chatId, threadId);
     return this.sessions.get(key);
   }
 
   getSessionByKey(key: string): ActiveSession | undefined {
     return this.sessions.get(key);
+  }
+
+  /** Whether a session record exists in memory or on disk for this chat/thread.
+   * Used to detect a brand-new thread (no record yet) that needs seeding. */
+  sessionExists(chatId: string, threadId?: string): boolean {
+    const key = sessionKey("lark", chatId, threadId);
+    return this.sessions.has(key) || loadSession(key) !== null;
   }
 
   /**
@@ -146,7 +157,7 @@ export class SessionManager extends EventEmitter {
    * Does NOT start tmux — just loads metadata.
    */
   ensureSession(message: IncomingMessage): ActiveSession {
-    const key = sessionKey("lark", message.chatId);
+    const key = sessionKey("lark", message.chatId, message.threadId);
 
     let session = this.sessions.get(key);
     if (session) return session;
@@ -160,6 +171,7 @@ export class SessionManager extends EventEmitter {
     const meta: SessionMeta = existingMeta || {
       sessionId: sid,
       chatId: message.chatId,
+      threadId: message.threadId,
       chatType: message.chatType,
       chatName: message.chatName || message.chatId,
       workspace,
@@ -211,7 +223,7 @@ export class SessionManager extends EventEmitter {
   async dispatch(
     message: IncomingMessage
   ): Promise<void> {
-    const key = sessionKey("lark", message.chatId);
+    const key = sessionKey("lark", message.chatId, message.threadId);
     let session = this.sessions.get(key);
 
     if (!session) {
@@ -219,6 +231,7 @@ export class SessionManager extends EventEmitter {
     }
 
     // Update meta
+    session.lastInboundMessageId = message.messageId;
     session.meta.lastActiveAt = new Date().toISOString();
     const firstLine = message.text.split("\n").find((l) => l.trim()) || "";
     session.meta.lastMessagePreview = firstLine.slice(0, 50);
@@ -261,8 +274,12 @@ export class SessionManager extends EventEmitter {
    * Returns false if the session is not currently connected — the caller
    * (typically the watcher) should treat that as "drop silently".
    */
-  dispatchSystemMessage(chatId: string, text: string, senderId: string): boolean {
-    const key = sessionKey("lark", chatId);
+  dispatchSystemMessage(
+    key: string,
+    chatId: string,
+    text: string,
+    senderId: string
+  ): boolean {
     const session = this.sessions.get(key);
     if (!session || session.state !== "connected") {
       logger.info("system message skipped — session not connected", {
@@ -284,8 +301,12 @@ export class SessionManager extends EventEmitter {
     return true;
   }
 
-  createNewSession(chatId: string, workspace?: string): SessionMeta {
-    const key = sessionKey("lark", chatId);
+  createNewSession(
+    chatId: string,
+    threadId?: string,
+    workspace?: string
+  ): SessionMeta {
+    const key = sessionKey("lark", chatId, threadId);
     const ws = workspace
       ? resolveWorkspacePath(workspace)
       : resolveWorkspacePath(this.config.defaultWorkspace);
@@ -302,6 +323,7 @@ export class SessionManager extends EventEmitter {
     const meta: SessionMeta = {
       sessionId: uuidv4(),
       chatId,
+      threadId,
       chatType: "p2p",
       chatName: chatId,
       workspace: ws,
@@ -417,7 +439,7 @@ export class SessionManager extends EventEmitter {
       sessionId: meta.sessionId,
       sessionKey: key,
       inject: (text, senderId) =>
-        this.dispatchSystemMessage(meta.chatId, text, senderId),
+        this.dispatchSystemMessage(key, meta.chatId, text, senderId),
     });
     session.transcriptWatcher.start();
 
