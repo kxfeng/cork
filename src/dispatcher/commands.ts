@@ -9,6 +9,25 @@ export interface CommandResult {
   handled: boolean;
 }
 
+/**
+ * Send a command reply, threading it back into the originating Lark thread when
+ * the triggering message was in one — so `/status` etc. answer inside the thread
+ * rather than the main chat.
+ */
+function sendCmdReply(
+  channel: Channel,
+  message: IncomingMessage,
+  content: string
+): Promise<unknown> {
+  return channel.sendReply(
+    message.chatId,
+    content,
+    message.threadId
+      ? { replyToMessageId: message.messageId, replyInThread: true }
+      : undefined
+  );
+}
+
 export async function handleCommand(
   channel: Channel,
   message: IncomingMessage,
@@ -64,7 +83,7 @@ async function handleStatus(
     reply += `No session yet (send a message to start one)`;
   }
 
-  await channel.sendReply(message.chatId, reply);
+  await sendCmdReply(channel, message, reply);
   return { handled: true };
 }
 
@@ -78,7 +97,7 @@ async function handleNew(
 
   // Validate path
   if (pathArg && pathArg.includes("..")) {
-    await channel.sendReply(message.chatId, "❌ Invalid path: '..' not allowed");
+    await sendCmdReply(channel, message, "❌ Invalid path: '..' not allowed");
     return { handled: true };
   }
 
@@ -98,7 +117,7 @@ async function handleNew(
   reply += `Workspace: \`${meta.workspace}\`\n`;
   reply += `Session: \`${meta.sessionId}\``;
 
-  await channel.sendReply(message.chatId, reply);
+  await sendCmdReply(channel, message, reply);
   return { handled: true };
 }
 
@@ -109,10 +128,7 @@ async function handleWorkspace(
 ): Promise<CommandResult> {
   const session = sessionManager.getSession(message.chatId, message.threadId);
   const workspace = session?.meta.workspace || "(no session)";
-  await channel.sendReply(
-    message.chatId,
-    `📂 Current workspace: \`${workspace}\``
-  );
+  await sendCmdReply(channel, message, `📂 Current workspace: \`${workspace}\``);
   return { handled: true };
 }
 
@@ -122,17 +138,11 @@ async function handleMentionOff(
   sessionManager: SessionManager
 ): Promise<CommandResult> {
   if (message.chatType !== "group") {
-    await channel.sendReply(
-      message.chatId,
-      "ℹ️ /mention-off only applies to group chats."
-    );
+    await sendCmdReply(channel, message, "ℹ️ /mention-off only applies to group chats.");
     return { handled: true };
   }
   sessionManager.setMentionRequired(message.chatId, false);
-  await channel.sendReply(
-    message.chatId,
-    "✅ Mention requirement disabled. Owner messages will be processed without @bot."
-  );
+  await sendCmdReply(channel, message, "✅ Mention requirement disabled. Owner messages will be processed without @bot.");
   return { handled: true };
 }
 
@@ -142,16 +152,10 @@ async function handleMentionOn(
   sessionManager: SessionManager
 ): Promise<CommandResult> {
   if (message.chatType !== "group") {
-    await channel.sendReply(
-      message.chatId,
-      "ℹ️ /mention-on only applies to group chats."
-    );
+    await sendCmdReply(channel, message, "ℹ️ /mention-on only applies to group chats.");
     return { handled: true };
   }
   sessionManager.setMentionRequired(message.chatId, true);
-  await channel.sendReply(
-    message.chatId,
-    "✅ Mention requirement enabled. @bot is required again."
-  );
+  await sendCmdReply(channel, message, "✅ Mention requirement enabled. @bot is required again.");
   return { handled: true };
 }

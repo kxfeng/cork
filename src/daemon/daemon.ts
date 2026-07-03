@@ -116,16 +116,9 @@ export class CorkDaemon {
       return;
     }
 
-    // For a thread session, send the reply back INTO the thread by replying to
-    // the last inbound message (im.message.reply + reply_in_thread). Falls back
-    // to a plain chat message when there is no thread or no message to reply to.
-    const replyOpts =
-      session.meta.threadId && session.lastInboundMessageId
-        ? {
-            replyToMessageId: session.lastInboundMessageId,
-            replyInThread: true,
-          }
-        : undefined;
+    // For a thread session, send the reply back INTO the thread (see
+    // threadReplyOpts). Falls back to a plain chat message otherwise.
+    const replyOpts = this.threadReplyOpts(session);
 
     logger.info("forwarding reply to lark", {
       sessionKey,
@@ -168,7 +161,7 @@ export class CorkDaemon {
       `Action: ${msg.description}\n\n` +
       `Reply "yes ${msg.requestId}" or "no ${msg.requestId}"`;
 
-    channel.sendReply(chatId, text).catch((err) => {
+    channel.sendReply(chatId, text, this.threadReplyOpts(session)).catch((err) => {
       logger.error("failed to send permission request to lark", { err });
     });
   }
@@ -181,10 +174,24 @@ export class CorkDaemon {
     if (!channel) return;
 
     channel
-      .sendReply(session.meta.chatId, `⚠️ ${errorMsg}`)
+      .sendReply(session.meta.chatId, `⚠️ ${errorMsg}`, this.threadReplyOpts(session))
       .catch((err) => {
         logger.error("failed to send error to lark", { err });
       });
+  }
+
+  /**
+   * Reply options routing a reply back into a thread session's thread (via
+   * im.message.reply on the last inbound message), or undefined for a
+   * whole-chat session. Shared by model replies, permission prompts and errors.
+   */
+  private threadReplyOpts(session: {
+    meta: { threadId?: string };
+    lastInboundMessageId?: string;
+  }): { replyToMessageId: string; replyInThread: boolean } | undefined {
+    return session.meta.threadId && session.lastInboundMessageId
+      ? { replyToMessageId: session.lastInboundMessageId, replyInThread: true }
+      : undefined;
   }
 
   private findChannel(meta: { chatId: string }): Channel | undefined {
