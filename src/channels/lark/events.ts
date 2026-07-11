@@ -97,7 +97,7 @@ export interface LarkEventContext {
   config: LarkChannelConfig;
   dispatcher: Dispatcher;
   channel: import("./index.js").LarkChannel;
-  resolveSessionKey?: (chatId: string, threadId?: string) => string;
+  resolveSessionKey?: (channel: string, chatId: string, threadId?: string) => string;
 }
 
 export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatcher {
@@ -225,7 +225,7 @@ async function handleMessageEvent(
   // the raw receive event even though the get/mget API omits it). Empty for
   // ordinary whole-chat messages → routes to the plain `lark_<chatId>` session.
   const threadId = message.thread_id || "";
-  const corkSession = ctx.resolveSessionKey?.(chatId, threadId) || "";
+  const corkSession = ctx.resolveSessionKey?.("lark", chatId, threadId) || "";
 
   // --- Early filtering (before content parsing, minimal logging) ---
 
@@ -258,7 +258,7 @@ async function handleMessageEvent(
 
   // --- Group chat access control ---
   if (chatType === "group") {
-    let mentionRequired = ctx.dispatcher.getMentionRequired?.(chatId) ?? true;
+    let mentionRequired = ctx.dispatcher.getMentionRequired?.("lark", chatId) ?? true;
     // A thread the bot itself started needs no @mention — the user replying in
     // it is already addressing the bot. Only checked when the group otherwise
     // requires a mention and the user didn't @ the bot this message.
@@ -381,7 +381,7 @@ async function handleMessageEvent(
   // isn't amnesiac about a thread it just cold-joined. Later messages in the
   // thread arrive plain, one by one — and the per-message <quote> below is
   // suppressed for threads (the thread context replaces it).
-  if (threadId && !ctx.dispatcher.sessionExists?.(chatId, threadId)) {
+  if (threadId && !ctx.dispatcher.sessionExists?.("lark", chatId, threadId)) {
     try {
       const rootId = message.root_id || message.parent_id || "";
       const root = rootId ? await ctx.channel.fetchMessage(rootId) : null;
@@ -466,6 +466,7 @@ async function handleMessageEvent(
   }
 
   const incoming: IncomingMessage = {
+    channel: "lark",
     chatId,
     chatType: chatType as "p2p" | "group",
     messageId,
@@ -513,7 +514,7 @@ async function handleMessageEvent(
     }
     if (dispatchError) throw dispatchError;
   } else {
-    ctx.dispatcher.trackPendingReaction?.(chatId, messageId, reactionId, threadId);
+    ctx.dispatcher.trackPendingReaction?.("lark", chatId, messageId, reactionId, threadId);
     logger.debug("ack reaction tracked for async removal", { messageId });
   }
 }

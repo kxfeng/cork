@@ -64,6 +64,7 @@ export class TestChannel implements Channel {
   async injectMessage(msg: Partial<IncomingMessage> & { text: string }): Promise<void> {
     if (!this.dispatcher) throw new Error("TestChannel not started");
     const full: IncomingMessage = {
+      channel: msg.channel || this.name,
       chatId: msg.chatId || "test-chat-1",
       chatType: msg.chatType || "p2p",
       messageId: msg.messageId || uuidv4(),

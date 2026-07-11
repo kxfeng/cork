@@ -77,8 +77,8 @@ export class LarkChannel implements Channel {
       config: this.config,
       dispatcher,
       channel: this,
-      resolveSessionKey: (chatId, threadId) =>
-        dispatcher.resolveSessionKey?.(chatId, threadId) || "",
+      resolveSessionKey: (channel, chatId, threadId) =>
+        dispatcher.resolveSessionKey?.(channel, chatId, threadId) || "",
     });
 
     await this.connectWs();

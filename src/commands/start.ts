@@ -5,6 +5,7 @@ import { loadConfig, ensureDirs } from "../config/loader.js";
 import { CorkDaemon } from "../daemon/daemon.js";
 import { setupSignalHandlers } from "../daemon/signal.js";
 import { LarkChannel } from "../channels/lark/index.js";
+import { TelegramChannel } from "../channels/telegram/index.js";
 import { paths } from "../config/paths.js";
 import { killCorkTmuxServer } from "../session/tmux.js";
 import type { Channel } from "../channels/types.js";
@@ -19,6 +20,15 @@ function generatePlist(): string {
   } catch {
     corkBin = process.argv[1];
   }
+
+  // launchd starts the daemon from a bare environment — it never sources the
+  // user's shell profile. Carry NODE_EXTRA_CA_CERTS across if the shell running
+  // `cork start` has it set, so a daemon behind a TLS-inspecting proxy trusts the
+  // same CAs the user's shell does. Unset ⇒ omitted.
+  const extraCa = process.env.NODE_EXTRA_CA_CERTS;
+  const extraCaEnv = extraCa
+    ? `    <key>NODE_EXTRA_CA_CERTS</key>\n    <string>${extraCa}</string>\n`
+    : "";
 
   // Exec cork directly (no `node` prefix) so package-manager wrappers like
   // the pnpm shell shim work — node would choke on their `#!/bin/sh` body.
@@ -50,7 +60,7 @@ function generatePlist(): string {
     <string>${process.env.PATH || "/usr/bin:/bin:/usr/local/bin"}</string>
     <key>HOME</key>
     <string>${process.env.HOME || ""}</string>
-  </dict>
+${extraCaEnv}  </dict>
 </dict>
 </plist>`;
 }
@@ -167,6 +177,11 @@ export async function startForeground(): Promise<void> {
   if (config.channels.lark) {
     logger.info("lark channel configured, adding");
     channels.push(new LarkChannel(config.channels.lark));
+  }
+
+  if (config.channels.telegram) {
+    logger.info("telegram channel configured, adding");
+    channels.push(new TelegramChannel(config.channels.telegram));
   }
 
   if (channels.length === 0) {

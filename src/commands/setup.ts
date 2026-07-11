@@ -1,6 +1,7 @@
 import { input } from "@inquirer/prompts";
 import { loadConfig, saveConfig } from "../config/loader.js";
 import { runLarkSetup } from "../channels/lark/setup.js";
+import { runTelegramSetup } from "../channels/telegram/setup.js";
 
 export async function setupCommand(channelName?: string): Promise<void> {
   const config = loadConfig();
@@ -18,6 +19,10 @@ export async function setupCommand(channelName?: string): Promise<void> {
     console.log("\n--- Lark/Feishu Channel Setup ---\n");
     const larkConfig = await runLarkSetup();
     config.channels.lark = larkConfig;
+  } else if (channelName === "telegram") {
+    console.log("\n--- Telegram Channel Setup ---\n");
+    const telegramConfig = await runTelegramSetup();
+    config.channels.telegram = telegramConfig;
   } else {
     console.log(`Channel "${channelName}" is not supported yet.`);
     return;

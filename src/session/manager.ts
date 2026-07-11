@@ -101,8 +101,12 @@ export class SessionManager extends EventEmitter {
     });
   }
 
-  getSession(chatId: string, threadId?: string): ActiveSession | undefined {
-    const key = sessionKey("lark", chatId, threadId);
+  getSession(
+    channel: string,
+    chatId: string,
+    threadId?: string
+  ): ActiveSession | undefined {
+    const key = sessionKey(channel, chatId, threadId);
     return this.sessions.get(key);
   }
 
@@ -112,8 +116,8 @@ export class SessionManager extends EventEmitter {
 
   /** Whether a session record exists in memory or on disk for this chat/thread.
    * Used to detect a brand-new thread (no record yet) that needs seeding. */
-  sessionExists(chatId: string, threadId?: string): boolean {
-    const key = sessionKey("lark", chatId, threadId);
+  sessionExists(channel: string, chatId: string, threadId?: string): boolean {
+    const key = sessionKey(channel, chatId, threadId);
     return this.sessions.has(key) || loadSession(key) !== null;
   }
 
@@ -122,8 +126,8 @@ export class SessionManager extends EventEmitter {
    * the in-memory session.meta when the session is live, the persisted
    * SessionMeta otherwise. Defaults to true for chats with no record yet.
    */
-  getMentionRequired(chatId: string): boolean {
-    const key = sessionKey("lark", chatId);
+  getMentionRequired(channel: string, chatId: string): boolean {
+    const key = sessionKey(channel, chatId);
     const session = this.sessions.get(key);
     if (session) return session.meta.mentionRequired ?? true;
     return loadSession(key)?.mentionRequired ?? true;
@@ -134,8 +138,8 @@ export class SessionManager extends EventEmitter {
    * object the rest of the manager persists, so a later dispatch save can
    * never clobber it with a stale value.
    */
-  setMentionRequired(chatId: string, value: boolean): void {
-    const key = sessionKey("lark", chatId);
+  setMentionRequired(channel: string, chatId: string, value: boolean): void {
+    const key = sessionKey(channel, chatId);
     const session = this.sessions.get(key);
     if (session) {
       session.meta.mentionRequired = value;
@@ -157,7 +161,7 @@ export class SessionManager extends EventEmitter {
    * Does NOT start tmux — just loads metadata.
    */
   ensureSession(message: IncomingMessage): ActiveSession {
-    const key = sessionKey("lark", message.chatId, message.threadId);
+    const key = sessionKey(message.channel, message.chatId, message.threadId);
 
     let session = this.sessions.get(key);
     if (session) return session;
@@ -170,6 +174,7 @@ export class SessionManager extends EventEmitter {
 
     const meta: SessionMeta = existingMeta || {
       sessionId: sid,
+      channel: message.channel,
       chatId: message.chatId,
       threadId: message.threadId,
       chatType: message.chatType,
@@ -223,7 +228,7 @@ export class SessionManager extends EventEmitter {
   async dispatch(
     message: IncomingMessage
   ): Promise<void> {
-    const key = sessionKey("lark", message.chatId, message.threadId);
+    const key = sessionKey(message.channel, message.chatId, message.threadId);
     let session = this.sessions.get(key);
 
     if (!session) {
@@ -302,11 +307,12 @@ export class SessionManager extends EventEmitter {
   }
 
   createNewSession(
+    channel: string,
     chatId: string,
     threadId?: string,
     workspace?: string
   ): SessionMeta {
-    const key = sessionKey("lark", chatId, threadId);
+    const key = sessionKey(channel, chatId, threadId);
     const ws = workspace
       ? resolveWorkspacePath(workspace)
       : resolveWorkspacePath(this.config.defaultWorkspace);
@@ -322,6 +328,7 @@ export class SessionManager extends EventEmitter {
 
     const meta: SessionMeta = {
       sessionId: uuidv4(),
+      channel,
       chatId,
       threadId,
       chatType: "p2p",

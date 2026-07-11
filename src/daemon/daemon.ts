@@ -194,9 +194,14 @@ export class CorkDaemon {
       : undefined;
   }
 
-  private findChannel(meta: { chatId: string }): Channel | undefined {
-    // For now, return the first channel (Lark).
-    // In the future, route based on session key prefix (lark_, discord_, etc.)
+  private findChannel(meta: { channel?: string }): Channel | undefined {
+    // Route the reply back through the channel the session belongs to. Falls
+    // back to the first channel for pre-multichannel sessions with no `channel`
+    // recorded (those predate Telegram support and are all Lark).
+    if (meta.channel) {
+      const match = this.channels.find((c) => c.name === meta.channel);
+      if (match) return match;
+    }
     return this.channels[0];
   }
 }

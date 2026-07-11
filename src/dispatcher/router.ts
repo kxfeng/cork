@@ -27,12 +27,15 @@ export class MessageRouter implements Dispatcher {
   ): Promise<DispatchResult> {
     logger.debug("enqueuing message", { messageId: message.messageId, chatId: message.chatId });
     let syncReplied = false;
-    // Serialize per session (chat, or thread within a chat), not per chat — so
-    // different threads in the same group run concurrently instead of blocking
-    // each other, while messages within one thread stay ordered.
-    const queueKey = message.threadId
-      ? `${message.chatId}:${message.threadId}`
-      : message.chatId;
+    // Serialize per session (channel + chat, or thread within a chat), not per
+    // chat — so different threads in one group, and different channels, run
+    // concurrently instead of blocking each other, while messages within one
+    // thread stay ordered.
+    const queueKey = sessionKey(
+      message.channel,
+      message.chatId,
+      message.threadId
+    );
     await this.queue.enqueue(queueKey, async () => {
       logger.debug("dequeued, processing", { messageId: message.messageId });
       try {
@@ -68,29 +71,30 @@ export class MessageRouter implements Dispatcher {
     return { syncReplied };
   }
 
-  resolveSessionKey(chatId: string, threadId?: string): string {
-    return sessionKey("lark", chatId, threadId);
+  resolveSessionKey(channel: string, chatId: string, threadId?: string): string {
+    return sessionKey(channel, chatId, threadId);
   }
 
-  sessionExists(chatId: string, threadId?: string): boolean {
-    return this.sessionManager.sessionExists(chatId, threadId);
+  sessionExists(channel: string, chatId: string, threadId?: string): boolean {
+    return this.sessionManager.sessionExists(channel, chatId, threadId);
   }
 
-  getMentionRequired(chatId: string): boolean {
-    return this.sessionManager.getMentionRequired(chatId);
+  getMentionRequired(channel: string, chatId: string): boolean {
+    return this.sessionManager.getMentionRequired(channel, chatId);
   }
 
-  setMentionRequired(chatId: string, value: boolean): void {
-    this.sessionManager.setMentionRequired(chatId, value);
+  setMentionRequired(channel: string, chatId: string, value: boolean): void {
+    this.sessionManager.setMentionRequired(channel, chatId, value);
   }
 
   trackPendingReaction(
+    channel: string,
     chatId: string,
     messageId: string,
     reactionId: string,
     threadId?: string
   ): void {
-    const key = sessionKey("lark", chatId, threadId);
+    const key = sessionKey(channel, chatId, threadId);
     this.sessionManager.trackPendingReaction(key, messageId, reactionId);
   }
 

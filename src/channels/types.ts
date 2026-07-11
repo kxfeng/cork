@@ -1,4 +1,8 @@
 export interface IncomingMessage {
+  /** Channel name this message came from (e.g. "lark", "telegram"). Prefixes the
+   * session key so different channels never share a session, and lets the daemon
+   * route the reply back through the right channel. */
+  channel: string;
   chatId: string;
   chatType: "p2p" | "group";
   messageId: string;
@@ -30,21 +34,22 @@ export interface DispatchResult {
 
 export interface Dispatcher {
   handleMessage(channel: Channel, message: IncomingMessage): Promise<DispatchResult>;
-  resolveSessionKey?(chatId: string, threadId?: string): string;
+  resolveSessionKey?(channel: string, chatId: string, threadId?: string): string;
   /** Whether a session record already exists (in memory or on disk) for this
    * chat/thread — used to detect a brand-new thread that needs seeding. */
-  sessionExists?(chatId: string, threadId?: string): boolean;
+  sessionExists?(channel: string, chatId: string, threadId?: string): boolean;
   /** Track an ack reaction to be removed when Claude replies. */
   trackPendingReaction?(
+    channel: string,
     chatId: string,
     messageId: string,
     reactionId: string,
     threadId?: string
   ): void;
   /** Whether a group chat currently requires an @bot mention. */
-  getMentionRequired?(chatId: string): boolean;
+  getMentionRequired?(channel: string, chatId: string): boolean;
   /** Set a group chat's @bot mention requirement. */
-  setMentionRequired?(chatId: string, value: boolean): void;
+  setMentionRequired?(channel: string, chatId: string, value: boolean): void;
 }
 
 export interface Channel {

@@ -4,6 +4,10 @@ import { paths } from "../config/paths.js";
 
 export interface SessionMeta {
   sessionId: string;
+  /** Channel this session belongs to (e.g. "lark", "telegram"). Lets the daemon
+   * route replies back through the originating channel. Optional for backward
+   * compat with pre-multichannel session files (absent ⇒ treat as "lark"). */
+  channel?: string;
   chatId: string;
   /** Lark thread id (omt_…) when this session is a thread; absent for a
    * whole-chat session. Part of the session key when present. */

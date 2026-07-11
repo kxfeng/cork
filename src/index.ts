@@ -58,4 +58,24 @@ program
     await showStatus();
   });
 
+const telegram = program
+  .command("telegram")
+  .description("Manage the Telegram channel allowlist");
+
+telegram
+  .command("allow <userId>")
+  .description("Add a Telegram numeric user id to the allowlist")
+  .action(async (userId: string) => {
+    const { telegramAllow } = await import("./commands/telegram.js");
+    await telegramAllow(userId);
+  });
+
+telegram
+  .command("deny <userId>")
+  .description("Remove a Telegram numeric user id from the allowlist")
+  .action(async (userId: string) => {
+    const { telegramDeny } = await import("./commands/telegram.js");
+    await telegramDeny(userId);
+  });
+
 program.parse();

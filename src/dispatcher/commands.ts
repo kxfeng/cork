@@ -63,7 +63,7 @@ async function handleStatus(
   message: IncomingMessage,
   sessionManager: SessionManager
 ): Promise<CommandResult> {
-  const session = sessionManager.getSession(message.chatId, message.threadId);
+  const session = sessionManager.getSession(message.channel, message.chatId, message.threadId);
 
   let reply = `📊 **Session Status**\n`;
 
@@ -108,6 +108,7 @@ async function handleNew(
   }
 
   const meta = sessionManager.createNewSession(
+    message.channel,
     message.chatId,
     message.threadId,
     workspace
@@ -126,7 +127,7 @@ async function handleWorkspace(
   message: IncomingMessage,
   sessionManager: SessionManager
 ): Promise<CommandResult> {
-  const session = sessionManager.getSession(message.chatId, message.threadId);
+  const session = sessionManager.getSession(message.channel, message.chatId, message.threadId);
   const workspace = session?.meta.workspace || "(no session)";
   await sendCmdReply(channel, message, `📂 Current workspace: \`${workspace}\``);
   return { handled: true };
@@ -141,7 +142,7 @@ async function handleMentionOff(
     await sendCmdReply(channel, message, "ℹ️ /mention-off only applies to group chats.");
     return { handled: true };
   }
-  sessionManager.setMentionRequired(message.chatId, false);
+  sessionManager.setMentionRequired(message.channel, message.chatId, false);
   await sendCmdReply(channel, message, "✅ Mention requirement disabled. Owner messages will be processed without @bot.");
   return { handled: true };
 }
@@ -155,7 +156,7 @@ async function handleMentionOn(
     await sendCmdReply(channel, message, "ℹ️ /mention-on only applies to group chats.");
     return { handled: true };
   }
-  sessionManager.setMentionRequired(message.chatId, true);
+  sessionManager.setMentionRequired(message.channel, message.chatId, true);
   await sendCmdReply(channel, message, "✅ Mention requirement enabled. @bot is required again.");
   return { handled: true };
 }

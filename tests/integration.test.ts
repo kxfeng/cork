@@ -187,7 +187,7 @@ describe("Cork Integration Tests (commands)", () => {
     const sessionFile = path.join(
       corkHome,
       "sessions",
-      "lark_test-chat-mentionoff.json"
+      "test_test-chat-mentionoff.json"
     );
     expect(fs.existsSync(sessionFile)).toBe(true);
     const data = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));

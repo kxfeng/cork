@@ -43,31 +43,31 @@ describe("SessionManager mention-required", () => {
   });
 
   it("defaults to true when no session record exists", () => {
-    expect(newManager().getMentionRequired("unknown_chat")).toBe(true);
+    expect(newManager().getMentionRequired("lark", "unknown_chat")).toBe(true);
   });
 
   it("reads mentionRequired from the persisted SessionMeta", () => {
     createSessionFile("read_chat", false);
-    expect(newManager().getMentionRequired("read_chat")).toBe(false);
+    expect(newManager().getMentionRequired("lark", "read_chat")).toBe(false);
   });
 
   it("setMentionRequired persists to the SessionMeta on disk", () => {
     createSessionFile("write_chat", true);
     const m = newManager();
-    m.setMentionRequired("write_chat", false);
+    m.setMentionRequired("lark", "write_chat", false);
 
     const data = JSON.parse(
       fs.readFileSync(path.join(testDir, "lark_write_chat.json"), "utf-8")
     );
     expect(data.mentionRequired).toBe(false);
-    expect(m.getMentionRequired("write_chat")).toBe(false);
+    expect(m.getMentionRequired("lark", "write_chat")).toBe(false);
   });
 
   it("setMentionRequired is a no-op when no session record exists", () => {
     const m = newManager();
-    expect(() => m.setMentionRequired("ghost_chat", false)).not.toThrow();
+    expect(() => m.setMentionRequired("lark", "ghost_chat", false)).not.toThrow();
     // Nothing to act on yet, so the read falls back to the default.
-    expect(m.getMentionRequired("ghost_chat")).toBe(true);
+    expect(m.getMentionRequired("lark", "ghost_chat")).toBe(true);
   });
 
   it("updates the live in-memory meta so a later save cannot clobber it", () => {
@@ -79,6 +79,7 @@ describe("SessionManager mention-required", () => {
 
     // Bring the session into memory (existing meta → no config needed).
     m.ensureSession({
+      channel: "lark",
       chatId: "live_chat",
       chatType: "group",
       messageId: "m1",
@@ -86,14 +87,14 @@ describe("SessionManager mention-required", () => {
       text: "hi",
     });
 
-    m.setMentionRequired("live_chat", false);
+    m.setMentionRequired("lark", "live_chat", false);
 
     // The in-memory meta — the object the manager re-persists on every
     // dispatch — must reflect the change.
-    expect(m.getSession("live_chat")!.meta.mentionRequired).toBe(false);
+    expect(m.getSession("lark", "live_chat")!.meta.mentionRequired).toBe(false);
 
     // Re-persisting that meta (as dispatch does) keeps the value.
-    saveSession("lark_live_chat", m.getSession("live_chat")!.meta);
+    saveSession("lark_live_chat", m.getSession("lark", "live_chat")!.meta);
     const data = JSON.parse(
       fs.readFileSync(path.join(testDir, "lark_live_chat.json"), "utf-8")
     );
