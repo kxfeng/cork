@@ -120,8 +120,9 @@ export class CorkDaemon {
     // threadReplyOpts). Falls back to a plain chat message otherwise.
     const replyOpts = this.threadReplyOpts(session);
 
-    logger.info("forwarding reply to lark", {
+    logger.info("forwarding reply", {
       sessionKey,
+      channel: channel.name,
       chatId,
       threadId: session.meta.threadId,
       inThread: !!replyOpts,
@@ -142,7 +143,7 @@ export class CorkDaemon {
         }
       })
       .catch((err) => {
-        logger.error("failed to send reply to lark", { sessionKey, err });
+        logger.error("failed to send reply", { sessionKey, channel: channel.name, err });
       });
   }
 
@@ -162,7 +163,7 @@ export class CorkDaemon {
       `Reply "yes ${msg.requestId}" or "no ${msg.requestId}"`;
 
     channel.sendReply(chatId, text, this.threadReplyOpts(session)).catch((err) => {
-      logger.error("failed to send permission request to lark", { err });
+      logger.error("failed to send permission request", { err });
     });
   }
 
@@ -176,7 +177,7 @@ export class CorkDaemon {
     channel
       .sendReply(session.meta.chatId, `⚠️ ${errorMsg}`, this.threadReplyOpts(session))
       .catch((err) => {
-        logger.error("failed to send error to lark", { err });
+        logger.error("failed to send error message", { err });
       });
   }
 

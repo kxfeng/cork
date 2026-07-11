@@ -56,6 +56,12 @@ function log(event: string, fields: Record<string, unknown> = {}): void {
 
 log("subprocess_started", { sockPath });
 
+// The session key is `<channel>_<chatId>[_<threadId>]`, so its prefix names the
+// platform this session talks to. Surface it in the tool description — a Telegram
+// session must not be told it is replying to Lark.
+const channelName = sessionKey.split("_", 1)[0];
+const platform = channelName.charAt(0).toUpperCase() + channelName.slice(1);
+
 // Create the MCP server with channel capability
 const mcp = new Server(
   { name: "cork-channel", version: "0.1.0" },
@@ -68,20 +74,20 @@ const mcp = new Server(
       tools: {},
     },
     instructions:
-      "Messages from Lark arrive as <channel source=\"cork-channel\" ...>. " +
+      `Messages from ${platform} arrive as <channel source="cork-channel" ...>. ` +
       "Reply using the cork-channel__reply tool. Always reply to every message. " +
-      "Reply text supports Markdown — it is rendered as rich text in Lark.",
+      "Reply text supports Markdown.",
   }
 );
 
-// Reply tool: Claude calls this to send a message back to Lark
+// Reply tool: Claude calls this to send a message back to the chat it came from
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "reply",
       description:
-        "Send a reply message back to the Lark chat. The reply text " +
-        "supports Markdown and is rendered as rich text in Lark.",
+        `Send a reply message back to the ${platform} chat. ` +
+        "The reply text supports Markdown.",
       inputSchema: {
         type: "object" as const,
         properties: {

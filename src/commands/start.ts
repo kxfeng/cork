@@ -186,7 +186,7 @@ export async function startForeground(): Promise<void> {
 
   if (channels.length === 0) {
     console.error(
-      "No channels configured. Run 'cork setup lark' to configure a channel."
+      "No channels configured. Run 'cork setup lark' or 'cork setup telegram'."
     );
     process.exit(1);
   }
