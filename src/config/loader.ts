@@ -26,7 +26,12 @@ export function loadConfig(): CorkConfig {
 export function saveConfig(config: CorkConfig): void {
   fs.mkdirSync(path.dirname(paths.configFile), { recursive: true });
   const content = JSON.stringify(config, null, 2);
-  fs.writeFileSync(paths.configFile, content, "utf-8");
+  // The config holds channel secrets — the Lark app secret and the Telegram bot
+  // token — so it must never be group- or world-readable. `mode` is only honoured
+  // when the file is created, so chmod unconditionally: that also repairs a config
+  // written before this was enforced.
+  fs.writeFileSync(paths.configFile, content, { encoding: "utf-8", mode: 0o600 });
+  fs.chmodSync(paths.configFile, 0o600);
 }
 
 export function resolveWorkspacePath(workspace: string): string {
