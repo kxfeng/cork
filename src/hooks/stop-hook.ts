@@ -31,6 +31,15 @@ const CHANNEL_MARKER = '<channel source="cork-channel"';
 const TAIL_BYTES = 8 * 1024 * 1024;
 // Watchdog: never let a stuck hook hang Claude Code's turn boundary.
 const WATCHDOG_MS = 8000;
+// Claude Code fires this hook before the turn's rows are guaranteed to be on
+// disk — the reply's tool_use line can still be missing when we first read the
+// transcript, which looks exactly like "the model never replied" and triggers a
+// spurious block (the user then gets a second, redundant message). So when no
+// reply is found, re-read for a while before believing it. A turn that genuinely
+// had no reply pays this wait once; it is about to be told to reply anyway.
+// Bounded well inside WATCHDOG_MS.
+const REPLY_WAIT_MS = 4000;
+const POLL_MS = 150;
 
 const BLOCK_REASON =
   "You did not call the mcp__cork-channel__reply tool this turn, so your " +
@@ -140,6 +149,25 @@ function turnHasReply(rows: TranscriptRow[], start: number): boolean {
   return false;
 }
 
+const sleep = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Whether the turn's reply is in the transcript, tolerating the write lag
+ * described at REPLY_WAIT_MS: a miss is re-checked until the deadline, since the
+ * row may simply not have been flushed yet. Returns as soon as the reply shows
+ * up, so a well-behaved turn is not delayed.
+ */
+async function replyLanded(transcriptPath: string): Promise<boolean> {
+  const deadline = Date.now() + REPLY_WAIT_MS;
+  for (;;) {
+    const rows = parseRows(readTail(transcriptPath, TAIL_BYTES));
+    if (rows.length > 0 && turnHasReply(rows, turnStartIndex(rows))) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(POLL_MS);
+  }
+}
+
 async function main(): Promise<void> {
   const raw = await readStdin();
   let input: HookInput = {};
@@ -155,18 +183,12 @@ async function main(): Promise<void> {
   const transcriptPath = input.transcript_path;
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return;
 
-  const rows = parseRows(readTail(transcriptPath, TAIL_BYTES));
-  if (rows.length === 0) return;
-
-  const start = turnStartIndex(rows);
-
-  // Model replied properly — allow the turn to stop.
-  if (turnHasReply(rows, start)) return;
-
-  // No reply this turn — prompt the model to self-correct.
-  process.stdout.write(
-    JSON.stringify({ decision: "block", reason: BLOCK_REASON })
-  );
+  if (!(await replyLanded(transcriptPath))) {
+    // No reply this turn — prompt the model to self-correct.
+    process.stdout.write(
+      JSON.stringify({ decision: "block", reason: BLOCK_REASON })
+    );
+  }
 }
 
 // Watchdog so a stuck hook can never hang Claude Code. Unref'd so it does
