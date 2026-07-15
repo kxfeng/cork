@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cork</title>
+    <link rel="stylesheet" href="/assets/xterm.css" />
+    <style>
+      :root {
+        --bg: #16161a;
+        --panel: #1d1d22;
+        --line: #2c2c34;
+        --fg: #d6d6dd;
+        --dim: #7c7c88;
+        --accent: #6ea8fe;
+        --live: #46c07a;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+      }
+      aside {
+        width: 270px;
+        flex: none;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      header b { font-size: 14px; letter-spacing: 0.02em; }
+      header span { color: var(--dim); font-size: 11px; }
+      #list { overflow-y: auto; flex: 1; padding: 6px; }
+      .s {
+        padding: 8px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        margin-bottom: 2px;
+      }
+      .s:hover { background: #26262d; }
+      .s.on { background: #2f3b52; }
+      .s .n {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-weight: 500;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #4a4a55;
+        flex: none;
+      }
+      .dot.live { background: var(--live); }
+      .s .m {
+        color: var(--dim);
+        font-size: 11px;
+        margin-top: 2px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      #bar {
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--line);
+        color: var(--dim);
+        font-size: 12px;
+        display: flex;
+        justify-content: space-between;
+      }
+      #term {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        padding: 6px 0 0 8px;
+        border-left: 2px solid transparent;
+      }
+      /* Which side has the keyboard. xterm sets .focus on its own root. */
+      #term:has(.focus) { border-left-color: var(--accent); }
+      #empty {
+        margin: auto;
+        color: var(--dim);
+      }
+      #composer {
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        padding: 8px 10px;
+        display: none;
+        gap: 8px;
+        align-items: flex-end;
+      }
+      #composer.on { display: flex; }
+      #msg {
+        flex: 1;
+        resize: none;
+        min-height: 38px;
+        max-height: 40vh;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, "PingFang SC", monospace;
+      }
+      #msg:focus { outline: none; border-color: var(--accent); }
+      #send {
+        padding: 8px 14px;
+        border: 0;
+        border-radius: 6px;
+        background: var(--accent);
+        color: #10141c;
+        font-weight: 600;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #send:disabled { opacity: 0.45; cursor: default; }
+      #hint {
+        color: var(--dim);
+        font-size: 11px;
+        padding: 0 10px 6px;
+        display: none;
+      }
+      #composer.on ~ #hint { display: block; }
+    </style>
+  </head>
+  <body>
+    <aside>
+      <header><b>cork</b><span id="count"></span></header>
+      <div id="list"></div>
+    </aside>
+    <main>
+      <div id="bar"><span id="who">select a session</span></div>
+      <div id="term"><div id="empty">no session selected</div></div>
+      <div id="composer">
+        <textarea id="msg" rows="1" placeholder="Message this session…  (Enter = send, Shift+Enter = newline)"></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div id="hint">Sent through the session's channel, not typed into the pane.</div>
+    </main>
+
+    <script src="/assets/xterm.js"></script>
+    <script src="/assets/addon-fit.js"></script>
+    <script>
+      // The server answers ?token=… with a cookie, so once this page has loaded
+      // the token is redundant. Drop it from the address bar (and from the
+      // bookmark the user is about to make) — the cookie carries it from now on.
+      if (new URLSearchParams(location.search).has("token")) {
+        history.replaceState(null, "", location.pathname);
+      }
+      const $ = (id) => document.getElementById(id);
+
+      let term = null;
+      let fit = null;
+      let ws = null;
+      let current = null;
+
+      function openSession(s) {
+        if (ws) { ws.close(); ws = null; }
+        current = s.key;
+        render(sessions);
+        $("who").textContent = `${s.chatName} · ${s.channel} · ${s.workspace}`;
+        $("empty")?.remove();
+        $("composer").classList.add("on");
+        $("hint").textContent =
+          "Sent through the session's channel, not typed into the pane.";
+
+        if (!term) {
+          term = new Terminal({
+            // Menlo & friends carry no CJK glyphs — without a CJK fallback here,
+            // every Chinese character in a pane renders as a blank box.
+            fontFamily:
+              'ui-monospace, SFMono-Regular, Menlo, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace',
+            fontSize: 13,
+            cursorBlink: true,
+            theme: { background: "#16161a", foreground: "#d6d6dd" },
+          });
+          fit = new FitAddon.FitAddon();
+          term.loadAddon(fit);
+          term.open($("term"));
+          term.onData((d) => {
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: "input", data: d }));
+            }
+          });
+          boxWatcher.observe($("term"));
+        }
+        term.reset();
+
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        ws = new WebSocket(
+          `${proto}://${location.host}/ws?session=${encodeURIComponent(s.key)}`
+        );
+        ws.onopen = () => { sendFit(); $("msg").focus(); };
+        ws.onmessage = (e) => term.write(e.data);
+        ws.onclose = () => term.write("\r\n\x1b[90m— detached —\x1b[0m\r\n");
+      }
+
+      // Composed text goes to the daemon, which feeds it to Claude over the same
+      // path a Lark/Telegram message takes — it is not typed into the pane. The
+      // reply therefore comes back over the session's own channel, and shows up
+      // in the pane like any other turn.
+      async function send() {
+        const text = $("msg").value;
+        if (!text.trim() || !current) return;
+        $("send").disabled = true;
+        try {
+          const r = await fetch("/api/send", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ session: current, text }),
+          });
+          if (r.ok) {
+            $("msg").value = "";
+            sizeComposer();
+          } else {
+            $("hint").textContent =
+              r.status === 409
+                ? "session is not connected — start it from its chat first"
+                : `send failed (${r.status})`;
+          }
+        } catch (e) {
+          $("hint").textContent = "send failed — is the daemon running?";
+        } finally {
+          $("send").disabled = false;
+          $("msg").focus(); // stay in the composer; the pane takes focus only on click
+        }
+      }
+
+      $("msg").addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" || e.isComposing) return; // IME mid-composition
+        if (e.shiftKey) return; // Shift+Enter: newline, the default
+        e.preventDefault();
+        send();
+      });
+      $("msg").addEventListener("input", sizeComposer);
+
+      // Esc in the pane hands the keyboard back to the composer. (Clicking either
+      // one also just works — xterm only reads the keyboard while it is focused,
+      // so the two never fight over it.)
+      $("term").addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          e.stopPropagation();
+          $("msg").focus();
+        }
+      }, true);
+      $("send").addEventListener("click", send);
+
+      function sizeComposer() {
+        const t = $("msg");
+        t.style.height = "auto";
+        t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px";
+        // #term shrinks as the composer grows; boxWatcher picks that up and re-fits.
+      }
+
+      // tmux sizes the pane to its client, so the pane must track the browser.
+      //
+      // FitAddon derives the column count from the measured width of one cell. If
+      // it measures before the font is ready the cell comes out too narrow, it asks
+      // for more columns than actually fit, and once the real font lands every line
+      // overflows the container and gets clipped on the right. So: never fit until
+      // document.fonts is settled, and re-fit whenever the box itself changes size
+      // (a window resize is only one of the ways that happens — the composer
+      // growing is another).
+      let fontsReady = false;
+      document.fonts.ready.then(() => {
+        fontsReady = true;
+        sendFit();
+      });
+
+      function sendFit() {
+        if (!fit || !term || !fontsReady) return;
+        fit.fit();
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      }
+
+      const boxWatcher = new ResizeObserver(() => sendFit());
+
+      let sessions = [];
+      function render(list) {
+        $("count").textContent = `${list.filter((s) => s.alive).length} live / ${list.length}`;
+        $("list").innerHTML = "";
+        for (const s of list) {
+          const el = document.createElement("div");
+          el.className = "s" + (s.key === current ? " on" : "");
+          const name = s.chatName + (s.isThread ? " ⤷ thread" : "");
+          el.innerHTML =
+            `<div class="n"><i class="dot${s.alive ? " live" : ""}"></i>${escapeHtml(name)}</div>` +
+            `<div class="m">${s.channel} · ${escapeHtml(s.workspace)}</div>`;
+          el.onclick = () => {
+            if (!s.alive) return;
+            openSession(s);
+          };
+          if (!s.alive) el.style.opacity = 0.45;
+          $("list").appendChild(el);
+        }
+      }
+
+      const escapeHtml = (t) =>
+        t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+      async function refresh() {
+        const r = await fetch("/api/sessions");
+        if (!r.ok) {
+          document.body.textContent = "unauthorized — open the URL printed by `cork status`";
+          return;
+        }
+        const data = await r.json();
+        sessions = data.sessions;
+        render(sessions);
+      }
+
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>

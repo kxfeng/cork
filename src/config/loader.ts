@@ -10,17 +10,24 @@ export function ensureDirs(): void {
 }
 
 export function loadConfig(): CorkConfig {
-  if (!fs.existsSync(paths.configFile)) {
-    return { ...DEFAULT_CONFIG };
-  }
-  const raw = fs.readFileSync(paths.configFile, "utf-8");
-  const parsed = jsonc.parse(raw) as Partial<CorkConfig>;
+  const parsed = loadRawConfig();
   return {
     ...DEFAULT_CONFIG,
     ...parsed,
     claude: { ...DEFAULT_CONFIG.claude, ...parsed.claude },
     channels: { ...DEFAULT_CONFIG.channels, ...parsed.channels },
   };
+}
+
+/**
+ * The config exactly as written on disk, with no defaults merged in — the only
+ * way to tell "the user never mentioned this key" from "the user set it to the
+ * value that happens to be our default". Used to decide what to seed on first run.
+ */
+export function loadRawConfig(): Partial<CorkConfig> {
+  if (!fs.existsSync(paths.configFile)) return {};
+  const raw = fs.readFileSync(paths.configFile, "utf-8");
+  return (jsonc.parse(raw) ?? {}) as Partial<CorkConfig>;
 }
 
 export function saveConfig(config: CorkConfig): void {

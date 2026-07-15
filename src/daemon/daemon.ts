@@ -5,6 +5,7 @@ import { ensureDirs } from "../config/loader.js";
 import { UdsServer, type ReplyMessage, type PermissionRequestMessage } from "./uds-server.js";
 import { paths } from "../config/paths.js";
 import { ensureCorkTmuxServer } from "../session/tmux.js";
+import { WebServer } from "../web/server.js";
 import { getLogger } from "../logger.js";
 
 const logger = getLogger("daemon");
@@ -13,6 +14,7 @@ export class CorkDaemon {
   private router: MessageRouter;
   private channels: Channel[] = [];
   private udsServer: UdsServer;
+  private webServer: WebServer | null = null;
   private running = false;
 
   constructor(
@@ -72,6 +74,18 @@ export class CorkDaemon {
       await channel.start(this.router);
     }
 
+    // Browser terminal — opt-in (absent from config ⇒ never listens).
+    if (this.config.web) {
+      this.webServer = new WebServer(this.config.web, this.router.sessionManager);
+      try {
+        await this.webServer.start();
+      } catch (err) {
+        // A busy port must not take the daemon down with it.
+        logger.error("web terminal failed to start", { err });
+        this.webServer = null;
+      }
+    }
+
     this.running = true;
     logger.info("cork daemon started");
   }
@@ -79,6 +93,8 @@ export class CorkDaemon {
   async stop(): Promise<void> {
     logger.info("stopping cork daemon");
     this.running = false;
+
+    await this.webServer?.stop();
 
     for (const channel of this.channels) {
       await channel.stop();

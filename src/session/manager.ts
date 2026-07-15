@@ -273,17 +273,23 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Inject a synthetic user message (e.g. an auto-retry from the
-   * transcript watcher) into the session over the same UDS path a real
-   * Lark message would take, bypassing the meta updates and the queue.
-   * Returns false if the session is not currently connected — the caller
-   * (typically the watcher) should treat that as "drop silently".
+   * Inject a synthetic user message — an auto-retry from the transcript watcher,
+   * or text typed into the web terminal — into the session over the same UDS path
+   * a real channel message would take, bypassing the meta updates and the queue.
+   *
+   * Deliberately does NOT touch `lastInboundMessageId`: it is not a real platform
+   * message, so a reply must still thread onto the last one that was (otherwise
+   * Lark's im.message.reply would be handed an id it has never heard of).
+   *
+   * Returns false if the session is not currently connected — the caller should
+   * treat that as "drop silently".
    */
   dispatchSystemMessage(
     key: string,
     chatId: string,
     text: string,
-    senderId: string
+    senderId: string,
+    origin = "cork-watcher"
   ): boolean {
     const session = this.sessions.get(key);
     if (!session || session.state !== "connected") {
@@ -299,11 +305,32 @@ export class SessionManager extends EventEmitter {
       meta: {
         chatId,
         senderId,
-        messageId: `cork-watcher-${Date.now()}`,
+        messageId: `${origin}-${Date.now()}`,
       },
     };
     this.sendToChannel(session, udsMsg);
     return true;
+  }
+
+  /**
+   * Deliver text typed in the web terminal to a session, as if the user had sent
+   * it through that session's channel. The model's reply therefore goes back out
+   * the way it always does — to Lark, to Telegram — and the browser sees it in
+   * the pane. Returns false if the session is not connected.
+   *
+   * Channel-agnostic on purpose: when the web becomes a channel in its own right,
+   * a web-native session routes through this unchanged.
+   */
+  dispatchWebMessage(key: string, text: string): boolean {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return this.dispatchSystemMessage(
+      key,
+      session.meta.chatId,
+      text,
+      "cork-web",
+      "cork-web"
+    );
   }
 
   createNewSession(

@@ -1,7 +1,9 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { loadConfig, ensureDirs } from "../config/loader.js";
+import { loadConfig, loadRawConfig, saveConfig, ensureDirs } from "../config/loader.js";
+import { DEFAULT_CONFIG, channelEnabled, type CorkConfig } from "../config/schema.js";
+import { findFreePort } from "../web/port.js";
 import { CorkDaemon } from "../daemon/daemon.js";
 import { setupSignalHandlers } from "../daemon/signal.js";
 import { LarkChannel } from "../channels/lark/index.js";
@@ -12,6 +14,34 @@ import type { Channel } from "../channels/types.js";
 import { enableLogFile, getLogger } from "../logger.js";
 
 const PLIST_LABEL = "com.cork.daemon";
+
+/**
+ * On first run, write the web terminal's config out so it is visible and
+ * editable rather than an invisible default. If the default port is taken, the
+ * one we settle on is what gets written — so it stays put across restarts
+ * instead of drifting each time something else claims it.
+ *
+ * Only ever seeds: a `web` key already in the file (including `null`, meaning
+ * "off") is left exactly as the user wrote it.
+ */
+async function seedWebConfig(config: CorkConfig): Promise<CorkConfig> {
+  if (loadRawConfig().web !== undefined) return config;
+
+  const logger = getLogger("start");
+  const wanted = config.web?.port ?? DEFAULT_CONFIG.web!.port;
+  const port = await findFreePort(wanted);
+  if (port !== wanted) {
+    logger.warn("default web port busy, taking the next free one", {
+      wanted,
+      port,
+    });
+  }
+
+  const seeded = { ...config, web: { ...config.web, port } };
+  saveConfig(seeded);
+  logger.info("seeded web config", { port });
+  return seeded;
+}
 
 function generatePlist(): string {
   let corkBin: string;
@@ -170,23 +200,34 @@ export async function startForeground(): Promise<void> {
 
   enableLogFile();
   const logger = getLogger("start");
-  const config = loadConfig();
+  const config = await seedWebConfig(loadConfig());
 
   const channels: Channel[] = [];
 
   if (config.channels.lark) {
-    logger.info("lark channel configured, adding");
-    channels.push(new LarkChannel(config.channels.lark));
+    if (channelEnabled(config.channels.lark)) {
+      logger.info("lark channel configured, adding");
+      channels.push(new LarkChannel(config.channels.lark));
+    } else {
+      logger.info("lark channel disabled, skipping");
+    }
   }
 
   if (config.channels.telegram) {
-    logger.info("telegram channel configured, adding");
-    channels.push(new TelegramChannel(config.channels.telegram));
+    if (channelEnabled(config.channels.telegram)) {
+      logger.info("telegram channel configured, adding");
+      channels.push(new TelegramChannel(config.channels.telegram));
+    } else {
+      logger.info("telegram channel disabled, skipping");
+    }
   }
 
   if (channels.length === 0) {
+    const anyConfigured = !!(config.channels.lark || config.channels.telegram);
     console.error(
-      "No channels configured. Run 'cork setup lark' or 'cork setup telegram'."
+      anyConfigured
+        ? "No channels enabled. Set channels.<name>.enabled to true, or remove it."
+        : "No channels configured. Run 'cork setup lark' or 'cork setup telegram'."
     );
     process.exit(1);
   }

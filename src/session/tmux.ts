@@ -23,7 +23,7 @@ export const TMUX_PREFIX = "cork_";
  * Resolved lazily (at call time) so merely importing this module reads neither
  * the env nor paths — some tests mock `paths` with only the fields they need.
  */
-function tmuxLabel(): string {
+export function tmuxLabel(): string {
   return process.env.CORK_TMUX_LABEL || "cork";
 }
 

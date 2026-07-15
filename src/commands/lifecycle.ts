@@ -1,5 +1,6 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import { loadConfig } from "../config/loader.js";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
 import { TMUX_PREFIX, tmuxAttachHint } from "../session/tmux.js";
@@ -82,6 +83,18 @@ export async function showStatus(): Promise<void> {
   }
 
   console.log(`Log: ${paths.logFile}`);
+
+  // Printed here rather than logged, because it carries the token. Opening it
+  // once sets a cookie, after which http://<host>:<port>/ works on its own.
+  const config = loadConfig();
+  if (config.web) {
+    const { readOrCreateToken } = await import("../web/server.js");
+    const host = config.web.host ?? "127.0.0.1";
+    console.log(
+      `Web: http://${host}:${config.web.port}/?token=${readOrCreateToken()}`
+    );
+  }
+
   console.log();
 
   const sessions = listSessions();
