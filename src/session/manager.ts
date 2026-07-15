@@ -12,6 +12,7 @@ import {
   type SessionMeta,
 } from "./store.js";
 import { resolveWorkspacePath } from "../config/loader.js";
+import { transcriptPath } from "./transcript.js";
 import type { CorkConfig } from "../config/schema.js";
 import type { IncomingMessage } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
@@ -391,14 +392,46 @@ export class SessionManager extends EventEmitter {
 
   // --- Private ---
 
+  /**
+   * Decide whether to `claude -r` (resume) or start fresh, and mutate `meta`
+   * accordingly. Claude Code deletes transcripts idle past cleanupPeriodDays
+   * (default 30), so a session cork last touched weeks ago may have had its
+   * transcript reaped. `claude -r <gone-id>` then hangs instead of erroring, and
+   * the session times out on every message with no way to recover itself. When
+   * the transcript is missing, tell the user it was auto-cleaned, mint a fresh
+   * id, persist it, and start clean instead of resuming into nothing.
+   *
+   * Returns true to resume, false to start a new session. Exists as its own
+   * method so the decision can be unit-tested without spawning tmux.
+   */
+  resolveResume(key: string, meta: SessionMeta): boolean {
+    if (!meta.claudeSessionStarted) return false;
+    if (fs.existsSync(transcriptPath(meta.workspace, meta.sessionId))) return true;
+
+    logger.warn("resume transcript missing — starting a fresh session", {
+      key,
+      sessionId: meta.sessionId,
+    });
+    this.emit(
+      "error",
+      key,
+      "Claude Code 会话已被自动清理(默认闲置超过 30 天),已为你新建一个会话继续。"
+    );
+    meta.sessionId = uuidv4();
+    meta.claudeSessionStarted = false;
+    saveSession(key, meta);
+    return false;
+  }
+
   private startSession(session: ActiveSession): void {
     const { key, meta } = session;
 
     // Ensure workspace exists
     fs.mkdirSync(meta.workspace, { recursive: true });
 
-    // Resume existing Claude session or create a new one with the stored UUID.
-    const resume = meta.claudeSessionStarted;
+    // Resume the existing Claude session, or start a new one with the stored
+    // UUID. resolveResume downgrades to "new" when the transcript was reaped.
+    const resume = this.resolveResume(key, meta);
     const claudeArgs = resume
       ? ["-r", meta.sessionId]
       : ["--session-id", meta.sessionId];
