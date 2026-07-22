@@ -22,6 +22,8 @@ export interface ReplyMessage extends UdsMessage {
   type: "reply";
   corkSessionKey: string;
   content: string;
+  /** Local paths to upload and send alongside the text. */
+  files?: string[];
 }
 
 export interface PermissionRequestMessage extends UdsMessage {

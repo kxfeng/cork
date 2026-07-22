@@ -143,10 +143,11 @@ export class CorkDaemon {
       threadId: session.meta.threadId,
       inThread: !!replyOpts,
       contentLen: content.length,
+      files: msg.files?.length ?? 0,
     });
 
     channel
-      .sendReply(chatId, content, replyOpts)
+      .sendReply(chatId, content, { ...replyOpts, files: msg.files })
       .then(() => {
         // Remove the ack emoji for the oldest pending message in this session
         const pending = this.router.sessionManager.popPendingReaction(sessionKey);

@@ -1,4 +1,4 @@
-import { Bot, GrammyError } from "grammy";
+import { Bot, GrammyError, InputFile } from "grammy";
 import type { Context } from "grammy";
 import fs from "node:fs";
 import os from "node:os";
@@ -18,7 +18,8 @@ const logger = getLogger("telegram");
 // Telegram's hard per-message cap. Long replies are split at this boundary.
 const MAX_CHUNK = 4096;
 // Shared with Lark: downloaded attachments land here and are referenced from the
-// message text as `[image: <path>]` / `[file: <path>]` tokens the model can Read.
+// message text as standard markdown — `![](path)` / `[name](path)` — the same
+// syntax the model uses to send one back.
 const MEDIA_DIR = path.join(os.tmpdir(), "cork-media");
 // Telegram caps bot file downloads at 20MB.
 const MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024;
@@ -101,6 +102,18 @@ export class TelegramChannel implements Channel {
       });
       lastId = String(sent.message_id);
     }
+
+    // Attachments follow the text, one message each — mirroring Lark. Never
+    // allowed to throw: a bad path costs the attachment, not the reply.
+    for (const filePath of opts?.files ?? []) {
+      try {
+        await this.bot.api.sendDocument(chatId, new InputFile(filePath));
+        logger.info("sent attachment", { filePath });
+      } catch (err) {
+        logger.warn("attachment failed, skipping", { filePath, err });
+      }
+    }
+
     return { messageId: lastId };
   }
 
@@ -174,9 +187,9 @@ export class TelegramChannel implements Channel {
       }
     }
 
-    // Download any attachment eagerly and inline a `[kind: <path>]` token — the
-    // same scheme Lark uses, so the model sees a uniform format and can Read the
-    // file. Done only after the gate so dropped messages don't burn quota/disk.
+    // Download any attachment eagerly and inline a markdown reference — the same
+    // scheme Lark uses, so the model sees a uniform format and can Read the file.
+    // Done only after the gate so dropped messages don't burn quota/disk.
     const mediaTokens = await this.downloadAttachments(ctx, messageId);
     const text = [caption, ...mediaTokens].filter((s) => s.trim()).join("\n");
     if (!text.trim()) return;
@@ -231,8 +244,8 @@ export class TelegramChannel implements Channel {
 
   /**
    * Detect an attachment on the message, download it to MEDIA_DIR, and return
-   * `[kind: <path>]` tokens (mirroring Lark's media handling). Best-effort:
-   * a failed download yields a `[kind: <unavailable>]` token, never throws.
+   * markdown references (mirroring Lark's media handling). Best-effort: a
+   * failed download yields a `[kind: <unavailable>]` token, never throws.
    */
   private async downloadAttachments(
     ctx: Context,
@@ -273,7 +286,10 @@ export class TelegramChannel implements Channel {
     if (!fileId) return [];
 
     const p = await this.downloadTelegramFile(fileId, messageId, name);
-    return [`[${kind}: ${p ?? "<unavailable>"}]`];
+    if (!p) return [`[${kind}: <unavailable>]`];
+    // Standard markdown, matching Lark and the syntax used to send one back.
+    if (kind === "image") return [`![](${p})`];
+    return [`[${name || p.split("/").pop() || kind}](${p})`];
   }
 
   private async downloadTelegramFile(

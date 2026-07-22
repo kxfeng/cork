@@ -165,8 +165,9 @@ describe("formatMergeForward", () => {
       },
     };
     const result = await formatMergeForward(items, rootId, forwardOnlyChannel);
-    expect(result).toContain("[image: ");
-    expect(result).toContain("[file: ");
+    // Attachments render as standard markdown — `![](path)` / `[name](path)` —
+    // the same syntax the model uses to send one back.
+    expect(result).toContain("![](");
     expect(result).toContain("doc.pdf");
     // Fell back to the outer forward id → saved path is prefixed with rootId.
     expect(result).toContain(`${rootId}_`);

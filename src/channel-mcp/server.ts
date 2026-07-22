@@ -87,13 +87,27 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "reply",
       description:
         `Send a reply message back to the ${platform} chat. ` +
-        "The reply text supports Markdown.",
+        "The reply text supports Markdown. To include an image, reference a " +
+        "local file inline as `![](/abs/path.png)` and it is uploaded and shown " +
+        "at that spot. To attach other files, pass their paths in `files`.",
       inputSchema: {
         type: "object" as const,
         properties: {
           text: {
             type: "string",
-            description: "The reply text. Markdown is supported.",
+            description:
+              "The reply text. Markdown is supported. A local image referenced " +
+              "as `![](/abs/path.png)` is uploaded and inlined where it appears; " +
+              "references inside code blocks, remote URLs, and paths that do not " +
+              "exist are left as literal text.",
+          },
+          files: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Absolute paths of local files to attach. Each is sent as its own " +
+              "message after the text. Use this for documents and other " +
+              "non-image files; images are better inlined via `![](path)`.",
           },
         },
         required: ["text"],
@@ -104,9 +118,13 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "reply") {
-    const { text } = req.params.arguments as { text: string };
+    const { text, files } = req.params.arguments as {
+      text: string;
+      files?: string[];
+    };
     log("reply_tool_called", {
       contentLen: text.length,
+      files: files?.length ?? 0,
       udsConnected: udsClient.connected,
     });
     try {
@@ -114,6 +132,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         type: "reply",
         corkSessionKey: sessionKey!,
         content: text,
+        ...(files?.length ? { files } : {}),
       });
       log("reply_sent_to_uds");
       return { content: [{ type: "text" as const, text: "sent" }] };

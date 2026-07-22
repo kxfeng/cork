@@ -4,8 +4,8 @@
  *
  * Format rules:
  * - Simple types (text, post, placeholders) → bare content.
- * - Media (image/file/audio/video) → a self-contained `[kind: /path]` token,
- *   the file downloaded to the temp dir.
+ * - Media (image/file/audio/video) → standard markdown referencing the file
+ *   downloaded to the temp dir: `![](/path)` for images, `[kind](/path)` else.
  * - Card → `<card title="…">…</card>` (see card-converter.ts).
  * - A message nested inside a forward/quote is wrapped in
  *   `<message type sender time>…</message>`; the top-level message is not
@@ -140,8 +140,18 @@ async function downloadMedia(
   return out;
 }
 
+/**
+ * Render a downloaded attachment as standard markdown, matching the syntax the
+ * model uses to send one back: `![](path)` for images, `[kind](path)` for
+ * everything else. Keeping both directions on one syntax means there is a
+ * single convention to learn, and quoting an inbound image naturally sends it
+ * back rather than emitting a token cork would not recognise.
+ */
 function mediaToken(kind: string, p: string): string {
-  return `[${kind}: ${p}]`;
+  if (kind === "image") return `![](${p})`;
+  // The path already carries the filename, so the link text names the kind
+  // (file / audio / video) instead of repeating it.
+  return `[${kind}](${p})`;
 }
 
 /** Format a timestamp (ms since epoch) as `YYYY-MM-DD HH:MM:SS`. */
@@ -240,7 +250,7 @@ export async function formatLeafContent(
       const pathByKey = new Map(downloaded.map((d) => [d.fileKey, d.path]));
       for (const k of keys) {
         const repl = pathByKey.has(k)
-          ? `[image: ${pathByKey.get(k)}]`
+          ? `![](${pathByKey.get(k)})`
           : `[image: <unavailable>]`;
         card = card.split(`[image: ${k}]`).join(repl);
       }
@@ -251,16 +261,16 @@ export async function formatLeafContent(
   // text / post / sticker / share_* / location / unknown — synchronous parse.
   let text = parseMessageContent(msgType, content);
 
-  // A post may carry inline images. extractPostText emits an inline
-  // [image: <image_key>] marker per image; swap each for the downloaded local
-  // path (same scheme as cards) so there is no separate trailing file list.
+  // A post may carry inline images. extractPostText emits an internal
+  // [image: <image_key>] placeholder per image; swap each for a markdown
+  // reference to the downloaded path (same scheme as cards).
   if (msgType === "post") {
     const resources = extractResourceKeys(msgType, content);
     const downloaded = await downloadMedia(channel, dlIds, resources);
     const pathByKey = new Map(downloaded.map((d) => [d.fileKey, d.path]));
     for (const res of resources) {
       const repl = pathByKey.has(res.fileKey)
-        ? `[image: ${pathByKey.get(res.fileKey)}]`
+        ? `![](${pathByKey.get(res.fileKey)})`
         : `[image: <unavailable>]`;
       text = text.split(`[image: ${res.fileKey}]`).join(repl);
     }

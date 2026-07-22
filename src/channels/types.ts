@@ -25,6 +25,8 @@ export interface SendReplyOptions {
   replyToMessageId?: string;
   /** Ask Lark to place the reply in the message's thread. */
   replyInThread?: boolean;
+  /** Local file paths to upload and send after the text, one message each. */
+  files?: string[];
 }
 
 export interface DispatchResult {

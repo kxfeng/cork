@@ -1,4 +1,5 @@
 import * as lark from "@larksuiteoapi/node-sdk";
+import fs from "node:fs";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 
@@ -75,7 +76,12 @@ function maskSensitiveContent(text: string): string {
   return masked;
 }
 
-function appendMaskedNotice(content: string, msgType: "post" | "interactive"): string {
+function appendMaskedNotice(
+  content: string,
+  msgType: "post" | "interactive" | "file"
+): string {
+  // A `file` message carries only a file_key — no prose to mask or annotate.
+  if (msgType === "file") return content;
   try {
     const obj = JSON.parse(content);
     if (msgType === "interactive") {
@@ -99,10 +105,78 @@ function isContentAuditError(err: unknown): boolean {
          e?.code === 230028;
 }
 
+/**
+ * Upload a local image and return its image_key, which is what a post's
+ * `{tag:"img"}` element and an `image` message both reference. Throws on
+ * failure — callers degrade to sending the text alone rather than losing the
+ * whole reply.
+ */
+export async function uploadImage(
+  client: lark.Client,
+  filePath: string
+): Promise<string> {
+  // Unlike im.message.create, the SDK unwraps this one to the data payload.
+  const res = await client.im.image.create({
+    data: {
+      image_type: "message",
+      image: fs.createReadStream(filePath),
+    },
+  });
+  if (!res?.image_key) {
+    throw new Error(`Lark image upload returned no image_key for ${filePath}`);
+  }
+  return res.image_key;
+}
+
+/**
+ * Lark types an upload by extension. Only the document types get special
+ * treatment (correct icon and in-app preview); everything else — including
+ * video and audio, which would additionally need a cover image or opus
+ * encoding — goes as `stream`, a plain downloadable file. Degrading to stream
+ * always sends; guessing `mp4` without a cover would not.
+ */
+const FILE_TYPES: Record<string, string> = {
+  ".pdf": "pdf",
+  ".doc": "doc",
+  ".docx": "doc",
+  ".xls": "xls",
+  ".xlsx": "xls",
+  ".ppt": "ppt",
+  ".pptx": "ppt",
+};
+
+export function fileTypeFor(filePath: string): string {
+  const dot = filePath.lastIndexOf(".");
+  if (dot < 0) return "stream";
+  return FILE_TYPES[filePath.slice(dot).toLowerCase()] ?? "stream";
+}
+
+/**
+ * Upload a local file and return its file_key for a `file` message. Throws on
+ * failure; callers keep the text reply rather than dropping it.
+ */
+export async function uploadFile(
+  client: lark.Client,
+  filePath: string
+): Promise<{ fileKey: string; fileName: string }> {
+  const fileName = filePath.split("/").pop() || "file";
+  const res = await client.im.file.create({
+    data: {
+      file_type: fileTypeFor(filePath) as never,
+      file_name: fileName,
+      file: fs.createReadStream(filePath),
+    },
+  });
+  if (!res?.file_key) {
+    throw new Error(`Lark file upload returned no file_key for ${filePath}`);
+  }
+  return { fileKey: res.file_key, fileName };
+}
+
 export async function sendMessage(
   client: lark.Client,
   chatId: string,
-  msgType: "post" | "interactive",
+  msgType: "post" | "interactive" | "file",
   content: string,
   opts?: { replyToMessageId?: string; replyInThread?: boolean }
 ): Promise<string> {

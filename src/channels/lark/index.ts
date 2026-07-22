@@ -21,12 +21,15 @@ import {
   fetchCardContent as larkFetchCardContent,
   downloadMessageResource as larkDownloadResource,
   getBotInfo,
+  uploadImage,
+  uploadFile,
   getUserName as larkGetUserName,
   type SubMessageItem,
   type FetchedMessage,
   type ThreadMessageItem,
 } from "./client.js";
-import { buildPostContent } from "./card.js";
+import { buildPostContent, buildPostContentFromSegments } from "./card.js";
+import { scanImages, escapeSkipped, buildSegments } from "./markdown.js";
 import { createEventDispatcher, clearStaleBuffers } from "./events.js";
 
 const logger = getLogger("lark-channel");
@@ -225,6 +228,55 @@ export class LarkChannel implements Channel {
     }
   }
 
+  /**
+   * Turn the model's markdown into post content, uploading any local images it
+   * referenced. Never throws: an image that cannot be uploaded stays as its
+   * literal markdown, and if anything else goes wrong the caller still gets a
+   * plain-text post.
+   */
+  private async buildPost(content: string): Promise<string> {
+    try {
+      let text = content;
+      let scan = scanImages(text);
+
+      if (scan.skipped.length > 0) {
+        // Worth saying out loud — otherwise the reply quietly arrives without
+        // the picture and nothing explains why.
+        logger.warn("image references not sent", {
+          skipped: scan.skipped.map((s) => ({ path: s.path, reason: s.reason })),
+        });
+        // Lark renders the `md` element itself, so an un-uploaded reference
+        // would come out as "<Image data error>" rather than as text. Escaping
+        // keeps the path visible; rescan so offsets match the rewritten text.
+        text = escapeSkipped(text, scan);
+        scan = scanImages(text);
+      }
+
+      const refs = scan.refs;
+      if (refs.length === 0) return buildPostContent(text);
+
+      const keys = await Promise.all(
+        refs.map(async (ref) => {
+          try {
+            return await uploadImage(this.client, ref.path);
+          } catch (err) {
+            logger.warn("image upload failed, keeping markdown reference", {
+              path: ref.path,
+              err,
+            });
+            return null;
+          }
+        })
+      );
+
+      if (keys.every((k) => k === null)) return buildPostContent(text);
+      return buildPostContentFromSegments(buildSegments(text, refs, keys));
+    } catch (err) {
+      logger.warn("post build failed, falling back to plain text", { err });
+      return buildPostContent(content);
+    }
+  }
+
   async sendReply(
     chatId: string,
     content: string,
@@ -233,11 +285,39 @@ export class LarkChannel implements Channel {
     // Every channel reply is sent as a Feishu post rich-text message. When opts
     // carries a replyToMessageId, it is sent as a thread reply instead of a
     // plain chat message.
-    const postContent = buildPostContent(content);
+    //
+    // Local images the model referenced as `![](path)` are uploaded and inlined
+    // where they appeared. Uploading is best-effort by design: any failure
+    // leaves that reference as literal text, and a total failure falls back to
+    // the plain-text post — sending the words always beats sending nothing.
+    const postContent = await this.buildPost(content);
     const messageId = await sendMessage(this.client, chatId, "post", postContent, {
       replyToMessageId: opts?.replyToMessageId,
       replyInThread: opts?.replyInThread,
     });
+
+    // Attachments follow the text, one message each — Lark has no way to inline
+    // a file into a post. Sent after the text and never allowed to throw, so a
+    // bad path costs the attachment, not the reply.
+    for (const filePath of opts?.files ?? []) {
+      try {
+        const { fileKey, fileName } = await uploadFile(this.client, filePath);
+        await sendMessage(
+          this.client,
+          chatId,
+          "file",
+          JSON.stringify({ file_key: fileKey }),
+          {
+            replyToMessageId: opts?.replyToMessageId,
+            replyInThread: opts?.replyInThread,
+          }
+        );
+        logger.info("sent attachment", { fileName });
+      } catch (err) {
+        logger.warn("attachment failed, skipping", { filePath, err });
+      }
+    }
+
     return { messageId };
   }
 
