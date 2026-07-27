@@ -27,6 +27,10 @@ export interface SendReplyOptions {
   replyInThread?: boolean;
   /** Local file paths to upload and send after the text, one message each. */
   files?: string[];
+  /** Open ids to @mention at the head of the message. Lark renders these as real
+   * mentions; other channels ignore them. Used by cork-initiated messages such
+   * as the new-chat greeting. */
+  atUserIds?: string[];
 }
 
 export interface DispatchResult {

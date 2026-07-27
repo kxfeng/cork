@@ -58,6 +58,40 @@ program
     await showStatus();
   });
 
+const session = program.command("session").description("Manage sessions");
+
+session
+  .command("create")
+  .description("Create and warm a Claude Code session for a chat")
+  .requiredOption("--chat <chatId>", "Chat id to create a session for")
+  .option("--channel <channel>", "Channel the chat belongs to", "lark")
+  .option("--workspace <path>", "Workspace dir (defaults to configured)")
+  .action(async (opts) => {
+    const { sessionCreate } = await import("./commands/session.js");
+    sessionCreate({
+      channel: opts.channel,
+      chat: opts.chat,
+      workspace: opts.workspace,
+    });
+  });
+
+program
+  .command("send")
+  .description("Send a message to a chat as the bot (optionally @mentioning)")
+  .requiredOption("--chat <chatId>", "Chat id to send to")
+  .requiredOption("--text <text>", "Message text (markdown)")
+  .option("--channel <channel>", "Channel to send through", "lark")
+  .option("--at <openId...>", "Open ids to @mention at the head of the message")
+  .action(async (opts) => {
+    const { sendCommand } = await import("./commands/send.js");
+    sendCommand({
+      channel: opts.channel,
+      chat: opts.chat,
+      text: opts.text,
+      at: opts.at,
+    });
+  });
+
 const telegram = program
   .command("telegram")
   .description("Manage the Telegram channel allowlist");

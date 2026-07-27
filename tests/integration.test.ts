@@ -17,6 +17,8 @@ vi.mock("../src/config/paths.js", () => ({
     configFile: `${corkHome}/config.jsonc`,
     envFile: `${corkHome}/env`,
     sessionsDir: `${corkHome}/sessions`,
+    commandsDir: `${corkHome}/commands`,
+    agentDir: `${corkHome}/agent`,
     socketPath: `${corkHome}/cork.sock`,
     logsDir: `${corkHome}/logs`,
     logFile: `${corkHome}/logs/cork.log`,

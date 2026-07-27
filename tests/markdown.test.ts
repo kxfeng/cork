@@ -7,7 +7,11 @@ import {
   extractImageRefs,
   buildSegments,
 } from "../src/channels/lark/markdown.js";
-import { buildPostContentFromSegments } from "../src/channels/lark/card.js";
+import {
+  buildPostContent,
+  buildPostContentFromSegments,
+  injectAtMentions,
+} from "../src/channels/lark/card.js";
 
 /**
  * Image references decide what gets uploaded and sent, so the risk here is
@@ -225,5 +229,32 @@ describe("escapeSkipped", () => {
     );
     const text = `ok ![](${img}) done`;
     expect(escapeSkipped(text, scanImages(text))).toBe(text);
+  });
+});
+
+describe("injectAtMentions", () => {
+  it("prepends at elements to the first paragraph", () => {
+    const base = buildPostContent("hello");
+    const out = JSON.parse(injectAtMentions(base, ["ou_1", "ou_2"]));
+    expect(out.zh_cn.content[0]).toEqual([
+      { tag: "at", user_id: "ou_1" },
+      { tag: "at", user_id: "ou_2" },
+      { tag: "text", text: " " },
+      { tag: "md", text: "hello" },
+    ]);
+  });
+
+  it("returns the post unchanged when there are no mentions", () => {
+    const base = buildPostContent("hi");
+    expect(injectAtMentions(base, [])).toBe(base);
+  });
+
+  it("keeps the message when the post structure is unexpected", () => {
+    // A mention is a courtesy; malformed input must cost the @mention, never the
+    // message. Same best-effort contract as the image and attachment paths.
+    for (const bad of ['{"not":"a post"}', "not json at all", "{}"]) {
+      expect(() => injectAtMentions(bad, ["ou_1"])).not.toThrow();
+      expect(injectAtMentions(bad, ["ou_1"])).toBe(bad);
+    }
   });
 });

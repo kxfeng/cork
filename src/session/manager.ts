@@ -373,6 +373,74 @@ export class SessionManager extends EventEmitter {
     return meta;
   }
 
+  /**
+   * Warm a session ahead of the first user message: create or reuse its meta and
+   * start Claude Code now, so that by the time the user speaks the pane is
+   * already connected and the message is answered without the startup wait.
+   *
+   * Used by the new-chat flow — cork creates the group, greets the owner, then
+   * prepares the session in the background. Idempotent: if the session is
+   * already starting or connected it only reconciles `mentionRequired` and
+   * returns, never spawning a second pane. Safe against the race with a user
+   * message that arrives first — both run on the one event loop and share the
+   * sessions map, so whichever gets there first starts it and the other reuses
+   * it (see dispatch).
+   */
+  prepareSession(opts: {
+    channel: string;
+    chatId: string;
+    threadId?: string;
+    workspace?: string;
+    mentionRequired?: boolean;
+  }): void {
+    const { channel, chatId, threadId } = opts;
+    const key = sessionKey(channel, chatId, threadId);
+
+    let session = this.sessions.get(key);
+    if (!session) {
+      const meta: SessionMeta = loadSession(key) || {
+        sessionId: uuidv4(),
+        channel,
+        chatId,
+        threadId,
+        chatType: "group",
+        chatName: chatId,
+        workspace: resolveWorkspacePath(
+          opts.workspace || this.config.defaultWorkspace
+        ),
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        lastMessagePreview: "",
+        claudeSessionStarted: false,
+        mentionRequired: true,
+      };
+      session = {
+        key,
+        meta,
+        state: "inactive",
+        messageQueue: [],
+        channelRegistered: false,
+        dialogDismissed: false,
+        pendingReactions: [],
+      };
+      this.sessions.set(key, session);
+    }
+
+    // Reconcile the mention flag whether the session is new or pre-existing —
+    // the new-chat flow wants the group to answer without an @mention.
+    if (opts.mentionRequired !== undefined) {
+      session.meta.mentionRequired = opts.mentionRequired;
+    }
+    saveSession(key, session.meta);
+
+    // Already warm (or warming): do not spawn a second pane.
+    if (session.state !== "inactive") return;
+
+    // Warm with an empty queue — when Claude connects nothing is pending, so it
+    // just waits for the user's first message.
+    this.startSession(session);
+  }
+
   async shutdown(): Promise<void> {
     // Stop each session's watcher (timer + fs handle) — their panes are torn
     // down wholesale by the single kill-server below, so we don't need a
@@ -423,15 +491,14 @@ export class SessionManager extends EventEmitter {
     return false;
   }
 
-  private startSession(session: ActiveSession): void {
-    const { key, meta } = session;
-
-    // Ensure workspace exists
-    fs.mkdirSync(meta.workspace, { recursive: true });
-
-    // Resume the existing Claude session, or start a new one with the stored
-    // UUID. resolveResume downgrades to "new" when the transcript was reaped.
-    const resume = this.resolveResume(key, meta);
+  /**
+   * Assemble claude's argv for a session. Exists as its own method — like
+   * resolveResume — so the flags can be unit-tested without spawning tmux;
+   * --add-dir in particular is the only thing making cork's injected skill
+   * visible to the launched process, and a silent regression there would cost
+   * the whole new-chat flow with no other symptom.
+   */
+  buildClaudeArgs(meta: SessionMeta, resume: boolean): string[] {
     const claudeArgs = resume
       ? ["-r", meta.sessionId]
       : ["--session-id", meta.sessionId];
@@ -446,10 +513,27 @@ export class SessionManager extends EventEmitter {
 
     claudeArgs.push("--mcp-config", this.mcpConfigPath);
     claudeArgs.push("--settings", this.settingsPath);
+    // Load cork's skills (new-chat, …) without touching ~/.claude or the
+    // workspace: claude scans <agentDir>/.claude/skills for an --add-dir dir.
+    claudeArgs.push("--add-dir", paths.agentDir);
     claudeArgs.push(
       "--dangerously-load-development-channels",
       "server:cork-channel"
     );
+
+    return claudeArgs;
+  }
+
+  private startSession(session: ActiveSession): void {
+    const { key, meta } = session;
+
+    // Ensure workspace exists
+    fs.mkdirSync(meta.workspace, { recursive: true });
+
+    // Resume the existing Claude session, or start a new one with the stored
+    // UUID. resolveResume downgrades to "new" when the transcript was reaped.
+    const resume = this.resolveResume(key, meta);
+    const claudeArgs = this.buildClaudeArgs(meta, resume);
 
     // CORK_SESSION_KEY is passed via env, inherited by Claude → MCP subprocess
     const claudeCmd =

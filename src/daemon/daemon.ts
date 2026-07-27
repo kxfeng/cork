@@ -3,6 +3,8 @@ import { MessageRouter } from "../dispatcher/router.js";
 import type { CorkConfig } from "../config/schema.js";
 import { ensureDirs } from "../config/loader.js";
 import { UdsServer, type ReplyMessage, type PermissionRequestMessage } from "./uds-server.js";
+import { CommandSpool, type SpoolCommand } from "./command-spool.js";
+import { writeSkill } from "../skills/index.js";
 import { paths } from "../config/paths.js";
 import { ensureCorkTmuxServer } from "../session/tmux.js";
 import { WebServer } from "../web/server.js";
@@ -15,6 +17,7 @@ export class CorkDaemon {
   private channels: Channel[] = [];
   private udsServer: UdsServer;
   private webServer: WebServer | null = null;
+  private commandSpool: CommandSpool | null = null;
   private running = false;
 
   constructor(
@@ -41,6 +44,11 @@ export class CorkDaemon {
 
     // Refresh ~/.cork/claude-settings.json (Stop hook) likewise.
     this.router.sessionManager.writeClaudeSettings();
+
+    // Refresh cork's injected skill so the on-disk copy matches this cork
+    // version. The skill reads the bot app id from config at runtime, so nothing
+    // is passed in here. Never throws.
+    writeSkill();
 
     // Bring up cork's dedicated tmux server before any session spawns, so its
     // process line stays clean (forked by start-server, not by a session).
@@ -86,6 +94,12 @@ export class CorkDaemon {
       }
     }
 
+    // Command spool: CLI → daemon control channel (new-chat orchestration, …).
+    // Started last, after channels and the session manager are up, so a command
+    // consumed on the first tick already has everything it needs to act.
+    this.commandSpool = new CommandSpool((cmd) => this.handleCommand(cmd));
+    this.commandSpool.start();
+
     this.running = true;
     logger.info("cork daemon started");
   }
@@ -93,6 +107,9 @@ export class CorkDaemon {
   async stop(): Promise<void> {
     logger.info("stopping cork daemon");
     this.running = false;
+
+    this.commandSpool?.stop();
+    this.commandSpool = null;
 
     await this.webServer?.stop();
 
@@ -107,6 +124,78 @@ export class CorkDaemon {
 
   isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Dispatch a command enqueued by a CLI (see command-spool.ts). One switch arm
+   * per command; unknown commands are logged and dropped. Handlers are added as
+   * the commands they carry are implemented (prepare_session, send_message, …).
+   */
+  private async handleCommand(command: SpoolCommand): Promise<void> {
+    logger.info("handling spool command", { cmd: command.cmd });
+    switch (command.cmd) {
+      case "create_session":
+        this.handleCreateSession(command.args);
+        break;
+      case "send_message":
+        this.handleSendMessage(command.args);
+        break;
+      default:
+        logger.warn("unknown spool command", { cmd: command.cmd });
+    }
+  }
+
+  /**
+   * Send a cork-initiated message to a chat (the new-chat greeting, …). `chatId`
+   * and `text` are required; `channel` selects which channel to send through
+   * (defaults to the first), and `at` @mentions the given open ids. Best-effort:
+   * a failure is logged, never thrown.
+   */
+  private handleSendMessage(args: Record<string, unknown>): void {
+    const chatId = typeof args.chatId === "string" ? args.chatId : undefined;
+    const text = typeof args.text === "string" ? args.text : undefined;
+    if (!chatId || !text) {
+      logger.warn("send_message missing chatId/text", { args });
+      return;
+    }
+    const channelName =
+      typeof args.channel === "string" ? args.channel : undefined;
+    const channel = channelName
+      ? this.channels.find((c) => c.name === channelName)
+      : this.channels[0];
+    if (!channel) {
+      logger.error("send_message: no channel to send through", { channelName });
+      return;
+    }
+    channel
+      .sendReply(chatId, text, { atUserIds: normalizeStringList(args.at) })
+      .then(() => logger.info("sent cork message", { chatId }))
+      .catch((err) => logger.error("send_message failed", { chatId, err }));
+  }
+
+  /**
+   * Create and warm a session for the new-chat flow. `channel` and `chatId` are
+   * required; `workspace` defaults to the configured one, and `mentionRequired`
+   * is passed through so the freshly created group answers without an @mention.
+   */
+  private handleCreateSession(args: Record<string, unknown>): void {
+    const channel = typeof args.channel === "string" ? args.channel : undefined;
+    const chatId = typeof args.chatId === "string" ? args.chatId : undefined;
+    if (!channel || !chatId) {
+      logger.warn("create_session missing channel/chatId", { args });
+      return;
+    }
+    this.router.sessionManager.prepareSession({
+      channel,
+      chatId,
+      threadId: typeof args.threadId === "string" ? args.threadId : undefined,
+      workspace: typeof args.workspace === "string" ? args.workspace : undefined,
+      mentionRequired:
+        typeof args.mentionRequired === "boolean"
+          ? args.mentionRequired
+          : undefined,
+    });
+    logger.info("prepared session", { channel, chatId });
   }
 
   private handleReply(msg: ReplyMessage): void {
@@ -222,4 +311,15 @@ export class CorkDaemon {
     }
     return this.channels[0];
   }
+}
+
+/** Coerce a spool arg into a string list: an array (filtered), a lone string, or
+ * nothing. Used for the `at` open-id list on send_message. */
+function normalizeStringList(v: unknown): string[] | undefined {
+  if (Array.isArray(v)) {
+    const strs = v.filter((x): x is string => typeof x === "string");
+    return strs.length > 0 ? strs : undefined;
+  }
+  if (typeof v === "string") return [v];
+  return undefined;
 }

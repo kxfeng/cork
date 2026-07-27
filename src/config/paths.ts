@@ -14,6 +14,11 @@ export const paths = {
   configFile: path.join(corkDir, "config.jsonc"),
   envFile: path.join(corkDir, "env"),
   sessionsDir: path.join(corkDir, "sessions"),
+  // Directory-as-queue for CLI → daemon commands (see command-spool.ts).
+  commandsDir: path.join(corkDir, "commands"),
+  // Passed to claude via --add-dir; cork's skills live under its .claude/skills
+  // so they load into every session without touching ~/.claude or the workspace.
+  agentDir: path.join(corkDir, "agent"),
   socketPath: path.join(corkDir, "cork.sock"),
   logsDir: path.join(corkDir, "logs"),
   logFile: path.join(corkDir, "logs", "cork.log"),
