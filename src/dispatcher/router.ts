@@ -87,6 +87,10 @@ export class MessageRouter implements Dispatcher {
     this.sessionManager.setMentionRequired(channel, chatId, value);
   }
 
+  destroyChatSessions(channel: string, chatId: string): string[] {
+    return this.sessionManager.destroyChatSessions(channel, chatId);
+  }
+
   trackPendingReaction(
     channel: string,
     chatId: string,

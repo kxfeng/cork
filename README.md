@@ -81,6 +81,25 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/workspace <path>`    | Re‑point this chat at a different working directory           |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
 
+`/new-chat <title>` works differently — it is handled by Claude through the skill
+cork injects, not by the daemon. It creates a Lark group named `CoKo · <title>`,
+invites the bot, greets you there, and warms a session so your first message is
+answered immediately.
+
+## Optional Lark events
+
+Cork runs fine with none of these subscribed. Each unlocks one feature, and
+skipping it costs **only that feature** — no message is ever dropped, delayed, or
+failed because one is missing.
+
+Subscribe to them for your bot app in the [Lark developer console](https://open.feishu.cn/app),
+then `cork restart` so the daemon registers the new handlers.
+
+| Feature | Enable | Where | If you skip it |
+| ------- | ------ | ----- | -------------- |
+| Free the session when a chat is disbanded | event `im.chat.disbanded_v1` | Events & callbacks | The chat's Claude process and tmux pane stay alive until the next `cork restart`, and the chat keeps appearing in `cork status` |
+| Same, when the bot is removed from a chat that survives | event `im.chat.member.bot.deleted_v1` | Events & callbacks | Same |
+
 ## Configuration
 
 All state lives under `~/.cork/`:
@@ -90,8 +109,11 @@ All state lives under `~/.cork/`:
 ├── config.jsonc        # main config (created by `cork setup`)
 ├── env                 # extra env vars exported to every claude session (one KEY=VALUE per line)
 ├── mcp-config.json     # auto‑written; points claude at the cork channel MCP
+├── claude-settings.json # auto‑written; the Stop hook every session runs with
 ├── cork.sock           # UDS the channel MCP connects to
 ├── sessions/           # per‑chat metadata
+├── commands/           # CLI → daemon command spool; entries are consumed and deleted
+├── agent/              # auto‑written; cork's injected skill, passed to claude via --add-dir
 └── logs/               # cork.log + launchd stdout/stderr
 ```
 

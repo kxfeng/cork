@@ -100,6 +100,33 @@ export interface LarkEventContext {
   resolveSessionKey?: (channel: string, chatId: string, threadId?: string) => string;
 }
 
+/**
+ * Clean up after a chat cork can no longer reach. Best-effort by design: this
+ * runs on an event nobody is waiting for, and a failure here must not take the
+ * event loop — or the WebSocket — down with it.
+ */
+function handleChatGone(
+  ctx: LarkEventContext,
+  data: any,
+  reason: string
+): void {
+  const chatId = data?.chat_id;
+  if (!chatId) {
+    logger.warn("chat-gone event without a chat_id", { reason });
+    return;
+  }
+  try {
+    const keys = ctx.dispatcher.destroyChatSessions?.("lark", chatId) ?? [];
+    logger.info("cleaned up sessions for gone chat", {
+      chatId,
+      reason,
+      destroyed: keys.length,
+    });
+  } catch (err) {
+    logger.error("failed to clean up gone chat", { chatId, reason, err });
+  }
+}
+
 export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -116,6 +143,17 @@ export function createEventDispatcher(ctx: LarkEventContext): lark.EventDispatch
       } catch (err) {
         logger.error("error handling lark message event", { err, callId });
       }
+    },
+    // The chat is gone — disbanded, or the bot was removed from it. Either way
+    // nobody can reach its sessions again, so tear them down instead of leaving
+    // a Claude process and a tmux pane running for a chat that no longer exists.
+    "im.chat.disbanded_v1": async (data: any) => {
+      ctx.channel.markEventReceived();
+      handleChatGone(ctx, data, "disbanded");
+    },
+    "im.chat.member.bot.deleted_v1": async (data: any) => {
+      ctx.channel.markEventReceived();
+      handleChatGone(ctx, data, "bot removed");
     },
     // Register no-op handlers to suppress Lark SDK warnings.
     // They still count as liveness signals for the watchdog.

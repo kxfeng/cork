@@ -56,6 +56,9 @@ export interface Dispatcher {
   getMentionRequired?(channel: string, chatId: string): boolean;
   /** Set a group chat's @bot mention requirement. */
   setMentionRequired?(channel: string, chatId: string, value: boolean): void;
+  /** Tear down every session for a chat nobody can reach any more — it was
+   * disbanded, or the bot was removed from it. Returns the keys destroyed. */
+  destroyChatSessions?(channel: string, chatId: string): string[];
 }
 
 export interface Channel {

@@ -9,6 +9,7 @@ import {
   loadSession,
   saveSession,
   deleteSession,
+  listSessions,
   type SessionMeta,
 } from "./store.js";
 import { resolveWorkspacePath } from "../config/loader.js";
@@ -332,6 +333,49 @@ export class SessionManager extends EventEmitter {
       "cork-web",
       "cork-web"
     );
+  }
+
+  /**
+   * Tear down every session belonging to a chat — the chat's own session and any
+   * thread sessions under it. For when the chat itself is gone: disbanded, or the
+   * bot removed from it. Nobody can reach those panes again, so leaving them
+   * running holds a Claude process and a tmux pane per dead chat.
+   *
+   * Sweeps disk as well as memory. A session the daemon has not touched since
+   * restart is not in `sessions`, but its tmux pane can still be alive (the tmux
+   * server outlives the daemon) and its record would otherwise resurrect the
+   * dead chat in `cork status`.
+   *
+   * Returns the keys destroyed.
+   */
+  destroyChatSessions(channel: string, chatId: string): string[] {
+    const prefix = sessionKey(channel, chatId);
+    // A thread session's key is `<prefix>_<threadId>`. Match those and the chat's
+    // own key, but not a different chat whose id merely starts the same way.
+    const belongs = (key: string) =>
+      key === prefix || key.startsWith(`${prefix}_`);
+
+    const keys = new Set<string>();
+    for (const key of this.sessions.keys()) if (belongs(key)) keys.add(key);
+    for (const { key } of listSessions()) if (belongs(key)) keys.add(key);
+
+    for (const key of keys) {
+      // Runs even for a disk-only key: the pane may have outlived the daemon.
+      this.killTmux(key);
+      const session = this.sessions.get(key);
+      if (session?.startingTimer) clearTimeout(session.startingTimer);
+      this.sessions.delete(key);
+      deleteSession(key);
+    }
+
+    if (keys.size > 0) {
+      logger.info("destroyed sessions for gone chat", {
+        channel,
+        chatId,
+        keys: [...keys],
+      });
+    }
+    return [...keys];
   }
 
   createNewSession(
