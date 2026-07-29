@@ -45,10 +45,14 @@ APP_ID=$(jq -r '.channels.lark.appId' ~/.cork/config.jsonc)
 CID=$(lark-cli im +chat-create --as user --name "CoKo · <title>" --bots "$APP_ID" \
       | jq -r '.data.chat_id')
 [ -n "$CID" ] && [ "$CID" != "null" ] || { echo "chat-create failed"; exit 1; }
-cork send --chat "$CID" --text "<greeting>" --at <senderId>
-cork session create --chat "$CID"
+cork send --chat "$CID" --channel lark --text "<greeting>" --at <senderId>
+cork session create --chat "$CID" --channel lark
 echo "created $CID"
 ```
+
+`--channel lark` is spelled out rather than left to default. This block runs
+under the Lark branch, so the channel is known here — and a future branch that
+copies this shape would otherwise inherit a default that is wrong for it.
 
 **Greeting.** Write it in the same language the initiator wrote in — translate
 when they used another language. Keep it about the session itself, not about

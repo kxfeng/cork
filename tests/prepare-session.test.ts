@@ -92,4 +92,51 @@ describe("prepareSession", () => {
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
     expect(savedMeta("lark_oc_y").workspace).toBe(WS);
   });
+
+  it("names the session after its chat id until told otherwise", async () => {
+    // Warming happens before anyone has spoken, so the title is not knowable
+    // yet — the caller looks it up afterwards rather than making the pane wait.
+    const { mgr } = await makeManager();
+    mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
+    expect(savedMeta("lark_oc_y").chatName).toBe("oc_y");
+  });
+});
+
+describe("setChatName", () => {
+  it("renames a warm session in memory and on disk", async () => {
+    const { mgr } = await makeManager();
+    mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
+
+    mgr.setChatName("lark", "oc_y", "CoKo · Cork Dev");
+
+    expect(mgr.sessions.get("lark_oc_y").meta.chatName).toBe("CoKo · Cork Dev");
+    expect(savedMeta("lark_oc_y").chatName).toBe("CoKo · Cork Dev");
+  });
+
+  it("renames a session that exists only on disk", async () => {
+    // After a daemon restart the map is empty but the record survives.
+    const { mgr } = await makeManager();
+    mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
+    mgr.sessions.delete("lark_oc_y");
+
+    mgr.setChatName("lark", "oc_y", "CoKo · Cork Dev");
+
+    expect(savedMeta("lark_oc_y").chatName).toBe("CoKo · Cork Dev");
+  });
+
+  it("ignores an empty name rather than blanking the title", async () => {
+    // fetchChatName returns "" when the lookup fails; that must not overwrite
+    // the chat id fallback with nothing.
+    const { mgr } = await makeManager();
+    mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
+
+    mgr.setChatName("lark", "oc_y", "");
+
+    expect(savedMeta("lark_oc_y").chatName).toBe("oc_y");
+  });
+
+  it("is a no-op for a chat with no session", async () => {
+    const { mgr } = await makeManager();
+    expect(() => mgr.setChatName("lark", "oc_never", "X")).not.toThrow();
+  });
 });

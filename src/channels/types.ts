@@ -80,4 +80,9 @@ export interface Channel {
     messageId: string,
     reactionId: string
   ): Promise<void>;
+  /**
+   * Human-readable title of a chat. Optional: a channel that cannot look one
+   * up just leaves sessions named after their chat id.
+   */
+  fetchChatName?(chatId: string, senderId?: string): Promise<string>;
 }

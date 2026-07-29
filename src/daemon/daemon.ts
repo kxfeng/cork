@@ -196,6 +196,26 @@ export class CorkDaemon {
           : undefined,
     });
     logger.info("prepared session", { channel, chatId });
+    // The warm-up above has only the chat id to name the session with, so
+    // `cork status` and the web view would show a raw `oc_…` until someone
+    // spoke. Look the title up after warming rather than before, so the pane
+    // still starts without waiting on an API round trip.
+    this.backfillChatName(channel, chatId);
+  }
+
+  private backfillChatName(channel: string, chatId: string): void {
+    const adapter = this.channels.find((c) => c.name === channel);
+    if (!adapter?.fetchChatName) return;
+    adapter
+      .fetchChatName(chatId)
+      .then((name) => {
+        if (!name) return;
+        this.router.sessionManager.setChatName(channel, chatId, name);
+        logger.info("named prepared session", { channel, chatId, name });
+      })
+      .catch((err) =>
+        logger.warn("could not fetch chat name", { channel, chatId, err })
+      );
   }
 
   private handleReply(msg: ReplyMessage): void {

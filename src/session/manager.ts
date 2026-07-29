@@ -159,6 +159,28 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Name a session whose chat title wasn't known when it was created.
+   * `prepareSession` warms a chat before anyone has spoken in it, so it has
+   * only the chat id to go on; the caller looks the title up afterwards and
+   * hands it here rather than making the warm-up wait on an API round trip.
+   */
+  setChatName(channel: string, chatId: string, name: string): void {
+    if (!name) return;
+    const key = sessionKey(channel, chatId);
+    const session = this.sessions.get(key);
+    if (session) {
+      session.meta.chatName = name;
+      saveSession(key, session.meta);
+      return;
+    }
+    const meta = loadSession(key);
+    if (meta) {
+      meta.chatName = name;
+      saveSession(key, meta);
+    }
+  }
+
+  /**
    * Ensure session metadata is loaded into memory (from disk or newly created).
    * Does NOT start tmux — just loads metadata.
    */
