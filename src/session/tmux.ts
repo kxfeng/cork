@@ -63,6 +63,17 @@ export function ensureCorkTmuxServer(): void {
   try {
     execSync(`tmux -L ${tmuxLabel()} -f '${confPath()}' start-server`, {
       stdio: "pipe",
+      // Everything in every pane inherits the server's environment, and launchd
+      // gives the daemon no locale to pass on. Without one, macOS tools fall
+      // back to the C encoding and read UTF-8 a byte at a time — see the note
+      // in manager.ts where the pane's own LANG is set. Only takes effect on
+      // the call that actually forks the server; the pane sets its own too, so
+      // an already-running server does not leave the gap open.
+      env: {
+        ...process.env,
+        LANG: process.env.LANG || "en_US.UTF-8",
+        LC_CTYPE: process.env.LC_CTYPE || process.env.LANG || "en_US.UTF-8",
+      },
     });
   } catch (err) {
     logger.warn("failed to ensure cork tmux server", {

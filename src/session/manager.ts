@@ -664,7 +664,21 @@ export class SessionManager extends EventEmitter {
     const claudeArgs = this.buildClaudeArgs(meta, resume);
 
     // CORK_SESSION_KEY is passed via env, inherited by Claude → MCP subprocess
+    // A locale is part of the pane's contract with everything Claude Code shells
+    // out to. launchd starts the daemon without one, the tmux server inherits
+    // that, and a session's processes inherit the server's environment rather
+    // than the environment of the client that created it — so without this the
+    // pane runs with no LANG at all.
+    //
+    // What that costs is not obvious until it bites: macOS command line tools
+    // fall back to the C encoding when the locale says nothing, and treat UTF-8
+    // as single bytes. `printf 中文 | pbcopy` with no locale puts ‰∏≠Êñá on the
+    // clipboard — each UTF-8 byte read as one Mac OS Roman character. It reads
+    // back correctly through pbpaste, which makes the same mistake in reverse,
+    // so the corruption only shows up once the text is pasted somewhere else.
+    const locale = process.env.LANG || process.env.LC_ALL || "en_US.UTF-8";
     const claudeCmd =
+      `LANG='${locale}' LC_CTYPE='${locale}' ` +
       `CORK_SESSION_KEY='${key}' claude ${claudeArgs.join(" ")}`;
     const tmuxName = `${TMUX_PREFIX}${key}`;
 
