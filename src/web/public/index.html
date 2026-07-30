@@ -3,7 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>cork</title>
+    <title>Cork</title>
+    <!-- Inlined as a data URI rather than served as an asset: it needs no route,
+         no request, and cannot 404. A prompt caret and a cursor, in the same two
+         colours the page uses. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3.4' fill='%231d1d22'/%3E%3Cpath d='M3.6 4.8 6.7 7.6 3.6 10.4' fill='none' stroke='%236ea8fe' stroke-width='2.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.9 10.4h3.5' fill='none' stroke='%2392929e' stroke-width='2.1' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="/assets/xterm.css" />
     <style>
       :root {
@@ -35,12 +42,8 @@
       header {
         padding: 12px 14px;
         border-bottom: 1px solid var(--line);
-        display: flex;
-        align-items: baseline;
-        gap: 8px;
       }
       header b { font-size: 14px; letter-spacing: 0.02em; }
-      header span { color: var(--dim); font-size: 11px; }
       #list { overflow-y: auto; flex: 1; padding: 6px; }
       .s {
         padding: 8px 10px;
@@ -91,9 +94,69 @@
         overflow: hidden;
         padding: 6px 0 0 8px;
         border-left: 2px solid transparent;
+        position: relative; /* containing block for the not-running overlay */
+      }
+      /* Shown instead of the pane when a session has no process. Drawn in HTML
+         rather than written into the terminal: monospace prose sitting alone on
+         a black field reads as output that went wrong, and it would also be
+         scrolled around by whatever the pane did next. */
+      #offline {
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+      }
+      #offline[hidden] { display: none; }
+      /* The whole thing is the button — a 44px glyph is a small target for the
+         only action available on this screen. */
+      #ostart {
+        border: 0;
+        background: transparent;
+        font: inherit;
+        color: var(--dim);
+        text-align: center;
+        padding: 18px 26px;
+        border-radius: 10px;
+        cursor: pointer;
+      }
+      /* Same shape and colours as the header's .ib buttons, scaled up: this is
+         the same control, just where the eye is when the pane is empty. */
+      #ostart .oi {
+        width: 38px;
+        height: 32px;
+        margin: 0 auto 14px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: color 0.12s, border-color 0.12s, background 0.12s;
+      }
+      #ostart .oi svg { width: 13px; height: 13px; fill: currentColor; margin-left: 1px; }
+      /* The glyph is the target; the line under it is a caption, so only the
+         glyph reacts — matching .ib:hover exactly. */
+      #ostart:hover .oi { color: var(--fg); border-color: #3d3d47; background: #26262d; }
+      #ostart .ot { font-size: 13px; }
+      #ostart:disabled { cursor: default; opacity: 0.45; }
+      #ostart:disabled:hover .oi {
+        color: var(--dim);
+        border-color: var(--line);
+        background: transparent;
       }
       /* Which side has the keyboard. xterm sets .focus on its own root. */
       #term:has(.focus) { border-left-color: var(--accent); }
+      /* Only reached when WebGL is unavailable and xterm falls back to the DOM
+         renderer. That renderer sizes each row element to (cols × the cell
+         width it measured) and clips it, but the browser lays the same text
+         out at the font's true advance, which is wider — so the last glyph of
+         a full row gets shaved. Letting a row paint past its own box costs
+         nothing: it overruns by ~2px and still ends well inside the terminal,
+         which has ~8px to spare. `!important` because the renderer sets
+         overflow inline. Inert under WebGL, which builds no row elements. */
+      .xterm .xterm-rows > div { overflow: visible !important; }
       #empty {
         margin: auto;
         color: var(--dim);
@@ -120,43 +183,102 @@
         font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, "PingFang SC", monospace;
       }
       #msg:focus { outline: none; border-color: var(--accent); }
-      #send {
-        padding: 8px 14px;
-        border: 0;
-        border-radius: 6px;
-        background: var(--accent);
-        color: #10141c;
-        font-weight: 600;
-        cursor: pointer;
-        white-space: nowrap;
-      }
-      #send:disabled { opacity: 0.45; cursor: default; }
-      #hint {
+      #msg:disabled { opacity: 0.45; cursor: not-allowed; }
+      #actions { display: flex; gap: 5px; align-items: center; flex: none; }
+      .ib {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 22px;
+        padding: 0;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: transparent;
         color: var(--dim);
-        font-size: 11px;
-        padding: 0 10px 6px;
-        display: none;
+        cursor: pointer;
       }
-      #composer.on ~ #hint { display: block; }
+      .ib:hover { color: var(--fg); border-color: #3d3d47; background: #26262d; }
+      .ib svg { width: 12px; height: 12px; fill: currentColor; }
+      .ib.danger:hover { color: #ff7070; border-color: #5c2b2b; background: #2b1a1a; }
+      /* Confirmation for destructive actions. Drawn in-page rather than using
+         confirm(), which blocks the page and every event behind it. */
+      #modal {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: rgba(8, 8, 11, 0.66);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #modal[hidden] { display: none; }
+      .mbox {
+        width: min(400px, calc(100vw - 40px));
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 18px 18px 14px;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+      }
+      .mbox h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+      .mbox p { margin: 0 0 16px; font-size: 12px; line-height: 1.65; color: var(--dim); }
+      .mbox p b { color: var(--fg); font-weight: 600; }
+      .mrow { display: flex; justify-content: flex-end; gap: 8px; }
+      .mrow button {
+        padding: 7px 15px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .mrow button:hover { background: #26262d; }
+      .mrow button.danger { border-color: #7d3838; background: #3a1f1f; color: #ff9090; }
+      .mrow button.danger:hover { background: #4b2626; }
+      /* An action in flight disables its own button rather than narrating
+         itself in a status line below the composer. */
+      .ib:disabled { opacity: 0.4; cursor: default; }
+      .ib:disabled:hover { color: var(--dim); border-color: var(--line); background: transparent; }
     </style>
   </head>
   <body>
     <aside>
-      <header><b>cork</b><span id="count"></span></header>
+      <header><b>Cork</b></header>
       <div id="list"></div>
     </aside>
     <main>
-      <div id="bar"><span id="who">select a session</span></div>
-      <div id="term"><div id="empty">no session selected</div></div>
-      <div id="composer">
-        <textarea id="msg" rows="1" placeholder="Message this session…  (Enter = send, Shift+Enter = newline)"></textarea>
-        <button id="send">Send</button>
+      <div id="bar"><span id="who">select a session</span><span id="actions"></span></div>
+      <div id="term">
+        <div id="empty">no session selected</div>
+        <div id="offline" hidden>
+          <button id="ostart" type="button">
+            <div class="oi"><svg viewBox="0 0 16 16"><path d="M5 3.2v9.6c0 .4.4.6.7.4l7.2-4.8c.3-.2.3-.6 0-.8L5.7 2.8c-.3-.2-.7 0-.7.4z"/></svg></div>
+            <div class="ot">Click to start the session</div>
+          </button>
+        </div>
       </div>
-      <div id="hint">Sent through the session's channel, not typed into the pane.</div>
+      <div id="composer">
+        <textarea id="msg" rows="1" placeholder="Write a message…"></textarea>
+      </div>
     </main>
+
+    <div id="modal" hidden>
+      <div class="mbox" role="dialog" aria-modal="true" aria-labelledby="mtitle">
+        <h3 id="mtitle"></h3>
+        <p id="mtext"></p>
+        <div class="mrow">
+          <button id="mcancel">Cancel</button>
+          <button id="mok" class="danger">Delete</button>
+        </div>
+      </div>
+    </div>
 
     <script src="/assets/xterm.js"></script>
     <script src="/assets/addon-fit.js"></script>
+    <script src="/assets/addon-webgl.js"></script>
     <script>
       // The server answers ?token=… with a cookie, so once this page has loaded
       // the token is redundant. Drop it from the address bar (and from the
@@ -171,15 +293,39 @@
       let ws = null;
       let current = null;
 
+      /**
+       * Enter or leave the not-running state. The overlay stands in for the pane,
+       * and the composer is greyed out with it — there is nothing to type into,
+       * and letting people try was what produced the race described in send().
+       *
+       * The placeholder is left alone: the overlay filling the screen already
+       * says the session is not running, and restating it in the composer just
+       * makes the same point twice. Being greyed out is enough on its own.
+       *
+       * Focus is deliberately not touched either — this runs on every poll, and
+       * stealing the keyboard back from the pane every few seconds would be worse
+       * than the problem it solved.
+       */
+      function setOffline(on) {
+        $("offline").hidden = !on;
+        $("ostart").disabled = busy;
+        $("msg").disabled = on;
+      }
+
+      // Same action as the header's start button — this one is just where the eye
+      // already is when the pane is empty.
+      $("ostart").onclick = () => {
+        if (!busy && current) startSession(current);
+      };
+
       function openSession(s) {
         if (ws) { ws.close(); ws = null; }
         current = s.key;
         render(sessions);
+        renderActions();
         $("who").textContent = `${s.chatName} · ${s.channel} · ${s.workspace}`;
         $("empty")?.remove();
         $("composer").classList.add("on");
-        $("hint").textContent =
-          "Sent through the session's channel, not typed into the pane.";
 
         if (!term) {
           term = new Terminal({
@@ -188,12 +334,37 @@
             fontFamily:
               'ui-monospace, SFMono-Regular, Menlo, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace',
             fontSize: 13,
+            // A trackpad emits a stream of small wheel events — a few px of
+            // deltaY each — and xterm quietly scales anything under 50px down
+            // to 30% of its travel. A slow two-finger drag therefore moves the
+            // pane a fifth as far as the same distance flicked quickly, and far
+            // less than the native terminal, which applies no such damping.
+            // This multiplier is applied before the damping, so it cancels it.
+            // A mouse wheel reports 100+ per notch and is never damped, so it
+            // does get faster here; trackpads are what this view is driven by.
+            scrollSensitivity: 3,
             cursorBlink: true,
             theme: { background: "#16161a", foreground: "#d6d6dd" },
           });
           fit = new FitAddon.FitAddon();
           term.loadAddon(fit);
           term.open($("term"));
+          // The DOM renderer hands a whole row to the browser to lay out, and
+          // the browser's own advance widths do not add up to what xterm sized
+          // the row for — a 147-column line comes out ~2px too wide and the
+          // row's overflow:hidden shaves the last glyph. WebGL draws each cell
+          // into the grid itself, so a row cannot end up wider than its box.
+          // Must come after open(): the addon needs the screen element.
+          try {
+            const webgl = new WebglAddon.WebglAddon();
+            // A lost context leaves the canvas blank with no way back, so drop
+            // the addon and let xterm fall back to the DOM renderer.
+            webgl.onContextLoss(() => webgl.dispose());
+            term.loadAddon(webgl);
+          } catch {
+            // No WebGL here (blocklisted GPU, headless without swiftshader).
+            // The DOM renderer stays — worse glyph clipping, still usable.
+          }
           term.onData((d) => {
             if (ws && ws.readyState === 1) {
               ws.send(JSON.stringify({ type: "input", data: d }));
@@ -202,6 +373,15 @@
           boxWatcher.observe($("term"));
         }
         term.reset();
+
+        // Nothing to attach to, and nothing to type into: bringing the pane up is
+        // the only thing that can be done here, and the start button is how.
+        // Composing was allowed at one point and it raced — the text and its
+        // carriage return arrived while Claude Code was still booting (and while
+        // the daemon was dismissing its startup dialog with Enters of its own),
+        // so the message would land in the prompt but not be submitted.
+        setOffline(!s.alive);
+        if (!s.alive) return;
 
         const proto = location.protocol === "https:" ? "wss" : "ws";
         ws = new WebSocket(
@@ -212,35 +392,42 @@
         ws.onclose = () => term.write("\r\n\x1b[90m— detached —\x1b[0m\r\n");
       }
 
-      // Composed text goes to the daemon, which feeds it to Claude over the same
-      // path a Lark/Telegram message takes — it is not typed into the pane. The
-      // reply therefore comes back over the session's own channel, and shows up
-      // in the pane like any other turn.
-      async function send() {
+      /**
+       * Type into the pane, exactly as if the text had been typed in the terminal.
+       *
+       * It used to be handed to the daemon instead, which fed it in as a channel
+       * message — the model then answered over the chat, and this view, which has
+       * only the pane to show, missed the reply. Going through the pane keeps the
+       * whole exchange where it is being read.
+       *
+       * The cost is that the chat no longer sees this side of the conversation.
+       * That is the point: a message typed here is addressed to the pane, not to
+       * the group.
+       */
+      function send() {
         const text = $("msg").value;
         if (!text.trim() || !current) return;
-        $("send").disabled = true;
-        try {
-          const r = await fetch("/api/send", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ session: current, text }),
-          });
-          if (r.ok) {
-            $("msg").value = "";
-            sizeComposer();
-          } else {
-            $("hint").textContent =
-              r.status === 409
-                ? "session is not connected — start it from its chat first"
-                : `send failed (${r.status})`;
-          }
-        } catch (e) {
-          $("hint").textContent = "send failed — is the daemon running?";
-        } finally {
-          $("send").disabled = false;
-          $("msg").focus(); // stay in the composer; the pane takes focus only on click
+        // The composer is disabled whenever the pane is down, so this only has to
+        // guard against a socket that dropped between keystroke and send. It used
+        // to start the session first, which raced: the text and its carriage
+        // return could arrive while Claude Code was still booting — and while the
+        // daemon was dismissing the startup dialog with Enters of its own — so the
+        // message landed in the prompt without being submitted.
+        if (!ws || ws.readyState !== 1) {
+          console.error("send: no socket to the pane"); // text stays in the composer
+          return;
         }
+
+        // Sent as-is, then a carriage return to submit. Newlines inside the text
+        // stay newlines: a terminal app reads Enter as CR, so LF passes through as
+        // a line break rather than submitting the message early. (Bracketed paste
+        // would be the tidier way to say "this is one block", but Claude Code does
+        // not turn it on — the markers would arrive as literal characters.)
+        ws.send(JSON.stringify({ type: "input", data: text }));
+        ws.send(JSON.stringify({ type: "input", data: "\r" }));
+        $("msg").value = "";
+        sizeComposer();
+        $("msg").focus(); // stay in the composer; the pane takes focus only on click
       }
 
       $("msg").addEventListener("keydown", (e) => {
@@ -251,16 +438,12 @@
       });
       $("msg").addEventListener("input", sizeComposer);
 
-      // Esc in the pane hands the keyboard back to the composer. (Clicking either
-      // one also just works — xterm only reads the keyboard while it is focused,
-      // so the two never fight over it.)
-      $("term").addEventListener("keydown", (e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          $("msg").focus();
-        }
-      }, true);
-      $("send").addEventListener("click", send);
+      // Esc is not intercepted here. It used to hand the keyboard back to the
+      // composer, but Escape belongs to the TUI: Claude Code closes /status and
+      // its permission prompts with it, and a dialog that cannot be dismissed is
+      // worse than needing a click to move focus. Clicking either box switches
+      // focus, and xterm only reads the keyboard while it is focused, so the two
+      // never fight over it.
 
       function sizeComposer() {
         const t = $("msg");
@@ -295,8 +478,160 @@
       const boxWatcher = new ResizeObserver(() => sendFit());
 
       let sessions = [];
+      let busy = false; // an action is in flight; its button shows it, nothing else does
+
+      /**
+       * Confirm a destructive action. Drawn in-page rather than with confirm(),
+       * which blocks the page and every event behind it — and this one can name
+       * what is about to go, so there is no doubt which session was clicked.
+       * Resolves false on Cancel, Esc, or a click on the backdrop.
+       */
+      function confirmDelete(name) {
+        return new Promise((resolve) => {
+          const m = $("modal");
+          $("mtitle").textContent = "Delete this session?";
+          $("mtext").innerHTML =
+            `<b>${escapeHtml(name)}</b> — stops Claude Code and drops Cork's ` +
+            `record of it. The chat itself is untouched, and so is Claude's own ` +
+            `session file, which stays resumable.`;
+          m.hidden = false;
+          $("mok").focus();
+          const onKey = (e) => {
+            if (e.key === "Escape") { e.stopPropagation(); done(false); }
+            else if (e.key === "Enter") { e.stopPropagation(); done(true); }
+          };
+          const done = (v) => {
+            m.hidden = true;
+            $("mok").onclick = $("mcancel").onclick = m.onclick = null;
+            document.removeEventListener("keydown", onKey, true);
+            $("msg").focus();
+            resolve(v);
+          };
+          $("mok").onclick = () => done(true);
+          $("mcancel").onclick = () => done(false);
+          m.onclick = (e) => { if (e.target === m) done(false); }; // backdrop
+          document.addEventListener("keydown", onKey, true);
+        });
+      }
+
+      const ICON = {
+        start: '<svg viewBox="0 0 16 16"><path d="M5 3.2v9.6c0 .4.4.6.7.4l7.2-4.8c.3-.2.3-.6 0-.8L5.7 2.8c-.3-.2-.7 0-.7.4z"/></svg>',
+        stop: '<svg viewBox="0 0 16 16"><rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1.2"/></svg>',
+        trash: '<svg viewBox="0 0 16 16"><path d="M6.3 1.6h3.4c.4 0 .7.3.7.7v.8h2.7c.4 0 .7.3.7.6s-.3.6-.7.6h-.6l-.6 8.3c0 .8-.7 1.4-1.5 1.4H5.6c-.8 0-1.4-.6-1.5-1.4l-.6-8.3H2.9c-.4 0-.7-.3-.7-.6s.3-.6.7-.6h2.7v-.8c0-.4.3-.7.7-.7zm.7 1.5h2v-.3h-2v.3z"/></svg>',
+      };
+
+      // Both buttons act on whichever session is open, so they sit in the header
+      // beside its name rather than repeating on every row of the list.
+      function renderActions() {
+        $("ostart").disabled = busy; // shares the in-flight state with the header
+        const box = $("actions");
+        box.innerHTML = "";
+        const s = sessions.find((x) => x.key === current);
+        if (!s) return;
+        const add = (title, svg, onclick, cls) => {
+          const b = document.createElement("button");
+          b.className = "ib" + (cls ? " " + cls : "");
+          b.title = title;
+          b.innerHTML = svg;
+          b.onclick = onclick;
+          b.disabled = busy;
+          box.appendChild(b);
+        };
+        if (s.alive) {
+          add("Stop — end the Claude Code process, keep the session", ICON.stop,
+            () => stopSession(s.key));
+        } else {
+          add("Start — bring up Claude Code, resuming this session", ICON.start,
+            () => startSession(s.key));
+        }
+        add(
+          "Delete — stop the process and drop Cork's session",
+          ICON.trash,
+          async () => {
+            const label = s.chatName + (s.isThread ? " ⤷ thread" : "");
+            if (await confirmDelete(label)) dropSession(s.key);
+          },
+          "danger"
+        );
+      }
+
+      const act = (action, key) =>
+        fetch(`/api/session/${action}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ session: key }),
+        });
+
+      /** Poll until the pane is up, so we attach only once there is something to
+       *  attach to. Claude Code takes a couple of seconds to boot. */
+      async function waitAlive(key, timeoutMs = 25000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 400));
+          const r = await fetch("/api/sessions");
+          if (!r.ok) continue;
+          sessions = (await r.json()).sessions;
+          if (sessions.find((s) => s.key === key)?.alive) return true;
+        }
+        return false;
+      }
+
+      /**
+       * Run one lifecycle action with its button disabled for the duration —
+       * that, and the pane appearing or going away, is the whole of the feedback.
+       * Failures go to the console rather than into the page.
+       */
+      async function runAction(action, key) {
+        busy = true;
+        renderActions();
+        try {
+          const r = await act(action, key);
+          if (!r.ok) {
+            console.error(`${action} failed`, r.status, await r.text().catch(() => ""));
+            return false;
+          }
+          return true;
+        } catch (e) {
+          console.error(`${action} failed`, e);
+          return false;
+        } finally {
+          busy = false;
+        }
+      }
+
+      async function startSession(key) {
+        if (!(await runAction("start", key))) { renderActions(); return false; }
+        const up = await waitAlive(key);
+        render(sessions);
+        renderActions();
+        if (!up) {
+          console.error("start: pane never came up for", key);
+          return false;
+        }
+        if (current === key) openSession(sessions.find((s) => s.key === key));
+        return true;
+      }
+
+      async function stopSession(key) {
+        if (!(await runAction("stop", key))) { renderActions(); return; }
+        if (ws) { ws.close(); ws = null; } // its pane is gone; don't hold the socket
+        await refresh();
+      }
+
+      async function dropSession(key) {
+        if (!(await runAction("delete", key))) { renderActions(); return; }
+        if (current === key) {
+          if (ws) { ws.close(); ws = null; }
+          current = null;
+          term?.reset();
+          $("who").textContent = "select a session";
+          $("composer").classList.remove("on");
+          setOffline(false); // nothing is selected, so nothing is "not running"
+        }
+        await refresh();
+      }
+
       function render(list) {
-        $("count").textContent = `${list.filter((s) => s.alive).length} live / ${list.length}`;
         $("list").innerHTML = "";
         for (const s of list) {
           const el = document.createElement("div");
@@ -305,11 +640,10 @@
           el.innerHTML =
             `<div class="n"><i class="dot${s.alive ? " live" : ""}"></i>${escapeHtml(name)}</div>` +
             `<div class="m">${s.channel} · ${escapeHtml(s.workspace)}</div>`;
-          el.onclick = () => {
-            if (!s.alive) return;
-            openSession(s);
-          };
-          if (!s.alive) el.style.opacity = 0.45;
+          // A stopped session opens too — dimmed, but reachable, so it can be
+          // started (or dropped) from here rather than only from its chat.
+          el.onclick = () => openSession(s);
+          if (!s.alive) el.style.opacity = 0.55;
           $("list").appendChild(el);
         }
       }
@@ -326,6 +660,11 @@
         const data = await r.json();
         sessions = data.sessions;
         render(sessions);
+        renderActions(); // a session may have come up or gone away since last poll
+        // Same reason: one stopped from a terminal, or that died, has to grey the
+        // composer here too — not only when it was this view that stopped it.
+        const open = sessions.find((s) => s.key === current);
+        if (open) setOffline(!open.alive);
       }
 
       refresh();

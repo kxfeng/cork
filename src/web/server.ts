@@ -161,6 +161,10 @@ const ASSETS: Record<string, { file: string; type: string }> = {
     file: "@xterm/addon-fit/lib/addon-fit.js",
     type: "text/javascript",
   },
+  "/assets/addon-webgl.js": {
+    file: "@xterm/addon-webgl/lib/addon-webgl.js",
+    type: "text/javascript",
+  },
 };
 
 /** Resolve a bundled xterm asset out of node_modules, wherever cork is installed. */
@@ -361,6 +365,54 @@ export class WebServer {
         logger.info("web message dispatched", { key: msg.session, ok });
         if (!ok) {
           res.writeHead(409).end("session is not connected");
+          return;
+        }
+        res.writeHead(204).end();
+      });
+      return;
+    }
+
+    // Lifecycle actions on one session. One arm for all three because they
+    // differ only in which manager call they make: start brings the pane up
+    // (resuming the same Claude session), stop kills the pane but keeps the
+    // record, delete kills it and forgets the pairing. None of them touch the
+    // chat, and none delete Claude's own transcript.
+    const action =
+      req.method === "POST"
+        ? url.pathname.match(/^\/api\/session\/(start|stop|delete)$/)?.[1]
+        : undefined;
+    if (action) {
+      let body = "";
+      req.on("data", (c) => {
+        body += c;
+        if (body.length > 64 * 1024) req.destroy();
+      });
+      req.on("end", () => {
+        let msg: { session?: string };
+        try {
+          msg = JSON.parse(body);
+        } catch {
+          res.writeHead(400).end("bad json");
+          return;
+        }
+        if (!msg.session) {
+          res.writeHead(400).end("session is required");
+          return;
+        }
+        if (!this.sessions) {
+          res.writeHead(503).end("no session manager");
+          return;
+        }
+        const key = msg.session;
+        const ok =
+          action === "start"
+            ? this.sessions.startSessionByKey(key)
+            : action === "stop"
+              ? this.sessions.stopSessionByKey(key)
+              : this.sessions.forgetSessionByKey(key);
+        logger.info("web session action", { action, key, ok });
+        if (!ok) {
+          res.writeHead(404).end("no such session");
           return;
         }
         res.writeHead(204).end();

@@ -400,6 +400,68 @@ export class SessionManager extends EventEmitter {
     return [...keys];
   }
 
+  /**
+   * Bring up the pane for a session that already has a record. A chat nobody
+   * has spoken in since the daemon restarted has a record but no pane, and the
+   * web view offers to start it directly rather than making the user go say
+   * something in the chat. Resume applies as usual, so the model picks up its
+   * own history rather than starting cold.
+   *
+   * These three (start/stop/forget) are keyed by session rather than by chat,
+   * unlike `destroyChatSessions` — the web view lists a chat and each of its
+   * threads separately and acts on exactly the one that was clicked.
+   */
+  startSessionByKey(key: string): boolean {
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return false;
+    this.prepareSession({
+      channel: meta.channel ?? "lark",
+      chatId: meta.chatId,
+      threadId: meta.threadId,
+      workspace: meta.workspace,
+    });
+    return true;
+  }
+
+  /**
+   * Kill a session's pane but keep its record, so starting it again resumes the
+   * same Claude session. Queued messages are dropped rather than held: they were
+   * addressed to a pane that no longer exists, and delivering them whenever it
+   * next comes up would replay them out of context.
+   */
+  stopSessionByKey(key: string): boolean {
+    if (!this.sessions.has(key) && !loadSession(key)) return false;
+    this.killTmux(key);
+    const session = this.sessions.get(key);
+    if (session) {
+      if (session.startingTimer) clearTimeout(session.startingTimer);
+      session.startingTimer = undefined;
+      session.state = "inactive";
+      session.messageQueue = [];
+      session.channelRegistered = false;
+      session.dialogDismissed = false;
+    }
+    logger.info("stopped session", { key });
+    return true;
+  }
+
+  /**
+   * Drop a session entirely: kill the pane and forget cork's record of it. The
+   * chat is left alone, and so is Claude's own session file — that transcript is
+   * Claude's, not cork's, and stays on disk where `claude -r` can still reach
+   * it. Only cork stops tracking the pairing.
+   */
+  forgetSessionByKey(key: string): boolean {
+    if (!this.sessions.has(key) && !loadSession(key)) return false;
+    this.killTmux(key);
+    const session = this.sessions.get(key);
+    if (session?.startingTimer) clearTimeout(session.startingTimer);
+    this.sessions.delete(key);
+    deleteSession(key);
+    logger.info("forgot session", { key });
+    return true;
+  }
+
   createNewSession(
     channel: string,
     chatId: string,
