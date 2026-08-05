@@ -42,7 +42,7 @@ is the current conversation's initiator (their `senderId`).
 
 ```
 APP_ID=$(jq -r '.channels.lark.appId' ~/.cork/config.jsonc)
-CID=$(lark-cli im +chat-create --as user --name "CoKo · <title>" --bots "$APP_ID" \
+CID=$(lark-cli im +chat-create --as user --name "Cork · <title>" --bots "$APP_ID" \
       | jq -r '.data.chat_id')
 [ -n "$CID" ] && [ "$CID" != "null" ] || { echo "chat-create failed"; exit 1; }
 cork send --chat "$CID" --channel lark --text "<greeting>" --at <senderId>

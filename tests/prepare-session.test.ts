@@ -107,10 +107,10 @@ describe("setChatName", () => {
     const { mgr } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
 
-    mgr.setChatName("lark", "oc_y", "CoKo · Cork Dev");
+    mgr.setChatName("lark", "oc_y", "Cork · Dev Chat");
 
-    expect(mgr.sessions.get("lark_oc_y").meta.chatName).toBe("CoKo · Cork Dev");
-    expect(savedMeta("lark_oc_y").chatName).toBe("CoKo · Cork Dev");
+    expect(mgr.sessions.get("lark_oc_y").meta.chatName).toBe("Cork · Dev Chat");
+    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
   });
 
   it("renames a session that exists only on disk", async () => {
@@ -119,9 +119,9 @@ describe("setChatName", () => {
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
     mgr.sessions.delete("lark_oc_y");
 
-    mgr.setChatName("lark", "oc_y", "CoKo · Cork Dev");
+    mgr.setChatName("lark", "oc_y", "Cork · Dev Chat");
 
-    expect(savedMeta("lark_oc_y").chatName).toBe("CoKo · Cork Dev");
+    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
   });
 
   it("ignores an empty name rather than blanking the title", async () => {

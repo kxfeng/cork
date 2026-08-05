@@ -82,7 +82,7 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
 
 `/new-chat <title>` works differently — it is handled by Claude through the skill
-cork injects, not by the daemon. It creates a Lark group named `CoKo · <title>`,
+cork injects, not by the daemon. It creates a Lark group named `Cork · <title>`,
 invites the bot, greets you there, and warms a session so your first message is
 answered immediately.
 
