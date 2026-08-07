@@ -139,4 +139,25 @@ describe("setChatName", () => {
     const { mgr } = await makeManager();
     expect(() => mgr.setChatName("lark", "oc_never", "X")).not.toThrow();
   });
+
+  it("keeps the stored title when a message carries no name", async () => {
+    // The Lark adapter sends chatName: undefined when the lookup failed. Every
+    // message writes the session record back to disk, so an unguarded assign
+    // would erase a good title on the first API hiccup and leave it erased.
+    const { mgr } = await makeManager();
+    mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
+    mgr.setChatName("lark", "oc_y", "Cork · Dev Chat");
+
+    await mgr.dispatch({
+      channel: "lark",
+      chatId: "oc_y",
+      chatType: "group",
+      messageId: "om_1",
+      senderId: "ou_owner",
+      text: "hello",
+      chatName: undefined,
+    } as never);
+
+    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
+  });
 });

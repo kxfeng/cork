@@ -14,11 +14,18 @@ const seenMessages = new Map<string, number>();
 const DEDUP_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours, covers Lark's long-interval replays
 const DEDUP_MAX_ENTRIES = 5000;
 
-// Chat name cache: chat_id -> name
-const chatNameCache = new Map<string, string>();
+// Chat name cache: chat_id -> { name, fetched at }. Held for an hour, so a group
+// renamed in Lark stops showing its old title in `cork status` and the web view
+// without waiting for a restart. Nothing pushes a rename at us, so this TTL is
+// the only bound on how stale a title can get.
+const chatNameCache = new Map<string, { name: string; at: number }>();
 
-// User name cache: open_id -> name
-const userNameCache = new Map<string, string>();
+// User name cache: open_id -> { name, fetched at }. Sender names are stamped
+// into forwarded and quoted message text, so a member who changed their nickname
+// kept being attributed under the old one. Same TTL, same reason.
+const userNameCache = new Map<string, { name: string; at: number }>();
+
+const NAME_TTL_MS = 60 * 60 * 1000;
 
 // Startup time: drop messages that predate cork startup (reconnect replay batch).
 const startupTime = Date.now();
@@ -363,10 +370,10 @@ async function handleMessageEvent(
 
   // Name resolver for sender names (cached)
   const resolveName = async (openId: string): Promise<string> => {
-    const cached = userNameCache.get(openId);
-    if (cached !== undefined) return cached;
+    const hit = userNameCache.get(openId);
+    if (hit && Date.now() - hit.at < NAME_TTL_MS) return hit.name;
     const name = await ctx.channel.getUserName(openId);
-    userNameCache.set(openId, name);
+    userNameCache.set(openId, { name, at: Date.now() });
     return name;
   };
 
@@ -496,11 +503,16 @@ async function handleMessageEvent(
 
   if (!text.trim()) return;
 
-  // Fetch chat name (cached)
-  let chatName = chatNameCache.get(chatId);
-  if (chatName === undefined) {
+  // Fetch the chat name (cached). A failed lookup returns "" and is cached like
+  // any other result, so a chat the bot cannot read does not re-ask on every
+  // message; "" never reaches the session record, which keeps its old title.
+  const cached = chatNameCache.get(chatId);
+  let chatName: string;
+  if (cached && Date.now() - cached.at < NAME_TTL_MS) {
+    chatName = cached.name;
+  } else {
     chatName = await ctx.channel.fetchChatName(chatId, senderId);
-    chatNameCache.set(chatId, chatName);
+    chatNameCache.set(chatId, { name: chatName, at: Date.now() });
   }
 
   const incoming: IncomingMessage = {
