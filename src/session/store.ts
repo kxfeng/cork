@@ -2,6 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { paths } from "../config/paths.js";
 
+/**
+ * The channel name for a session that belongs to no chat at all — created from
+ * the web view, driven only by typing in the pane. It is spelled as a channel
+ * because that is what the session key is built from, and doing so means every
+ * lookup, tmux name and store file keeps working untouched. There is no adapter
+ * by this name, which is the point: nothing routes to it.
+ */
+export const LOCAL_CHANNEL = "local";
+
 export interface SessionMeta {
   sessionId: string;
   /** Channel this session belongs to (e.g. "lark", "telegram"). Lets the daemon

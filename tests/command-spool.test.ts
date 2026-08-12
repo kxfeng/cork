@@ -23,8 +23,18 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** Wait until `predicate` holds or time runs out — fs.watch is asynchronous. */
-async function until(predicate: () => boolean, ms = 2000): Promise<void> {
+/**
+ * Wait until `predicate` holds or time runs out — fs.watch is asynchronous.
+ *
+ * The deadline exists so a broken watcher fails the test instead of hanging
+ * it. It is not an assertion about speed, and at two seconds it acted as one:
+ * a full suite run once timed out here at 2012ms, having spent that long
+ * waiting for a single fs event while twenty-nine other files ran alongside.
+ * What actually delays the event is not established — saturating the CPU
+ * deliberately did not reproduce it — so this is a looser guard rather than a
+ * fix for a known cause.
+ */
+async function until(predicate: () => boolean, ms = 15_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error("timed out waiting");

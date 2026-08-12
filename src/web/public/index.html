@@ -42,6 +42,10 @@
       header {
         padding: 12px 14px;
         border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
       }
       header b { font-size: 14px; letter-spacing: 0.02em; }
       #list { overflow-y: auto; flex: 1; padding: 6px; }
@@ -50,6 +54,9 @@
         border-radius: 6px;
         cursor: pointer;
         margin-bottom: 2px;
+        /* Rows are targets, not text. Without this a right-click drags a
+           selection across the name it is about to open a menu for. */
+        user-select: none;
       }
       .s:hover { background: #26262d; }
       .s.on { background: #2f3b52; }
@@ -224,6 +231,77 @@
       .mbox h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
       .mbox p { margin: 0 0 16px; font-size: 12px; line-height: 1.65; color: var(--dim); }
       .mbox p b { color: var(--fg); font-weight: 600; }
+      /* Info rows. A fixed label column keeps the values on one left edge; the
+         values are paths, ids and shell commands, so they wrap on any character
+         rather than pushing the dialog wider than the viewport. */
+      dl.info {
+        display: grid;
+        grid-template-columns: 96px 1fr;
+        gap: 6px 12px;
+        margin: 0 0 16px;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+      /* Row context menu. Fixed rather than absolute so it is positioned in
+         viewport coordinates, which is what the click event reports. */
+      #menu {
+        position: fixed;
+        z-index: 60;
+        min-width: 150px;
+        padding: 4px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+        user-select: none;
+      }
+      #menu button {
+        display: block;
+        width: 100%;
+        padding: 7px 10px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        font-size: 12px;
+        text-align: left;
+        cursor: pointer;
+      }
+      #menu button:hover { background: #26262d; }
+      #menu button.danger { color: #ff9090; }
+      #menu button.danger:hover { background: #3a1f1f; }
+
+      /* Create-dialog fields. Label above input rather than beside it: one of
+         the two values is an absolute path, which needs the full width. */
+      label.f { display: block; margin: 0 0 12px; }
+      label.f span {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 11px;
+        color: var(--dim);
+      }
+      label.f input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 7px 9px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        background: #101014;
+        color: var(--fg);
+        font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      label.f input:focus { outline: none; border-color: #3d3d47; }
+      /* Shown for context, not to be changed — see the rename dialog. */
+      label.f input:disabled { color: var(--dim); background: #0d0d11; cursor: default; }
+      .mbox p.hint { margin: 0 0 16px; }
+      dl.info dt { color: var(--dim); }
+      dl.info dd {
+        margin: 0;
+        color: var(--fg);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow-wrap: anywhere;
+      }
       .mrow { display: flex; justify-content: flex-end; gap: 8px; }
       .mrow button {
         padding: 7px 15px;
@@ -246,7 +324,13 @@
   </head>
   <body>
     <aside>
-      <header><b>Cork</b></header>
+      <header>
+        <b>Cork</b>
+        <button id="new" class="ib" type="button"
+                title="New session — Claude Code here, with no chat behind it">
+          <svg viewBox="0 0 16 16"><path d="M7.3 2.6h1.4v4.7h4.7v1.4H8.7v4.7H7.3V8.7H2.6V7.3h4.7V2.6z"/></svg>
+        </button>
+      </header>
       <div id="list"></div>
     </aside>
     <main>
@@ -265,13 +349,15 @@
       </div>
     </main>
 
+    <div id="menu" hidden></div>
+
     <div id="modal" hidden>
       <div class="mbox" role="dialog" aria-modal="true" aria-labelledby="mtitle">
         <h3 id="mtitle"></h3>
         <p id="mtext"></p>
         <div class="mrow">
           <button id="mcancel">Cancel</button>
-          <button id="mok" class="danger">Delete</button>
+          <button id="mok" class="danger" hidden>Delete</button>
         </div>
       </div>
     </div>
@@ -318,12 +404,21 @@
         if (!busy && current) startSession(current);
       };
 
+      $("new").onclick = () => {
+        if (!busy) newSession();
+      };
+
       function openSession(s) {
         if (ws) { ws.close(); ws = null; }
+        saveDraft();
         current = s.key;
+        // Restore before the pane work below, so the box is already right when
+        // the socket opens and focuses it.
+        $("msg").value = drafts.get(s.key) ?? "";
+        sizeComposer();
         render(sessions);
         renderActions();
-        $("who").textContent = `${s.chatName} · ${s.channel} · ${s.workspace}`;
+        $("who").textContent = `${s.chatName} · ${subtitle(s)}`;
         $("empty")?.remove();
         $("composer").classList.add("on");
 
@@ -387,7 +482,7 @@
         ws = new WebSocket(
           `${proto}://${location.host}/ws?session=${encodeURIComponent(s.key)}`
         );
-        ws.onopen = () => { sendFit(); $("msg").focus(); };
+        ws.onopen = () => { sendFit(); focusComposer(); };
         ws.onmessage = (e) => term.write(e.data);
         ws.onclose = () => term.write("\r\n\x1b[90m— detached —\x1b[0m\r\n");
       }
@@ -426,6 +521,7 @@
         ws.send(JSON.stringify({ type: "input", data: text }));
         ws.send(JSON.stringify({ type: "input", data: "\r" }));
         $("msg").value = "";
+        drafts.delete(current); // it went to the pane; it is not a draft any more
         sizeComposer();
         $("msg").focus(); // stay in the composer; the pane takes focus only on click
       }
@@ -444,6 +540,35 @@
       // worse than needing a click to move focus. Clicking either box switches
       // focus, and xterm only reads the keyboard while it is focused, so the two
       // never fight over it.
+
+      /**
+       * Half-written messages, per session.
+       *
+       * There is one composer for every session, so without this a draft
+       * followed the eye from one session to the next and could be sent into
+       * the wrong pane. Kept in memory only: a reload starts clean, which is
+       * what a reload is for.
+       */
+      const drafts = new Map();
+
+      /**
+       * Focus the composer with the caret after whatever is already in it.
+       * Focusing a textarea whose value was set while it was unfocused puts the
+       * caret at position 0, so returning to a session with a draft would drop
+       * you in front of your own sentence.
+       */
+      function focusComposer() {
+        const t = $("msg");
+        t.focus();
+        t.setSelectionRange(t.value.length, t.value.length);
+      }
+
+      function saveDraft() {
+        if (!current) return;
+        const text = $("msg").value;
+        if (text) drafts.set(current, text);
+        else drafts.delete(current);
+      }
 
       function sizeComposer() {
         const t = $("msg");
@@ -478,33 +603,39 @@
       const boxWatcher = new ResizeObserver(() => sendFit());
 
       let sessions = [];
+      let defaultWorkspace = ""; // prefill for the create dialog; comes with the list
       let busy = false; // an action is in flight; its button shows it, nothing else does
 
       /**
-       * Confirm a destructive action. Drawn in-page rather than with confirm(),
-       * which blocks the page and every event behind it — and this one can name
-       * what is about to go, so there is no doubt which session was clicked.
-       * Resolves false on Cancel, Esc, or a click on the backdrop.
+       * The one in-page dialog, drawn rather than handed to confirm() — which
+       * blocks the page and every event behind it, and cannot name the session
+       * it is asking about.
+       *
+       * `ok` labels the accepting button, or is null for a dialog that only has
+       * something to say: then Cancel becomes Close and Enter dismisses it, so
+       * the keyboard behaves the way the single button reads. Always resolves —
+       * false on Cancel, Esc, or a click on the backdrop.
        */
-      function confirmDelete(name) {
+      function dialog({ title, html, ok = null, danger = false, focus = null }) {
         return new Promise((resolve) => {
           const m = $("modal");
-          $("mtitle").textContent = "Delete this session?";
-          $("mtext").innerHTML =
-            `<b>${escapeHtml(name)}</b> — stops Claude Code and drops Cork's ` +
-            `record of it. The chat itself is untouched, and so is Claude's own ` +
-            `session file, which stays resumable.`;
+          $("mtitle").textContent = title;
+          $("mtext").innerHTML = html;
+          $("mok").hidden = !ok;
+          if (ok) $("mok").textContent = ok;
+          $("mok").className = danger ? "danger" : "";
+          $("mcancel").textContent = ok ? "Cancel" : "Close";
           m.hidden = false;
-          $("mok").focus();
+          (focus ? $(focus) : ok ? $("mok") : $("mcancel")).focus();
           const onKey = (e) => {
             if (e.key === "Escape") { e.stopPropagation(); done(false); }
-            else if (e.key === "Enter") { e.stopPropagation(); done(true); }
+            else if (e.key === "Enter") { e.stopPropagation(); done(!!ok); }
           };
           const done = (v) => {
             m.hidden = true;
             $("mok").onclick = $("mcancel").onclick = m.onclick = null;
             document.removeEventListener("keydown", onKey, true);
-            $("msg").focus();
+            focusComposer();
             resolve(v);
           };
           $("mok").onclick = () => done(true);
@@ -514,10 +645,116 @@
         });
       }
 
+      // A local session has no chat to reassure anyone about — promising one is
+      // untouched would imply a group exists somewhere that does not.
+      const confirmDelete = (name, local) =>
+        dialog({
+          title: "Delete this session?",
+          html:
+            `<b>${escapeHtml(name)}</b> — stops Claude Code and drops Cork's ` +
+            `record of it. ` +
+            (local
+              ? `Claude's own session file is untouched and stays resumable.`
+              : `The chat itself is untouched, and so is Claude's own session ` +
+                `file, which stays resumable.`),
+          ok: "Delete",
+          danger: true,
+        });
+
+      /**
+       * Open a Claude Code session with no chat behind it. Named and pointed at
+       * a workspace here, because those are the only two things cork cannot
+       * infer — everything else about it matches a chat session.
+       */
+      async function newSession() {
+        const ws = escapeHtml(defaultWorkspace);
+        const goahead = await dialog({
+          title: "New session",
+          html:
+            `<label class="f"><span>Name</span>` +
+            `<input id="fname" type="text" placeholder="optional" autocomplete="off"></label>` +
+            `<label class="f"><span>Workspace</span>` +
+            `<input id="fws" type="text" value="${ws}" spellcheck="false" autocomplete="off"></label>` +
+            `<p class="hint">Claude Code runs here with no channel and no Stop hook — ` +
+            `it talks to you in this terminal only.</p>`,
+          ok: "Create",
+          focus: "fname",
+        });
+        if (!goahead) return;
+        const name = $("fname")?.value || "";
+        const workspace = $("fws")?.value || "";
+        busy = true;
+        renderActions();
+        try {
+          const r = await fetch("/api/session/create", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name, workspace }),
+          });
+          if (!r.ok) throw new Error(await r.text());
+          const { key } = await r.json();
+          await refresh();
+          const s = sessions.find((x) => x.key === key);
+          if (s) openSession(s);
+        } catch (err) {
+          console.error("create:", err);
+          await dialog({
+            title: "Could not create the session",
+            html: escapeHtml(String(err)),
+          });
+        } finally {
+          busy = false;
+          renderActions();
+        }
+      }
+
+      /** The same fields `/status` reports in a chat, read live when opened. */
+      async function showInfo(key) {
+        let s;
+        try {
+          const r = await fetch(`/api/session/status?session=${encodeURIComponent(key)}`);
+          if (!r.ok) throw new Error(`status ${r.status}`);
+          s = await r.json();
+        } catch (err) {
+          console.error("info:", err);
+          await dialog({
+            title: "Session info",
+            html: `Could not read this session's status — ${escapeHtml(String(err))}.`,
+          });
+          return;
+        }
+        // The same fields, in the same order, as the `/status` reply in a chat.
+        // Whether it is running is not among them: the list dot and the
+        // start/stop button in the header both say so already.
+        const rows = [
+          ["Name", s.chatName],
+          s.channel === "local" ? null : ["Channel", s.channel + (s.isThread ? " (thread)" : "")],
+          s.chatType === "group" ? ["Mention", s.mentionRequired ? "on" : "off"] : null,
+          ["Workspace", s.workspace],
+          ["Cork session", s.key],
+          ["Claude session", s.sessionId],
+          ["Claude context", s.claudeContext],
+          ["Terminal", s.terminal],
+        ].filter(Boolean);
+        await dialog({
+          title: "Session info",
+          html:
+            '<dl class="info">' +
+            rows
+              .map(
+                ([k, v]) =>
+                  `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v ?? ""))}</dd>`
+              )
+              .join("") +
+            "</dl>",
+        });
+      }
+
       const ICON = {
         start: '<svg viewBox="0 0 16 16"><path d="M5 3.2v9.6c0 .4.4.6.7.4l7.2-4.8c.3-.2.3-.6 0-.8L5.7 2.8c-.3-.2-.7 0-.7.4z"/></svg>',
         stop: '<svg viewBox="0 0 16 16"><rect x="4.3" y="4.3" width="7.4" height="7.4" rx="1.2"/></svg>',
         trash: '<svg viewBox="0 0 16 16"><path d="M6.3 1.6h3.4c.4 0 .7.3.7.7v.8h2.7c.4 0 .7.3.7.6s-.3.6-.7.6h-.6l-.6 8.3c0 .8-.7 1.4-1.5 1.4H5.6c-.8 0-1.4-.6-1.5-1.4l-.6-8.3H2.9c-.4 0-.7-.3-.7-.6s.3-.6.7-.6h2.7v-.8c0-.4.3-.7.7-.7zm.7 1.5h2v-.3h-2v.3z"/></svg>',
+        info: '<svg viewBox="0 0 16 16"><path d="M8 1.4a6.6 6.6 0 100 13.2A6.6 6.6 0 008 1.4zm0 1.3a5.3 5.3 0 110 10.6A5.3 5.3 0 018 2.7zm0 1.5a.9.9 0 100 1.8.9.9 0 000-1.8zM7.3 7h1.4v4.6H7.3V7z"/></svg>',
       };
 
       // Both buttons act on whichever session is open, so they sit in the header
@@ -537,6 +774,8 @@
           b.disabled = busy;
           box.appendChild(b);
         };
+        add("Info — what /status reports for this session", ICON.info,
+          () => showInfo(s.key));
         if (s.alive) {
           add("Stop — end the Claude Code process, keep the session", ICON.stop,
             () => stopSession(s.key));
@@ -549,17 +788,17 @@
           ICON.trash,
           async () => {
             const label = s.chatName + (s.isThread ? " ⤷ thread" : "");
-            if (await confirmDelete(label)) dropSession(s.key);
+            if (await confirmDelete(label, s.channel === "local")) dropSession(s.key);
           },
           "danger"
         );
       }
 
-      const act = (action, key) =>
+      const act = (action, key, extra) =>
         fetch(`/api/session/${action}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ session: key }),
+          body: JSON.stringify({ session: key, ...extra }),
         });
 
       /** Poll until the pane is up, so we attach only once there is something to
@@ -581,11 +820,11 @@
        * that, and the pane appearing or going away, is the whole of the feedback.
        * Failures go to the console rather than into the page.
        */
-      async function runAction(action, key) {
+      async function runAction(action, key, extra) {
         busy = true;
         renderActions();
         try {
-          const r = await act(action, key);
+          const r = await act(action, key, extra);
           if (!r.ok) {
             console.error(`${action} failed`, r.status, await r.text().catch(() => ""));
             return false;
@@ -620,15 +859,33 @@
 
       async function dropSession(key) {
         if (!(await runAction("delete", key))) { renderActions(); return; }
+        drafts.delete(key); // nothing left to send it to
         if (current === key) {
           if (ws) { ws.close(); ws = null; }
           current = null;
           term?.reset();
+          $("msg").value = "";
+          sizeComposer();
           $("who").textContent = "select a session";
           $("composer").classList.remove("on");
           setOffline(false); // nothing is selected, so nothing is "not running"
         }
         await refresh();
+      }
+
+      /**
+       * The second line of a list row, and the same text in the header.
+       *
+       * A local session names no channel. It is the one kind that has nothing
+       * on the other side, so "local" would be a label for the absence of one —
+       * and for anyone using cork mostly this way it would repeat down the whole
+       * list saying nothing. The chat-backed kinds keep theirs, because there it
+       * distinguishes two sessions that otherwise read identically.
+       */
+      function subtitle(s) {
+        const parts = s.channel === "local" ? [] : [s.channel];
+        parts.push(s.workspace);
+        return parts.join(" · "); // plain text; the HTML caller escapes it
       }
 
       function render(list) {
@@ -639,13 +896,89 @@
           const name = s.chatName + (s.isThread ? " ⤷ thread" : "");
           el.innerHTML =
             `<div class="n"><i class="dot${s.alive ? " live" : ""}"></i>${escapeHtml(name)}</div>` +
-            `<div class="m">${s.channel} · ${escapeHtml(s.workspace)}</div>`;
+            `<div class="m">${escapeHtml(subtitle(s))}</div>`;
           // A stopped session opens too — dimmed, but reachable, so it can be
           // started (or dropped) from here rather than only from its chat.
           el.onclick = () => openSession(s);
+          el.oncontextmenu = (e) => showMenu(e, s);
           if (!s.alive) el.style.opacity = 0.55;
           $("list").appendChild(el);
         }
+      }
+
+      /**
+       * Row menu. The header's buttons act on whichever session is open; this
+       * acts on the row under the cursor, so a session can be renamed or dropped
+       * without opening it first.
+       */
+      function showMenu(e, s) {
+        e.preventDefault();
+        const m = $("menu");
+        m.innerHTML = "";
+        const add = (label, onclick, cls) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          if (cls) b.className = cls;
+          b.onclick = () => { hideMenu(); onclick(); };
+          m.appendChild(b);
+        };
+        // Only a local session can be renamed — a chat's title is the
+        // platform's, and cork overwrites it on the next message either way.
+        if (s.channel === "local") add("Rename", () => renameSession(s));
+        add("Delete", async () => {
+          const label = s.chatName + (s.isThread ? " ⤷ thread" : "");
+          if (await confirmDelete(label, s.channel === "local")) dropSession(s.key);
+        }, "danger");
+
+        // Place it, then pull it back inside the viewport if it would hang off
+        // the right or bottom edge — a menu you have to scroll to is no menu.
+        m.hidden = false;
+        m.style.left = "0px";
+        m.style.top = "0px";
+        const r = m.getBoundingClientRect();
+        m.style.left = Math.min(e.clientX, window.innerWidth - r.width - 6) + "px";
+        m.style.top = Math.min(e.clientY, window.innerHeight - r.height - 6) + "px";
+      }
+
+      function hideMenu() {
+        $("menu").hidden = true;
+      }
+
+      // Anything else the user does dismisses it: a click anywhere (including
+      // on the menu's own backdrop), Escape, scrolling the list, or resizing.
+      document.addEventListener("mousedown", (e) => {
+        if (!$("menu").hidden && !$("menu").contains(e.target)) hideMenu();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") hideMenu();
+      });
+      window.addEventListener("resize", hideMenu);
+      $("list").addEventListener("scroll", hideMenu);
+
+      /** Retitle a local session. Same dialog as create, with the workspace
+       *  shown but fixed — moving a session is a different operation. */
+      async function renameSession(s) {
+        const goahead = await dialog({
+          title: "Rename session",
+          html:
+            `<label class="f"><span>Name</span>` +
+            `<input id="fname" type="text" maxlength="60" autocomplete="off" ` +
+            `value="${escapeHtml(s.chatName)}"></label>` +
+            `<label class="f"><span>Workspace</span>` +
+            `<input type="text" value="${escapeHtml(s.workspace)}" disabled></label>`,
+          ok: "Save",
+          focus: "fname",
+        });
+        if (!goahead) return;
+        const name = $("fname")?.value || "";
+        if (!name.trim() || name.trim() === s.chatName) return;
+        if (!(await runAction("rename", s.key, { name }))) { renderActions(); return; }
+        await refresh();
+        // The header caption is written when a session is opened, so refresh()
+        // alone leaves the old title up there for the one that is on screen.
+        const open = sessions.find((x) => x.key === current);
+        if (open) $("who").textContent = `${open.chatName} · ${subtitle(open)}`;
       }
 
       const escapeHtml = (t) =>
@@ -659,6 +992,7 @@
         }
         const data = await r.json();
         sessions = data.sessions;
+        defaultWorkspace = data.defaultWorkspace || defaultWorkspace;
         render(sessions);
         renderActions(); // a session may have come up or gone away since last poll
         // Same reason: one stopped from a terminal, or that died, has to grey the

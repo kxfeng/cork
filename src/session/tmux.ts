@@ -102,3 +102,20 @@ export function killCorkTmuxServer(): void {
 export function tmuxAttachHint(tmuxName: string): string {
   return `tmux -L ${tmuxLabel()} attach -t ${tmuxName}`;
 }
+
+/**
+ * tmux session names currently alive on cork's server. The daemon's in-memory
+ * map is not the authority here: the tmux server outlives the daemon, so a pane
+ * can be running for a session this process has never touched.
+ */
+export function liveTmuxSessions(): Set<string> {
+  try {
+    const out = execSync(
+      `tmux -L ${tmuxLabel()} list-sessions -F '#{session_name}'`,
+      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
+    );
+    return new Set(out.trim().split("\n").filter(Boolean));
+  } catch {
+    return new Set(); // no server / no sessions
+  }
+}

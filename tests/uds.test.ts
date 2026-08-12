@@ -38,7 +38,10 @@ function sendJson(socket: net.Socket, msg: UdsMessage): void {
   socket.write(JSON.stringify(msg) + "\n");
 }
 
-function readJson(socket: net.Socket, timeoutMs = 2000): Promise<UdsMessage> {
+/** Same reasoning as command-spool's `until`: an anti-hang guard, not a speed
+ *  assertion. Raised with it, on the same grounds — this one has not been seen
+ *  to fire, but it waits on the same kind of event with the same tight budget. */
+function readJson(socket: net.Socket, timeoutMs = 15_000): Promise<UdsMessage> {
   return new Promise((resolve, reject) => {
     let buffer = "";
     const timer = setTimeout(() => {

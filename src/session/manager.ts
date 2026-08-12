@@ -10,6 +10,7 @@ import {
   saveSession,
   deleteSession,
   listSessions,
+  LOCAL_CHANNEL,
   type SessionMeta,
 } from "./store.js";
 import { resolveWorkspacePath } from "../config/loader.js";
@@ -29,6 +30,11 @@ import {
 } from "./tmux.js";
 
 export { TMUX_PREFIX };
+
+/** A session with no chat behind it — see LOCAL_CHANNEL. */
+function isLocal(meta: SessionMeta): boolean {
+  return meta.channel === LOCAL_CHANNEL;
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
@@ -114,6 +120,12 @@ export class SessionManager extends EventEmitter {
 
   getSessionByKey(key: string): ActiveSession | undefined {
     return this.sessions.get(key);
+  }
+
+  /** Where a session lands when nobody says otherwise — the web view offers it
+   * as the prefilled workspace when creating one. */
+  defaultWorkspace(): string {
+    return resolveWorkspacePath(this.config.defaultWorkspace);
   }
 
   /** Whether a session record exists in memory or on disk for this chat/thread.
@@ -337,27 +349,6 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Deliver text typed in the web terminal to a session, as if the user had sent
-   * it through that session's channel. The model's reply therefore goes back out
-   * the way it always does — to Lark, to Telegram — and the browser sees it in
-   * the pane. Returns false if the session is not connected.
-   *
-   * Channel-agnostic on purpose: when the web becomes a channel in its own right,
-   * a web-native session routes through this unchanged.
-   */
-  dispatchWebMessage(key: string, text: string): boolean {
-    const session = this.sessions.get(key);
-    if (!session) return false;
-    return this.dispatchSystemMessage(
-      key,
-      session.meta.chatId,
-      text,
-      "cork-web",
-      "cork-web"
-    );
-  }
-
-  /**
    * Tear down every session belonging to a chat — the chat's own session and any
    * thread sessions under it. For when the chat itself is gone: disbanded, or the
    * bot removed from it. Nobody can reach those panes again, so leaving them
@@ -459,6 +450,95 @@ export class SessionManager extends EventEmitter {
     this.sessions.delete(key);
     deleteSession(key);
     logger.info("forgot session", { key });
+    return true;
+  }
+
+  /**
+   * Create a session that belongs to no chat and start its pane.
+   *
+   * The point is the browser view: a Claude Code session you can open, drive
+   * and tear down there without inventing a Lark group to hang it on. It is an
+   * ordinary session in every other respect — same key shape, same store file,
+   * same tmux name — so the list, the terminal bridge and start/stop/delete all
+   * work on it with no special case. What it lacks is the chat wiring: no
+   * channel MCP, no Stop hook, nothing to reply to. See buildClaudeArgs.
+   */
+  createLocalSession(opts: { name?: string; workspace?: string }): {
+    key: string;
+    meta: SessionMeta;
+  } {
+    // A random chat id keeps the key unique and the shape identical to a chat
+    // session's — the id just names nothing on the other side. 8 hex is 2^32,
+    // so a clash needs thousands of sessions to be worth thinking about — but
+    // the cost of one is silently overwriting a live session's record, so draw
+    // again rather than carry that.
+    let chatId = uuidv4().slice(0, 8);
+    while (loadSession(sessionKey(LOCAL_CHANNEL, chatId))) {
+      chatId = uuidv4().slice(0, 8);
+    }
+    const key = sessionKey(LOCAL_CHANNEL, chatId);
+    const workspace = resolveWorkspacePath(
+      opts.workspace?.trim() || this.config.defaultWorkspace
+    );
+    const meta: SessionMeta = {
+      sessionId: uuidv4(),
+      channel: LOCAL_CHANNEL,
+      chatId,
+      chatType: "p2p",
+      chatName: opts.name?.trim() || path.basename(workspace),
+      workspace,
+      createdAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      lastMessagePreview: "",
+      claudeSessionStarted: false,
+      mentionRequired: false,
+    };
+    saveSession(key, meta);
+
+    const session: ActiveSession = {
+      key,
+      meta,
+      state: "inactive",
+      messageQueue: [],
+      channelRegistered: false,
+      dialogDismissed: false,
+      pendingReactions: [],
+    };
+    this.sessions.set(key, session);
+    this.startSession(session);
+    logger.info("created local session", { key, workspace });
+    return { key, meta };
+  }
+
+  /** How long a session title may be, matching Lark's own limit on a group name. */
+  static readonly MAX_NAME = 60;
+
+  /**
+   * Retitle a local session.
+   *
+   * Local only, and enforced here rather than by hiding a button: a chat
+   * session's title is overwritten from the platform on every message it
+   * receives (see dispatch), so a rename would survive until the next one and
+   * then silently revert. Offering it at all would be a lie.
+   *
+   * Returns false for an unknown key, a chat session, or a name that is empty
+   * once stripped — the caller turns that into a status code.
+   */
+  renameSessionByKey(key: string, name: string): boolean {
+    // Control characters would land in a tmux status line and a chat title.
+    const clean = name
+      .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+      .trim()
+      .slice(0, SessionManager.MAX_NAME);
+    if (!clean) return false;
+
+    const session = this.sessions.get(key);
+    const meta = session?.meta ?? loadSession(key);
+    if (!meta || !isLocal(meta)) return false;
+
+    meta.chatName = clean;
+    saveSession(key, meta);
+    logger.info("renamed session", { key, name: clean });
     return true;
   }
 
@@ -631,13 +711,23 @@ export class SessionManager extends EventEmitter {
       ? ["-r", meta.sessionId]
       : ["--session-id", meta.sessionId];
 
-    if (this.config.claude.permissionMode === "bypassPermissions") {
+    // `permissionMode` governs how a prompt reaches a chat, which a local
+    // session has none of; its prompts surface in the pane instead. They are
+    // created deliberately, one at a time, on the user's own machine — so they
+    // skip, the way someone opening a terminal here would have typed it.
+    if (isLocal(meta) || this.config.claude.permissionMode === "bypassPermissions") {
       claudeArgs.push("--dangerously-skip-permissions");
     }
 
     if (this.config.claude.extraArgs.length > 0) {
       claudeArgs.push(...this.config.claude.extraArgs);
     }
+
+    // Everything below exists to wire a session to its chat, so for a local one
+    // it is not merely unnecessary but wrong: the channel MCP would register a
+    // session nobody can reply to, and the Stop hook would block every turn
+    // demanding a channel reply that cannot happen.
+    if (isLocal(meta)) return claudeArgs;
 
     claudeArgs.push("--mcp-config", this.mcpConfigPath);
     claudeArgs.push("--settings", this.settingsPath);
@@ -650,6 +740,51 @@ export class SessionManager extends EventEmitter {
     );
 
     return claudeArgs;
+  }
+
+  /**
+   * Put one Claude Code process in a fresh tmux session. The only part of
+   * starting a session that touches the outside world, split out so the state
+   * machine around it can be tested without a tmux server — the same reason
+   * resolveResume and buildClaudeArgs are their own methods. Throws if tmux
+   * refuses; the caller decides what that means for the session.
+   */
+  spawnPane(key: string, meta: SessionMeta, claudeArgs: string[]): void {
+    // CORK_SESSION_KEY is passed via env, inherited by Claude → MCP subprocess
+    // A locale is part of the pane's contract with everything Claude Code shells
+    // out to. launchd starts the daemon without one, the tmux server inherits
+    // that, and a session's processes inherit the server's environment rather
+    // than the environment of the client that created it — so without this the
+    // pane runs with no LANG at all.
+    //
+    // What that costs is not obvious until it bites: macOS command line tools
+    // fall back to the C encoding when the locale says nothing, and treat UTF-8
+    // as single bytes. `printf 中文 | pbcopy` with no locale puts ‰∏≠Êñá on the
+    // clipboard — each UTF-8 byte read as one Mac OS Roman character. It reads
+    // back correctly through pbpaste, which makes the same mistake in reverse,
+    // so the corruption only shows up once the text is pasted somewhere else.
+    const locale = process.env.LANG || process.env.LC_ALL || "en_US.UTF-8";
+    const claudeCmd =
+      `LANG='${locale}' LC_CTYPE='${locale}' ` +
+      `CORK_SESSION_KEY='${key}' claude ${claudeArgs.join(" ")}`;
+
+    // ~/.cork/env values augment the daemon's env so shell-only exports
+    // (e.g. ANTHROPIC_MODEL) reach claude even though launchd does not
+    // source the user's shell rc files.
+    const corkEnv = loadCorkEnv();
+
+    // Ensure cork's dedicated tmux server is up (with exit-empty off, clean
+    // process line) before the new-session, so the session never forks the
+    // server itself and inherit a dirty argv.
+    ensureCorkTmuxServer();
+
+    execSync(
+      corkTmux(
+        `new-session -d -s "${TMUX_PREFIX}${key}" -x 200 -y 50 ` +
+          `"cd '${meta.workspace}' && ${claudeCmd}"`
+      ),
+      { stdio: "pipe", env: { ...process.env, ...corkEnv } }
+    );
   }
 
   private startSession(session: ActiveSession): void {
@@ -676,12 +811,7 @@ export class SessionManager extends EventEmitter {
     // clipboard — each UTF-8 byte read as one Mac OS Roman character. It reads
     // back correctly through pbpaste, which makes the same mistake in reverse,
     // so the corruption only shows up once the text is pasted somewhere else.
-    const locale = process.env.LANG || process.env.LC_ALL || "en_US.UTF-8";
-    const claudeCmd =
-      `LANG='${locale}' LC_CTYPE='${locale}' ` +
-      `CORK_SESSION_KEY='${key}' claude ${claudeArgs.join(" ")}`;
     const tmuxName = `${TMUX_PREFIX}${key}`;
-
     logger.info("starting tmux session", {
       key,
       tmuxName,
@@ -689,29 +819,26 @@ export class SessionManager extends EventEmitter {
       resume,
     });
 
-    // ~/.cork/env values augment the daemon's env so shell-only exports
-    // (e.g. ANTHROPIC_MODEL) reach claude even though launchd does not
-    // source the user's shell rc files.
-    const corkEnv = loadCorkEnv();
-
-    // Ensure cork's dedicated tmux server is up (with exit-empty off, clean
-    // process line) before the new-session, so the session never forks the
-    // server itself and inherit a dirty argv.
-    ensureCorkTmuxServer();
-
     try {
-      execSync(
-        corkTmux(
-          `new-session -d -s "${tmuxName}" -x 200 -y 50 ` +
-            `"cd '${meta.workspace}' && ${claudeCmd}"`
-        ),
-        { stdio: "pipe", env: { ...process.env, ...corkEnv } }
-      );
+      this.spawnPane(key, meta, claudeArgs);
     } catch (err) {
       logger.error("failed to start tmux session", { key, err });
       session.state = "inactive";
       session.messageQueue = [];
       this.emit("error", key, `Failed to start Claude Code: ${(err as Error).message}`);
+      return;
+    }
+
+    // A local session is running the moment its pane is. Everything below waits
+    // on signals a chat session produces and this one never will — and waiting
+    // is not passive: the starting timeout would kill the pane after 30s, and
+    // the dialog poller would type Enter into a prompt that has no dialog on it.
+    if (isLocal(meta)) {
+      session.state = "connected";
+      if (!meta.claudeSessionStarted) {
+        meta.claudeSessionStarted = true;
+        saveSession(key, meta);
+      }
       return;
     }
 

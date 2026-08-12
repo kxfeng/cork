@@ -3,14 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
 import { WebSocketServer, type WebSocket } from "ws";
 import * as pty from "node-pty";
-import { listSessions } from "../session/store.js";
+import { listSessions, loadSession } from "../session/store.js";
 import type { SessionManager } from "../session/manager.js";
-import { TMUX_PREFIX, tmuxLabel } from "../session/tmux.js";
+import { TMUX_PREFIX, tmuxLabel, liveTmuxSessions } from "../session/tmux.js";
 import { paths } from "../config/paths.js";
 import type { WebConfig } from "../config/schema.js";
+import { collectStatus } from "../session/status.js";
 import { getLogger } from "../logger.js";
 
 const logger = getLogger("web");
@@ -138,19 +138,6 @@ function sameOrigin(
   return true;
 }
 
-/** tmux session names currently alive, so the UI can grey out dead ones. */
-function liveTmuxSessions(): Set<string> {
-  try {
-    const out = execSync(
-      `tmux -L ${tmuxLabel()} list-sessions -F '#{session_name}'`,
-      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
-    );
-    return new Set(out.trim().split("\n").filter(Boolean));
-  } catch {
-    return new Set(); // no server / no sessions
-  }
-}
-
 const ASSETS: Record<string, { file: string; type: string }> = {
   "/assets/xterm.js": {
     file: "@xterm/xterm/lib/xterm.js",
@@ -188,7 +175,7 @@ export class WebServer {
 
   constructor(
     private config: WebConfig,
-    /** Absent in tests that only exercise the HTTP surface; /api/send then 503s. */
+    /** Absent in tests that only exercise the HTTP surface; status then reads disk. */
     private sessions?: SessionManager
   ) {
     this.host = config.host ?? "127.0.0.1";
@@ -271,6 +258,10 @@ export class WebServer {
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());
+      // close() only stops accepting — it then waits for every open connection
+      // to end. A browser sitting on the page holds a keep-alive socket, so
+      // without this `cork restart` stalls until the 5s keepAliveTimeout.
+      this.server.closeAllConnections();
     });
     this.server = null;
   }
@@ -332,54 +323,84 @@ export class WebServer {
           return (b.lastActiveAt || "").localeCompare(a.lastActiveAt || "");
         });
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ sessions }));
+      // defaultWorkspace rides along so the create dialog can prefill it
+      // without a second round trip; the page refreshes this list anyway.
+      res.end(
+        JSON.stringify({
+          sessions,
+          defaultWorkspace: this.sessions?.defaultWorkspace() ?? "",
+        })
+      );
       return;
     }
 
-    // Text composed in the browser enters the session through the very same UDS
-    // path a Lark or Telegram message takes — not by typing into the pane. The
-    // model therefore answers over its own channel, exactly as it would have.
-    if (url.pathname === "/api/send" && req.method === "POST") {
+    // What `/status` reports in a chat, as JSON. Falls back to the record on
+    // disk when the daemon has not loaded this session: unlike the chat command,
+    // the Info button is reachable for a session that is not running, and
+    // answering "no session" for one the user can see in the list would be a lie.
+    if (url.pathname === "/api/session/status") {
+      const key = url.searchParams.get("session") || "";
+      const meta = this.sessions?.getSessionByKey(key)?.meta ?? loadSession(key);
+      if (!meta) {
+        res.writeHead(404).end("no such session");
+        return;
+      }
+      collectStatus(key, meta)
+        .then((status) => {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(status));
+        })
+        .catch((err) => {
+          logger.error("failed to collect status", { key, err });
+          res.writeHead(500).end("failed to read session status");
+        });
+      return;
+    }
+
+    // Open a Claude Code session that belongs to no chat. Separate from the
+    // lifecycle arm below because it takes a body rather than a key, and
+    // answers with the key it minted so the page can select it straight away.
+    if (url.pathname === "/api/session/create" && req.method === "POST") {
       let body = "";
       req.on("data", (c) => {
         body += c;
-        if (body.length > 256 * 1024) req.destroy(); // don't buffer unboundedly
+        if (body.length > 64 * 1024) req.destroy();
       });
       req.on("end", () => {
-        let msg: { session?: string; text?: string };
+        let msg: { name?: string; workspace?: string };
         try {
-          msg = JSON.parse(body);
+          msg = JSON.parse(body || "{}");
         } catch {
           res.writeHead(400).end("bad json");
-          return;
-        }
-        if (!msg.session || !msg.text?.trim()) {
-          res.writeHead(400).end("session and text are required");
           return;
         }
         if (!this.sessions) {
           res.writeHead(503).end("no session manager");
           return;
         }
-        const ok = this.sessions.dispatchWebMessage(msg.session, msg.text);
-        logger.info("web message dispatched", { key: msg.session, ok });
-        if (!ok) {
-          res.writeHead(409).end("session is not connected");
-          return;
+        try {
+          const { key } = this.sessions.createLocalSession({
+            name: msg.name,
+            workspace: msg.workspace,
+          });
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ key }));
+        } catch (err) {
+          logger.error("failed to create local session", { err });
+          res.writeHead(500).end(String((err as Error).message || err));
         }
-        res.writeHead(204).end();
       });
       return;
     }
 
-    // Lifecycle actions on one session. One arm for all three because they
-    // differ only in which manager call they make: start brings the pane up
-    // (resuming the same Claude session), stop kills the pane but keeps the
-    // record, delete kills it and forgets the pairing. None of them touch the
+    // Actions on one session, keyed by name. They differ only in which manager
+    // call they make: start brings the pane up (resuming the same Claude
+    // session), stop kills the pane but keeps the record, delete kills it and
+    // forgets the pairing, rename retitles a local one. None of them touch the
     // chat, and none delete Claude's own transcript.
     const action =
       req.method === "POST"
-        ? url.pathname.match(/^\/api\/session\/(start|stop|delete)$/)?.[1]
+        ? url.pathname.match(/^\/api\/session\/(start|stop|delete|rename)$/)?.[1]
         : undefined;
     if (action) {
       let body = "";
@@ -388,7 +409,7 @@ export class WebServer {
         if (body.length > 64 * 1024) req.destroy();
       });
       req.on("end", () => {
-        let msg: { session?: string };
+        let msg: { session?: string; name?: string };
         try {
           msg = JSON.parse(body);
         } catch {
@@ -397,6 +418,10 @@ export class WebServer {
         }
         if (!msg.session) {
           res.writeHead(400).end("session is required");
+          return;
+        }
+        if (action === "rename" && !msg.name?.trim()) {
+          res.writeHead(400).end("name is required");
           return;
         }
         if (!this.sessions) {
@@ -409,10 +434,21 @@ export class WebServer {
             ? this.sessions.startSessionByKey(key)
             : action === "stop"
               ? this.sessions.stopSessionByKey(key)
-              : this.sessions.forgetSessionByKey(key);
+              : action === "rename"
+                ? this.sessions.renameSessionByKey(key, msg.name as string)
+                : this.sessions.forgetSessionByKey(key);
         logger.info("web session action", { action, key, ok });
         if (!ok) {
-          res.writeHead(404).end("no such session");
+          // Rename also refuses a chat session, whose title the platform owns
+          // and overwrites — a distinct answer from "no such session", and one
+          // the page cannot get around by hiding its own button.
+          res
+            .writeHead(action === "rename" ? 409 : 404)
+            .end(
+              action === "rename"
+                ? "only a local session can be renamed"
+                : "no such session"
+            );
           return;
         }
         res.writeHead(204).end();

@@ -19,10 +19,25 @@ import WebSocket from "ws";
  * Runs against its own CORK_DIR and its own tmux server (CORK_TMUX_LABEL) so it
  * can never touch the user's live sessions.
  */
-const PORT = 7788;
 const KEY = "test_web-chat";
 const LABEL = "corktest-web";
-const SELF = `http://127.0.0.1:${PORT}`;
+
+/**
+ * A fresh port per server, rather than one port rebound by every test.
+ *
+ * fetch() pools connections per origin and the pool outlives a test. Reusing
+ * one port meant a socket opened against the server a previous test stopped
+ * could be handed to the next test's request, which then died on the RST as
+ * ECONNRESET — a failure that read as a bug in the code under test. A distinct
+ * origin has an empty pool, so there is nothing stale to hand out.
+ *
+ * Measured, not assumed: roughly one full-suite run in seven failed this way
+ * before, and one in thirty-five after. That is a real reduction and not a
+ * cure — the surviving failure was never captured, so whether it shares this
+ * cause is unknown.
+ */
+let PORT = 7788;
+let SELF = `http://127.0.0.1:${PORT}`;
 
 let dir: string;
 let server: { start(): Promise<void>; stop(): Promise<void>; url(): string };
@@ -47,20 +62,14 @@ function rawGet(headers: Record<string, string>, pathQ: string): Promise<string>
 
 let token: string;
 
-/** Records what the web server hands to the session manager. */
-let dispatched: { key: string; text: string }[] = [];
-let dispatchOk = true;
-
 async function startServer(cfg: Record<string, unknown> = {}) {
   vi.resetModules(); // paths.ts / tmux.ts read their env at import time
+  PORT += 1;
+  SELF = `http://127.0.0.1:${PORT}`;
   const { WebServer } = await import("../src/web/server.js");
-  const fakeSessions = {
-    dispatchWebMessage(key: string, text: string) {
-      dispatched.push({ key, text });
-      return dispatchOk;
-    },
-  };
-  server = new WebServer({ port: PORT, ...cfg } as never, fakeSessions as never);
+  // No session manager: the routes under test read the store directly, which is
+  // also the shape the daemon presents for a session it has not loaded.
+  server = new WebServer({ port: PORT, ...cfg } as never);
   await server.start();
   token = new URL(server.url()).searchParams.get("token")!;
 }
@@ -113,8 +122,6 @@ describe("web terminal", () => {
   });
 
   afterEach(async () => {
-    dispatched = [];
-    dispatchOk = true;
     await server?.stop();
     try {
       execSync(`tmux -L ${LABEL} kill-server 2>/dev/null`);
@@ -227,56 +234,51 @@ describe("web terminal", () => {
     });
   });
 
-  describe("composer (/api/send)", () => {
-    const post = (body: unknown, headers: Record<string, string> = {}) =>
-      fetch(api("/api/send"), {
-        method: "POST",
-        headers: ours({
-          "content-type": "application/json",
-          Cookie: `cork_web_token=${token}`,
-          ...headers,
-        }),
-        body: JSON.stringify(body),
+  describe("status (/api/session/status)", () => {
+    const get = (qs: string, headers: Record<string, string> = {}) =>
+      fetch(api(`/api/session/status${qs}`), {
+        headers: ours({ Cookie: `cork_web_token=${token}`, ...headers }),
       });
 
-    it("hands the composed text to the session, not to the pane", async () => {
+    it("answers for a session the daemon never loaded", async () => {
+      // The Info button is reachable for a stopped session, so this has to read
+      // the record on disk rather than the manager's in-memory map — which is
+      // empty here, exactly as it is after a daemon restart.
       await startServer();
-      const r = await post({ session: KEY, text: "line one\nline two" });
-      expect(r.status).toBe(204);
-      expect(dispatched).toEqual([{ key: KEY, text: "line one\nline two" }]);
+      const r = await get(`?session=${KEY}`);
+      expect(r.status).toBe(200);
+      const s = await r.json();
+      expect(s).toMatchObject({
+        key: KEY,
+        chatName: "Web Chat",
+        channel: "test",
+        workspace: "/tmp",
+        sessionId: "s1",
+      });
+      expect(s.terminal).toContain(`cork_${KEY}`);
     });
 
-    it("rejects an unauthenticated send", async () => {
+    it("404s for a key with no record anywhere", async () => {
       await startServer();
-      const r = await fetch(api("/api/send"), {
-        method: "POST",
-        headers: ours({ "content-type": "application/json" }), // no token, no cookie
-        body: JSON.stringify({ session: KEY, text: "hi" }),
+      expect((await get("?session=nope")).status).toBe(404);
+      expect((await get("")).status).toBe(404);
+    });
+
+    it("rejects an unauthenticated read", async () => {
+      await startServer();
+      const r = await fetch(api(`/api/session/status?session=${KEY}`), {
+        headers: ours(), // no token, no cookie
       });
       expect(r.status).toBe(401);
-      expect(dispatched).toEqual([]);
     });
 
-    it("rejects a send from another site", async () => {
+    it("rejects a read from another site", async () => {
       await startServer();
-      const r = await post(
-        { session: KEY, text: "hi" },
-        { Origin: "http://evil.example.com", "Sec-Fetch-Site": "cross-site" }
-      );
+      const r = await get(`?session=${KEY}`, {
+        Origin: "http://evil.example.com",
+        "Sec-Fetch-Site": "cross-site",
+      });
       expect(r.status).toBe(403);
-      expect(dispatched).toEqual([]);
-    });
-
-    it("rejects empty text", async () => {
-      await startServer();
-      expect((await post({ session: KEY, text: "   " })).status).toBe(400);
-      expect(dispatched).toEqual([]);
-    });
-
-    it("reports a disconnected session as 409", async () => {
-      await startServer();
-      dispatchOk = false;
-      expect((await post({ session: KEY, text: "hi" })).status).toBe(409);
     });
   });
 

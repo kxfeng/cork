@@ -153,7 +153,7 @@ export async function showStatus(): Promise<void> {
     console.log(`  Claude context: ${formatModelContext(usage)}`);
     console.log(`  Last active:    ${meta.lastActiveAt}`);
     console.log(`  Last msg:       ${meta.lastMessagePreview || "(none)"}`);
-    console.log(`  View:           ${tmuxAttachHint(`${TMUX_PREFIX}${key}`)}`);
+    console.log(`  Terminal:       ${tmuxAttachHint(`${TMUX_PREFIX}${key}`)}`);
     console.log();
   }
 }
