@@ -59,20 +59,46 @@ const toolResultRow = () =>
     },
   });
 
-const midStreamErrorRow = () =>
+/**
+ * Every wording claude code has actually written for this error, taken from
+ * real transcripts. They are not interchangeable trivia: cork matched the
+ * first one literally, claude code switched to the second, and auto-retry
+ * went silently dead for a month with the whole suite still green.
+ */
+const MID_STREAM_TEXTS = [
+  "API Error: Connection closed mid-response. The response above may be incomplete.",
+  "API Error: Connection lost mid-response. The response above may be incomplete.",
+  "API Error: Your computer went to sleep mid-response. The response above may be incomplete.",
+];
+
+const midStreamErrorRow = (text: string = MID_STREAM_TEXTS[0]) =>
   JSON.stringify({
     type: "assistant",
     isApiErrorMessage: true,
     error: "server_error",
     message: {
       role: "assistant",
-      content: [
-        {
-          type: "text",
-          text:
-            "API Error: Connection closed mid-response. The response above may be incomplete.",
-        },
-      ],
+      content: [{ type: "text", text }],
+    },
+  });
+
+/** Errors that must never trigger a retry — no partial output to continue. */
+const NON_RETRYABLE_TEXTS = [
+  "Request timed out",
+  "Login expired \u00b7 Please run /login",
+  "You've hit your monthly spend limit \u00b7 raise it at claude.ai/settings/usage",
+  "API Error: The socket connection was closed unexpectedly.",
+  'API Error: 500 {"type":"error","error":{"type":"api_error"}}',
+];
+
+const otherErrorRow = (text: string) =>
+  JSON.stringify({
+    type: "assistant",
+    isApiErrorMessage: true,
+    error: "server_error",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text }],
     },
   });
 
@@ -182,16 +208,12 @@ afterEach(() => {
 // --- Pure helpers ---
 
 describe("TranscriptWatcher pure helpers", () => {
-  it("isMidStreamErrorRow recognises the mid-stream connection drop", () => {
-    expect(isMidStreamErrorRow(JSON.parse(midStreamErrorRow()))).toBe(true);
+  it.each(MID_STREAM_TEXTS)("isMidStreamErrorRow recognises %s", (text) => {
+    expect(isMidStreamErrorRow(JSON.parse(midStreamErrorRow(text)))).toBe(true);
   });
 
-  it("isMidStreamErrorRow rejects 'Request timed out'", () => {
-    expect(isMidStreamErrorRow(JSON.parse(timeoutErrorRow()))).toBe(false);
-  });
-
-  it("isMidStreamErrorRow rejects 500 server_error", () => {
-    expect(isMidStreamErrorRow(JSON.parse(fiveHundredErrorRow()))).toBe(false);
+  it.each(NON_RETRYABLE_TEXTS)("isMidStreamErrorRow rejects %s", (text) => {
+    expect(isMidStreamErrorRow(JSON.parse(otherErrorRow(text)))).toBe(false);
   });
 
   it("isFreshUserInput accepts a real Lark message (isMeta:true, channel-wrapped)", () => {

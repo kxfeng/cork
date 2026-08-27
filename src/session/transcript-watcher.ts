@@ -11,7 +11,7 @@ import { getLogger, type Logger } from "../logger.js";
  *   turn end, clean or errored — 100% coverage, unlike the Stop hook which
  *   claude code skips on errored turns), check whether the row IMMEDIATELY
  *   before it is a mid-stream error (`isApiErrorMessage:true` whose text
- *   contains "Connection closed mid-response").
+ *   mentions "mid-response" — see MID_STREAM_MARKER).
  *
  *   - immediate predecessor IS the error → the turn died right on it → retry
  *   - anything else immediately before turn_duration (a recovered assistant
@@ -51,7 +51,15 @@ const REPLY_TOOL_NAME = "mcp__cork-channel__reply";
 const WATCHER_SENDER_ID = "cork:watcher";
 const WATCHER_SENDER_MARKER = `senderId="${WATCHER_SENDER_ID}"`;
 const STOP_HOOK_PREFIX = "Stop hook feedback:";
-const MID_STREAM_MARKER = "Connection closed mid-response";
+/**
+ * Claude Code words this error differently depending on what cut the stream —
+ * "Connection closed mid-response", "Connection lost mid-response", "Your
+ * computer went to sleep mid-response" — and the wording has changed under us
+ * before: matching one whole phrase left this watcher silently dead for a
+ * month. What they share is the phrase below, and no error that must NOT be
+ * retried carries it (500, timeouts, expired logins, spend limits).
+ */
+const MID_STREAM_MARKER = "mid-response";
 
 const RETRY_MESSAGE_TEXT =
   "Your task was interrupted mid-stream by an API error. " +
