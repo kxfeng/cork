@@ -10,7 +10,7 @@ import {
 import {
   buildPostContent,
   buildPostContentFromSegments,
-  injectAtMentions,
+  mentionPrefix,
 } from "../src/channels/lark/card.js";
 
 /**
@@ -232,29 +232,24 @@ describe("escapeSkipped", () => {
   });
 });
 
-describe("injectAtMentions", () => {
-  it("prepends at elements to the first paragraph", () => {
-    const base = buildPostContent("hello");
-    const out = JSON.parse(injectAtMentions(base, ["ou_1", "ou_2"]));
-    expect(out.zh_cn.content[0]).toEqual([
-      { tag: "at", user_id: "ou_1" },
-      { tag: "at", user_id: "ou_2" },
-      { tag: "text", text: " " },
-      { tag: "md", text: "hello" },
-    ]);
+describe("mentionPrefix", () => {
+  it("writes each mention as markdown's own at tag", () => {
+    // A sibling `at` element renders on the line above an `md` one — feishu
+    // lays md out as a block. Inside the markdown it stays put.
+    expect(mentionPrefix(["ou_1", "ou_2"])).toBe(
+      "<at id=ou_1></at> <at id=ou_2></at>\n\n"
+    );
   });
 
-  it("returns the post unchanged when there are no mentions", () => {
-    const base = buildPostContent("hi");
-    expect(injectAtMentions(base, [])).toBe(base);
+  it("ends the prefix with a blank line, so it owns the line", () => {
+    // Verified in a live chat: with the mention in front of them on the same
+    // line, a heading and a list item both stopped rendering as markdown.
+    const text = `${mentionPrefix(["ou_1"])}# Heading`;
+    expect(text.endsWith("\n\n# Heading")).toBe(true);
   });
 
-  it("keeps the message when the post structure is unexpected", () => {
-    // A mention is a courtesy; malformed input must cost the @mention, never the
-    // message. Same best-effort contract as the image and attachment paths.
-    for (const bad of ['{"not":"a post"}', "not json at all", "{}"]) {
-      expect(() => injectAtMentions(bad, ["ou_1"])).not.toThrow();
-      expect(injectAtMentions(bad, ["ou_1"])).toBe(bad);
-    }
+  it("is empty when there is nobody to mention", () => {
+    // The common path: every model reply goes through this with no mentions.
+    expect(mentionPrefix([])).toBe("");
   });
 });

@@ -6,9 +6,6 @@ import { getLogger } from "../logger.js";
 
 const logger = getLogger("command-spool");
 
-/** Subdir (under the queue) where an unparseable command is moved for inspection. */
-const FAILED_SUBDIR = ".failed";
-
 /** One queued command. `cmd` selects the handler; `args` is its payload. */
 export interface SpoolCommand {
   cmd: string;
@@ -33,7 +30,7 @@ export type CommandHandler = (command: SpoolCommand) => void | Promise<void>;
 export function enqueueCommand(
   cmd: string,
   args: Record<string, unknown> = {},
-  dir: string = paths.commandsDir
+  dir: string = paths.spoolDir
 ): string {
   fs.mkdirSync(dir, { recursive: true });
   const id = uuidv4();
@@ -44,7 +41,7 @@ export function enqueueCommand(
 }
 
 /**
- * Directory-as-queue: one file per command under ~/.cork/commands. The daemon
+ * Directory-as-queue: one file per command under ~/.cork/spool. The daemon
  * owns a single CommandSpool; a CLI enqueues with `enqueueCommand` above.
  *
  * Consume order is not guaranteed (fs.watch/readdir impose none), which is fine
@@ -62,7 +59,7 @@ export class CommandSpool {
 
   constructor(
     private handler: CommandHandler,
-    private dir: string = paths.commandsDir
+    private dir: string = paths.spoolDir
   ) {}
 
   start(): void {
@@ -70,8 +67,8 @@ export class CommandSpool {
     this.discardStale();
     this.watcher = fs.watch(this.dir, (_event, filename) => {
       if (!filename) return;
-      // Only top-level <id>.json files are commands. Skip .tmp (mid-write) and
-      // guard against any recursive/subdir event for the .failed quarantine.
+      // Only top-level <id>.json files are commands; .tmp is a write in
+      // progress.
       if (filename.includes(path.sep) || !filename.endsWith(".json")) return;
       void this.consume(filename);
     });
@@ -130,8 +127,15 @@ export class CommandSpool {
 
     const command = parseCommand(raw);
     if (!command) {
-      logger.warn("unparseable command file, quarantining", { filename });
-      this.quarantine(full, filename);
+      // Log the content and drop it. Keeping it would either re-fire on the
+      // next event or need a quarantine corner nobody reads; what is worth
+      // recovering is in the log.
+      logger.warn("dropping unparseable command file", { filename, raw });
+      try {
+        fs.unlinkSync(full);
+      } catch {
+        /* already gone */
+      }
       this.inFlight.delete(filename);
       return;
     }
@@ -152,19 +156,6 @@ export class CommandSpool {
     }
   }
 
-  private quarantine(full: string, filename: string): void {
-    const dir = path.join(this.dir, FAILED_SUBDIR);
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-      fs.renameSync(full, path.join(dir, filename));
-    } catch {
-      try {
-        fs.unlinkSync(full);
-      } catch {
-        /* give up */
-      }
-    }
-  }
 }
 
 function parseCommand(raw: string): SpoolCommand | undefined {

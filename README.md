@@ -81,10 +81,38 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/workspace <path>`    | Re‑point this chat at a different working directory           |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
 
-`/new-chat <title>` works differently — it is handled by Claude through the skill
-cork injects, not by the daemon. It creates a Lark group named `Cork · <title>`,
-invites the bot, greets you there, and warms a session so your first message is
-answered immediately.
+### Your own slash commands
+
+Drop an executable in `~/.cork/commands` and it becomes a command named after
+the file — `~/.cork/commands/deploy` answers `/deploy`. The daemon runs it
+before the message reaches Claude, so it costs one process spawn instead of a
+model turn and behaves the same every time.
+
+```sh
+#!/bin/sh
+# description: one line saying what this does
+set -eu
+echo "Ran for $1 in $CORK_CHAT_NAME"
+```
+
+`chmod +x` it and it is live — no restart. It receives everything after the
+command as `$1` (unsplit), the message context as `CORK_*` environment
+variables, and the whole message as JSON on stdin. Its stdout is posted back to
+the chat — print nothing and nothing is posted, which is what you want when the
+result is somewhere else. A non-zero exit posts what it wrote to stderr
+instead. Built-ins above are matched first, so a script cannot shadow
+`/status`.
+
+The directory starts empty — cork ships no commands of its own. Two things help
+when writing one:
+
+```sh
+cork send --chat <id> --channel <ch> --text <text> [--at <open_id>]  # post into any chat
+cork session create --chat <id> --channel <ch>                       # warm a session for one
+```
+
+And note the daemon's PATH is a snapshot taken when cork was installed, not
+your shell's — prefer absolute paths to tools you added later.
 
 ## Optional Lark events
 
@@ -112,7 +140,8 @@ All state lives under `~/.cork/`:
 ├── claude-settings.json # auto‑written; the Stop hook every session runs with
 ├── cork.sock           # UDS the channel MCP connects to
 ├── sessions/           # per‑chat metadata
-├── commands/           # CLI → daemon command spool; entries are consumed and deleted
+├── commands/           # your slash commands: one executable per command
+├── spool/              # CLI → daemon command queue; entries are consumed and deleted
 ├── agent/              # auto‑written; cork's injected skill, passed to claude via --add-dir
 └── logs/               # cork.log + launchd stdout/stderr
 ```

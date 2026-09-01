@@ -1,67 +1,125 @@
 ---
 name: cork
-description: Cork operational commands for Claude Code sessions bridged to Lark/Telegram chats. Invoke ONLY on an explicit slash command from the list below — never on a vague paraphrase. Supported commands: /new-chat (create a new chat session).
+description: How cork's user-defined slash commands work — one executable per command under ~/.cork/commands, run by the daemon before a message ever reaches the model. Use when asked to add, change, list or debug a cork command (e.g. "add a /deploy command", "what commands do I have", "/foo isn't working"), or when a message starting with a slash was expected to be handled and reached you instead.
 ---
 
-# Cork
+# Cork commands
 
-Cork bridges Lark and Telegram group chats to Claude Code. This skill provides
-cork's operational commands. Each command is triggered by its **literal** slash
-command — match the exact command, never a paraphrase.
-
-## Commands
-
-- `/new-chat <title>` — create a new chat session.
-
-<!-- Future commands: add one bullet here, and a matching "## /<command>" section
-     below. Keep the same shape — Trigger, then a per-platform branch. -->
-
-## /new-chat — create a new chat session
-
-**Trigger:** the user's message is the literal slash command `/new-chat <title>`.
-Never fire on paraphrases like "let's start a task" or "open a new group" — a
-vague match must NOT create a session.
-
-**Platform branch.** cork-channel tells you this session's platform ("Messages
-from Lark …" vs "Messages from Telegram …"). Dispatch on it:
-
-- **Lark** → follow the Lark section below.
-- **Any other platform (e.g. Telegram)** → not implemented yet. Reply that
-  `/new-chat` currently supports Lark only, and do nothing else.
-
-### Lark
-
-Run the whole flow as **one** shell invocation, exactly as below. The chat id
-flows from step to step through a variable, so nothing here needs a second look
-at a previous result — and every extra round trip is time the user spends
-staring at a chat where nothing has happened yet.
-
-Substitute only `<title>`, `<greeting>` and `<senderId>` before running. Do not
-hardcode identities or ids: the app id is read from cork's config, and the owner
-is the current conversation's initiator (their `senderId`).
+Cork bridges Lark and Telegram chats to Claude Code. Alongside its built-in
+slash commands it runs **user-defined ones**: one executable per command in
+`~/.cork/commands`, named after the command it answers.
 
 ```
-APP_ID=$(jq -r '.channels.lark.appId' ~/.cork/config.jsonc)
-CID=$(lark-cli im +chat-create --as user --name "Cork · <title>" --bots "$APP_ID" \
-      | jq -r '.data.chat_id')
-[ -n "$CID" ] && [ "$CID" != "null" ] || { echo "chat-create failed"; exit 1; }
-cork send --chat "$CID" --channel lark --text "<greeting>" --at <senderId>
-cork session create --chat "$CID" --channel lark
-echo "created $CID"
+~/.cork/commands/deploy     →  /deploy
+~/.cork/commands/standup    →  /standup
 ```
 
-`--channel lark` is spelled out rather than left to default. This block runs
-under the Lark branch, so the channel is known here — and a future branch that
-copies this shape would otherwise inherit a default that is wrong for it.
+The daemon matches these **before** a message reaches the model, so a command
+costs one process spawn instead of a whole turn, and behaves the same every
+time. **You do not execute these commands** — if a `/name` message reaches you,
+the command does not exist, is not executable, or was rejected (see
+Troubleshooting).
 
-**Greeting.** Write it in the same language the initiator wrote in — translate
-when they used another language. Keep it about the session itself, not about
-tasks or work. The English form is:
+Your job here is to help the owner **write and maintain** them.
 
-> Your session is ready. What would you like to talk about?
+## What a command receives
 
-Order matters and the script already encodes it: create the group and greet
-FIRST, warm the session LAST — the user sees the new group the moment it is
-created, with no waiting. `cork send` and `cork session create` both return
-immediately; the daemon does the work. When the script succeeds, tell the user
-the group is ready and to head there.
+**`$1`** — everything typed after the command, as one string. `/deploy my
+service` gives `$1 = "my service"`. It is not split on spaces, so no quoting
+games.
+
+**Environment** — the message context, ready to use:
+
+```
+CORK_CHANNEL      lark | telegram
+CORK_CHAT_ID      the chat it was sent in
+CORK_CHAT_TYPE    p2p | group
+CORK_CHAT_NAME    display name of that chat
+CORK_THREAD_ID    thread id, empty outside a thread
+CORK_SENDER_ID    who sent it (Lark open id)
+CORK_MESSAGE_ID   the triggering message
+CORK_SESSION_KEY  cork's key for this session
+CORK_WORKSPACE    that session's workspace
+CORK_TEXT         the full message text
+```
+
+**stdin** — the whole message as JSON, for fields the variables above do not
+name.
+
+**cwd** — the session's workspace.
+
+## What a command returns
+
+- **stdout** → posted back to the chat as Markdown. In a thread, it answers in
+  that thread.
+- **empty stdout** → nothing is posted at all. This is the right shape for a
+  command whose result is elsewhere — it created a group, or already spoke
+  through `cork send` — and keeps it from adding noise to the chat it was sent
+  from. The ack reaction appearing and clearing is the only trace it leaves.
+- **non-zero exit** → cork posts the tail of stderr behind a ❌, or the exit
+  code if the command wrote nothing. So write the message you want the user to
+  see to stderr, and exit non-zero.
+- **stderr** → goes to `~/.cork/logs/cork.log` either way.
+
+A condition that is not an error — "this only works on Lark" — reads better as
+stdout with exit 0: it is posted as plain text, with no ❌.
+
+Limits: 60s, then the command and anything it spawned are killed; stdout over
+8KB is truncated.
+
+## Writing one
+
+```sh
+#!/bin/sh
+# description: one line saying what this does
+set -eu
+
+[ -n "${1:-}" ] || { echo "usage: /example <arg>" >&2; exit 2; }
+echo "Ran for $1 in $CORK_CHAT_NAME"
+```
+
+Then `chmod +x ~/.cork/commands/example`. It is live immediately — no restart.
+
+Rules that will otherwise bite:
+
+- **The name is the filename**: lowercase letters, digits and hyphens, no
+  extension. `deploy.sh` answers `/deploy.sh`, which is not what anyone wants.
+- **Must be executable and not writable by others**, or cork ignores it (it
+  runs as the daemon user).
+- **Built-ins win.** `/status`, `/new`, `/workspace`, `/mention-off`,
+  `/mention-on` are matched first; a script by those names is dead weight.
+- **PATH is a snapshot** taken when cork was installed (it lives in the launchd
+  plist), not your shell's live PATH. A tool installed later may not be on it —
+  prefer absolute paths, or check the plist before assuming.
+- **Long work should not block.** The command holds that chat's queue while it
+  runs. Kick off anything slow in the background and report progress with
+  `cork send`.
+
+## Useful from inside a command
+
+- `cork send --chat <id> --channel <ch> --text <text> [--at <open_id>]` — post
+  into any chat, including one that was just created.
+- `cork session create --chat <id> --channel <ch>` — warm a Claude session for
+  a chat.
+
+Both return immediately; the daemon does the work.
+
+## Listing what exists
+
+`ls -l ~/.cork/commands` — the `# description:` line near the top of each file
+says what it does.
+
+## Troubleshooting
+
+A `/name` message reaching you instead of running means one of:
+
+- no file `~/.cork/commands/name`
+- the file has no executable bit
+- it is writable by group or others, or owned by someone else
+- the name has characters outside `[a-z0-9-]`
+
+`~/.cork/logs/cork.log` records which of these it was — cork logs the reason
+rather than posting a permissions detail into the chat.
+
+Cork ships no commands of its own: the directory starts empty and holds only
+what the owner put there.

@@ -15,6 +15,9 @@ export const paths = {
   envFile: path.join(corkDir, "env"),
   sessionsDir: path.join(corkDir, "sessions"),
   // Directory-as-queue for CLI → daemon commands (see command-spool.ts).
+  spoolDir: path.join(corkDir, "spool"),
+  // User-authored slash commands: one executable per command, named after it
+  // (see dispatcher/script-commands.ts).
   commandsDir: path.join(corkDir, "commands"),
   // Passed to claude via --add-dir; cork's skills live under its .claude/skills
   // so they load into every session without touching ~/.claude or the workspace.

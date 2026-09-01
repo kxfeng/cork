@@ -84,7 +84,7 @@ describe("CommandSpool consume", () => {
     }
   });
 
-  it("quarantines an unparseable file instead of looping on it", async () => {
+  it("drops an unparseable file instead of looping on it", async () => {
     const spool = new CommandSpool(() => {}, dir);
     spool.start();
     try {
@@ -92,9 +92,10 @@ describe("CommandSpool consume", () => {
       const bad = path.join(dir, "bad.json");
       fs.writeFileSync(`${bad}.tmp`, "not json at all");
       fs.renameSync(`${bad}.tmp`, bad);
-      await until(() => fs.existsSync(path.join(dir, ".failed", "bad.json")));
-      // Moved out of the queue, so it will not be retried forever.
-      expect(fs.existsSync(bad)).toBe(false);
+      // Gone from the queue, so it cannot be retried forever. What it held is
+      // in the log; a quarantine corner would only be a directory nobody reads.
+      await until(() => !fs.existsSync(bad));
+      expect(fs.readdirSync(dir)).toEqual([]);
     } finally {
       spool.stop();
     }

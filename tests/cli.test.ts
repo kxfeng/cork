@@ -4,9 +4,14 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * `cork session create` is what a skill runs to create and warm a session for a
- * freshly created group. It must enqueue a command the daemon will accept, with
- * mentionRequired pinned false so the group answers without an @mention.
+ * `cork session create` is what the new-chat command runs to create and warm a
+ * session for a freshly created group. It must enqueue a command the daemon
+ * will accept, with mentionRequired pinned false so the group answers without
+ * an @mention.
+ *
+ * The spool is ~/.cork/spool, deliberately not ~/.cork/commands — that name
+ * belongs to the user's own slash commands, and the spool deletes files it does
+ * not recognise.
  */
 let dir: string;
 
@@ -29,10 +34,10 @@ describe("cork session create", () => {
 
     sessionCreate({ channel: "lark", chat: "oc_z" });
 
-    const files = fs.readdirSync(path.join(dir, "commands"));
+    const files = fs.readdirSync(path.join(dir, "spool"));
     expect(files).toHaveLength(1);
     const body = JSON.parse(
-      fs.readFileSync(path.join(dir, "commands", files[0]), "utf8")
+      fs.readFileSync(path.join(dir, "spool", files[0]), "utf8")
     );
     expect(body).toEqual({
       cmd: "create_session",
@@ -49,10 +54,10 @@ describe("cork send", () => {
 
     sendCommand({ channel: "lark", chat: "oc_g", text: "@owner hi", at: ["ou_1"] });
 
-    const files = fs.readdirSync(path.join(dir, "commands"));
+    const files = fs.readdirSync(path.join(dir, "spool"));
     expect(files).toHaveLength(1);
     const body = JSON.parse(
-      fs.readFileSync(path.join(dir, "commands", files[0]), "utf8")
+      fs.readFileSync(path.join(dir, "spool", files[0]), "utf8")
     );
     expect(body).toEqual({
       cmd: "send_message",

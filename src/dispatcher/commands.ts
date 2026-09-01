@@ -1,7 +1,9 @@
 import type { Channel, IncomingMessage } from "../channels/types.js";
 import type { SessionManager } from "../session/manager.js";
 import { resolveWorkspacePath } from "../config/loader.js";
+import { sessionKey } from "../session/store.js";
 import { collectStatus, formatStatusMarkdown } from "../session/status.js";
+import { findScriptCommand, runScriptCommand } from "./script-commands.js";
 import fs from "node:fs";
 
 export interface CommandResult {
@@ -54,7 +56,50 @@ export async function handleCommand(
     return handleMentionOn(channel, message, sessionManager);
   }
 
-  return { handled: false };
+  // Built-ins are matched above, so a user script can never shadow one.
+  return handleScript(channel, message, sessionManager, text);
+}
+
+/**
+ * Answer `/name …` from ~/.cork/commands/name when such an executable exists.
+ * Anything else falls through to claude, unchanged.
+ */
+async function handleScript(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  text: string
+): Promise<CommandResult> {
+  if (!text.startsWith("/")) return { handled: false };
+
+  const space = text.search(/\s/);
+  const name = (space === -1 ? text : text.slice(0, space)).slice(1);
+  const args = space === -1 ? "" : text.slice(space + 1).trim();
+
+  const file = findScriptCommand(name);
+  if (!file) return { handled: false };
+
+  const session = sessionManager.getSession(
+    message.channel,
+    message.chatId,
+    message.threadId
+  );
+  const key =
+    session?.key ??
+    sessionKey(message.channel, message.chatId, message.threadId);
+  const workspace = session?.meta.workspace ?? sessionManager.defaultWorkspace();
+
+  const { reply } = await runScriptCommand(
+    name,
+    file,
+    args,
+    message,
+    key,
+    workspace
+  );
+
+  if (reply) await sendCmdReply(channel, message, reply);
+  return { handled: true };
 }
 
 async function handleStatus(

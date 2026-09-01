@@ -50,16 +50,17 @@ describe("writeSkill", () => {
     expect(out).toContain("name: cork"); // frontmatter claude needs
   });
 
-  it("bakes in no app id — the skill reads it from config at runtime", async () => {
-    // The whole point of #2: the id must NOT be frozen into the file. Guard both
-    // the old placeholder and the concrete id, and assert the runtime read is
-    // present instead.
+  it("bakes in no identity at all", async () => {
+    // The file ships with cork and is rewritten on every start, so anything
+    // environment-specific in it would be both wrong on other machines and a
+    // way for one user's ids to reach a shared repo.
     const { writeSkill } = await loadSkill();
     writeSkill();
     const out = written();
     expect(out).not.toContain("{{APP_ID}}");
-    expect(out).not.toMatch(/cli_[a-z0-9]{16}/); // no concrete bot id frozen in
-    expect(out).toContain("config.jsonc"); // reads the id at runtime instead
+    expect(out).not.toMatch(/cli_[a-z0-9]{16}/); // bot app id
+    expect(out).not.toMatch(/\bou_[a-z0-9]{10}/); // lark open id
+    expect(out).not.toMatch(/\boc_[a-z0-9]{10}/); // lark chat id
   });
 
   it("names the skill dir the same as the template frontmatter", async () => {

@@ -31,33 +31,20 @@ export function buildPostContentFromSegments(segments: PostSegment[]): string {
 }
 
 /**
- * Prepend @mentions to a post's first paragraph. Feishu renders an `at` element
- * (open_id → the person's name) as a real mention; a bare "@ou_…" written into
- * text would not. Used for cork-initiated messages like the new-chat greeting.
- * A post with no mentions to add is returned unchanged.
+ * The prefix that turns cork-initiated text (`cork send --at`) into text that
+ * mentions someone. Empty when there is nobody to mention.
+ *
+ * Feishu renders a mention only as structure — a bare "@ou_…" in text stays
+ * text — and markdown's own `<at>` tag is the form that survives inside an `md`
+ * element. A sibling `at` element does not: feishu lays `md` out as a block, so
+ * the mention lands on the line above it anyway.
+ *
+ * It gets a line of its own, always. Sitting in front of the text it would push
+ * whatever starts that line out of column one, and a heading or list item that
+ * is no longer at the start of its line stops being one. Both verified in a
+ * live chat.
  */
-export function injectAtMentions(
-  postContentJson: string,
-  userIds: string[]
-): string {
-  if (userIds.length === 0) return postContentJson;
-  // Best-effort, like the image and attachment paths: a mention is a courtesy,
-  // so anything unexpected in the post structure costs the @mention, never the
-  // message itself. Returning the original post still delivers the words.
-  try {
-    const post = JSON.parse(postContentJson) as {
-      zh_cn?: { content?: Array<Array<Record<string, unknown>>> };
-    };
-    const content = post.zh_cn?.content;
-    if (!Array.isArray(content)) return postContentJson;
-    const prefix = [
-      ...userIds.map((id) => ({ tag: "at", user_id: id })),
-      { tag: "text", text: " " },
-    ];
-    if (content.length === 0) content.push(prefix);
-    else content[0] = [...prefix, ...content[0]];
-    return JSON.stringify(post);
-  } catch {
-    return postContentJson;
-  }
+export function mentionPrefix(userIds: string[]): string {
+  if (userIds.length === 0) return "";
+  return `${userIds.map((id) => `<at id=${id}></at>`).join(" ")}\n\n`;
 }
