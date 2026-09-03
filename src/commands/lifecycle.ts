@@ -1,13 +1,10 @@
-import { execSync } from "node:child_process";
-import fs from "node:fs";
 import { loadConfig } from "../config/loader.js";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
 import type { SessionMeta } from "../session/store.js";
 import { TMUX_PREFIX, tmuxAttachHint } from "../session/tmux.js";
 import { readLatestUsage, formatModelContext } from "../session/transcript.js";
-
-const PLIST_LABEL = "com.cork.daemon";
+import { daemonState, restart, teardown } from "../daemon/service.js";
 
 /**
  * What to call a chat. A session warmed before anyone spoke, or one on a
@@ -42,84 +39,52 @@ export function sortSessionsForDisplay<
   );
 }
 
-function isLaunchdLoaded(): boolean {
-  try {
-    const output = execSync(`launchctl list ${PLIST_LABEL} 2>&1`, {
-      encoding: "utf-8",
-    });
-    return !output.includes("Could not find service");
-  } catch {
-    return false;
-  }
-}
-
-function getLaunchdPid(): number | null {
-  try {
-    const output = execSync(`launchctl list ${PLIST_LABEL} 2>&1`, {
-      encoding: "utf-8",
-    });
-    const match = output.match(/"PID"\s*=\s*(\d+)/);
-    if (match) return parseInt(match[1], 10);
-    const lines = output.trim().split("\n");
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 1) {
-        const pid = parseInt(parts[0], 10);
-        if (!isNaN(pid) && pid > 0) return pid;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 export async function stopDaemon(): Promise<void> {
-  if (isLaunchdLoaded()) {
-    const pid = getLaunchdPid();
-    try {
-      execSync(`launchctl unload ${paths.launchdPlist} 2>&1`);
-    } catch { /* ignore */ }
-    try { fs.unlinkSync(paths.launchdPlist); } catch { /* ignore */ }
-    console.log(`Cork daemon stopped via launchd${pid ? ` (pid: ${pid})` : ""}.`);
+  const st = daemonState();
+  if (!st.present) {
+    console.log("Cork daemon is not running.");
     return;
   }
-
-  console.log("Cork daemon is not running.");
+  teardown();
+  console.log(
+    `Cork daemon stopped via ${st.manager}${st.pid ? ` (pid: ${st.pid})` : ""}.`
+  );
 }
 
 export async function restartDaemon(): Promise<void> {
-  const wasLoaded = isLaunchdLoaded();
-  if (wasLoaded) {
-    await stopDaemon();
-    // Give launchd a moment to fully release the label and the daemon to
-    // release its UDS / log file handles before we relaunch.
-    await new Promise((r) => setTimeout(r, 500));
-  } else {
+  const st = daemonState();
+  if (!st.present) {
     console.log("Cork daemon was not running, starting fresh.");
+    const { startBackground } = await import("./start.js");
+    await startBackground();
+    return;
   }
-  const { startBackground } = await import("./start.js");
-  await startBackground();
+  restart();
+  // Give the manager a moment to bring the process back before we report.
+  await new Promise((r) => setTimeout(r, 500));
+  const now = daemonState();
+  console.log(
+    `Cork daemon restarted via ${now.manager}${now.pid ? ` (pid: ${now.pid})` : ""}.`
+  );
 }
 
 export async function showStatus(): Promise<void> {
   console.log("=== Cork Daemon ===");
 
-  if (isLaunchdLoaded()) {
-    const pid = getLaunchdPid();
-    if (pid) {
-      console.log(`Status: running via launchd (pid: ${pid})`);
-    } else {
-      console.log("Status: loaded in launchd but not running");
-    }
-  } else {
+  const st = daemonState();
+  if (!st.present) {
     console.log("Status: stopped");
+  } else if (st.pid) {
+    console.log(`Status: running via ${st.manager} (pid: ${st.pid})`);
+  } else {
+    console.log(`Status: registered with ${st.manager} but not running`);
   }
 
   console.log(`Log: ${paths.logFile}`);
 
   // Printed here rather than logged, because it carries the token. Opening it
-  // once sets a cookie, after which http://<host>:<port>/ works on its own.
+  // once stashes the token in the page's localStorage, after which
+  // http://<host>:<port>/ works on its own.
   const config = loadConfig();
   if (config.web) {
     const { readOrCreateToken } = await import("../web/server.js");

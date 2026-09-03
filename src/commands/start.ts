@@ -1,19 +1,19 @@
-import { execSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 import { loadConfig, loadRawConfig, saveConfig, ensureDirs } from "../config/loader.js";
 import { DEFAULT_CONFIG, channelEnabled, type CorkConfig } from "../config/schema.js";
 import { findFreePort } from "../web/port.js";
 import { CorkDaemon } from "../daemon/daemon.js";
 import { setupSignalHandlers } from "../daemon/signal.js";
+import {
+  daemonState,
+  installAndStart,
+  otherCorkProcesses,
+  teardown,
+} from "../daemon/service.js";
 import { LarkChannel } from "../channels/lark/index.js";
 import { TelegramChannel } from "../channels/telegram/index.js";
-import { paths } from "../config/paths.js";
 import { killCorkTmuxServer } from "../session/tmux.js";
 import type { Channel } from "../channels/types.js";
 import { enableLogFile, getLogger } from "../logger.js";
-
-const PLIST_LABEL = "com.cork.daemon";
 
 /**
  * On first run, write the web terminal's config out so it is visible and
@@ -43,149 +43,32 @@ async function seedWebConfig(config: CorkConfig): Promise<CorkConfig> {
   return seeded;
 }
 
-function generatePlist(): string {
-  let corkBin: string;
-  try {
-    corkBin = execSync("which cork", { encoding: "utf-8" }).trim();
-  } catch {
-    corkBin = process.argv[1];
-  }
-
-  // launchd starts the daemon from a bare environment — it never sources the
-  // user's shell profile. Carry NODE_EXTRA_CA_CERTS across if the shell running
-  // `cork start` has it set, so a daemon behind a TLS-inspecting proxy trusts the
-  // same CAs the user's shell does. Unset ⇒ omitted.
-  const extraCa = process.env.NODE_EXTRA_CA_CERTS;
-  const extraCaEnv = extraCa
-    ? `    <key>NODE_EXTRA_CA_CERTS</key>\n    <string>${extraCa}</string>\n`
-    : "";
-
-  // Exec cork directly (no `node` prefix) so package-manager wrappers like
-  // the pnpm shell shim work — node would choke on their `#!/bin/sh` body.
-  // The dist/index.js shebang routes to node when the symlink resolves
-  // straight to it.
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${PLIST_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${corkBin}</string>
-    <string>start</string>
-    <string>--daemon</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>${paths.stdoutLog}</string>
-  <key>StandardErrorPath</key>
-  <string>${paths.stderrLog}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${process.env.PATH || "/usr/bin:/bin:/usr/local/bin"}</string>
-    <key>HOME</key>
-    <string>${process.env.HOME || ""}</string>
-${extraCaEnv}  </dict>
-</dict>
-</plist>`;
-}
-
-function isLaunchdLoaded(): boolean {
-  try {
-    const output = execSync(`launchctl list ${PLIST_LABEL} 2>&1`, {
-      encoding: "utf-8",
-    });
-    return !output.includes("Could not find service");
-  } catch {
-    return false;
-  }
-}
-
-function getLaunchdPid(): number | null {
-  try {
-    const output = execSync(`launchctl list ${PLIST_LABEL} 2>&1`, {
-      encoding: "utf-8",
-    });
-    const match = output.match(/"PID"\s*=\s*(\d+)/);
-    if (match) return parseInt(match[1], 10);
-    const lines = output.trim().split("\n");
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 1) {
-        const pid = parseInt(parts[0], 10);
-        if (!isNaN(pid) && pid > 0) return pid;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Find other cork processes (excluding current pid).
- */
-function findOtherCorkProcesses(): { pid: number; command: string }[] {
-  try {
-    const output = execSync(
-      `ps -eo pid,ppid,command | grep -E '[c]ork start' || true`,
-      { encoding: "utf-8" }
-    ).trim();
-    if (!output) return [];
-
-    const selfPid = process.pid;
-    const selfPpid = process.ppid;
-
-    return output
-      .split("\n")
-      .map((line) => {
-        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
-        if (!match) return null;
-        const pid = parseInt(match[1], 10);
-        const ppid = parseInt(match[2], 10);
-        // Exclude self, parent, and children of self
-        if (pid === selfPid || pid === selfPpid || ppid === selfPid) return null;
-        return { pid, command: match[3] };
-      })
-      .filter((x): x is { pid: number; command: string } => x !== null);
-  } catch {
-    return [];
-  }
-}
-
 export async function startForeground(): Promise<void> {
   ensureDirs();
 
-  const launchedByLaunchd = process.argv.includes("--daemon");
+  // The service manager (launchd/systemd) sets --daemon when it launches us; a
+  // user running `cork start --foreground` by hand does not. Only the hand-run
+  // case needs the conflict checks — the manager already owns the one instance.
+  const launchedByManager = process.argv.includes("--daemon");
 
-  // Only check for conflicting processes when started by user
-  if (!launchedByLaunchd) {
-    // Check for launchd-managed instance
-    if (isLaunchdLoaded()) {
-      const pid = getLaunchdPid();
-      if (pid) {
-        console.error(
-          `Cork daemon is already running via launchd (pid: ${pid}).\n` +
+  if (!launchedByManager) {
+    const st = daemonState();
+    if (st.pid) {
+      console.error(
+        `Cork daemon is already running via ${st.manager} (pid: ${st.pid}).\n` +
           `Run 'cork stop && cork start --foreground' to restart in foreground mode.`
-        );
-        process.exit(1);
-      }
+      );
+      process.exit(1);
     }
 
-    // Check for any other cork processes
-    const others = findOtherCorkProcesses();
+    const others = otherCorkProcesses();
     if (others.length > 0) {
       const pids = others.map((p) => p.pid);
       console.error(
         `Found other cork process(es) already running:\n` +
-        others.map((p) => `  pid ${p.pid}: ${p.command}`).join("\n") +
-        `\n\nRun the following to stop them first:\n` +
-        `  kill ${pids.join(" ")} && cork start --foreground`
+          others.map((p) => `  pid ${p.pid}: ${p.command}`).join("\n") +
+          `\n\nRun the following to stop them first:\n` +
+          `  kill ${pids.join(" ")} && cork start --foreground`
       );
       process.exit(1);
     }
@@ -236,8 +119,8 @@ export async function startForeground(): Promise<void> {
   setupSignalHandlers(daemon);
 
   await daemon.start();
-  if (launchedByLaunchd) {
-    console.log("Cork daemon started via launchd.");
+  if (launchedByManager) {
+    console.log("Cork daemon started (managed).");
   } else {
     console.log("Cork daemon started in foreground mode.");
     console.log("Press Ctrl+C to stop.\n");
@@ -250,54 +133,46 @@ export async function startForeground(): Promise<void> {
 export async function startBackground(): Promise<void> {
   ensureDirs();
 
-  // Check if already running via launchd
-  if (isLaunchdLoaded()) {
-    const pid = getLaunchdPid();
-    if (pid) {
-      console.log(`Cork daemon is already running via launchd (pid: ${pid}).`);
-      console.log(`Stop it first with 'cork stop' if you want to restart.`);
-      return;
-    }
-    // Service loaded but not running — unload stale entry first
-    try {
-      execSync(`launchctl unload ${paths.launchdPlist} 2>&1`);
-    } catch { /* ignore */ }
+  const st = daemonState();
+  if (st.pid) {
+    console.log(
+      `Cork daemon is already running via ${st.manager} (pid: ${st.pid}).`
+    );
+    console.log(`Stop it first with 'cork stop' if you want to restart.`);
+    return;
   }
+  // Registered with the manager but not running — clear the stale registration
+  // before re-adding, or launchd's `load` (and systemd's `enable`) would balk.
+  if (st.present) teardown();
 
-  // Check for any other cork processes
-  const others = findOtherCorkProcesses();
+  // A foreground daemon someone started by hand would fight this one over the
+  // tmux server and sockets; refuse rather than double-run.
+  const others = otherCorkProcesses();
   if (others.length > 0) {
     const pids = others.map((p) => p.pid);
     console.error(
       `Found other cork process(es) already running:\n` +
-      others.map((p) => `  pid ${p.pid}: ${p.command}`).join("\n") +
-      `\n\nRun the following to stop them first:\n` +
-      `  kill ${pids.join(" ")} && cork start`
+        others.map((p) => `  pid ${p.pid}: ${p.command}`).join("\n") +
+        `\n\nRun the following to stop them first:\n` +
+        `  kill ${pids.join(" ")} && cork start`
     );
     process.exit(1);
   }
 
-  // Write plist file
-  const plistDir = path.dirname(paths.launchdPlist);
-  fs.mkdirSync(plistDir, { recursive: true });
-  fs.writeFileSync(paths.launchdPlist, generatePlist(), "utf-8");
-
-  // Load and start via launchctl
   try {
-    execSync(`launchctl load ${paths.launchdPlist} 2>&1`);
-    execSync(`launchctl start ${PLIST_LABEL} 2>&1`);
+    installAndStart();
   } catch (err) {
-    console.error(`Failed to start via launchd: ${(err as Error).message}`);
+    console.error(`Failed to start the cork daemon: ${(err as Error).message}`);
     process.exit(1);
   }
 
-  // Wait briefly for process to start, then report pid
+  // Wait briefly for the process to come up, then report its pid.
   await new Promise((r) => setTimeout(r, 500));
-  const pid = getLaunchdPid();
-  if (pid) {
-    console.log(`Cork daemon started via launchd (pid: ${pid}).`);
+  const now = daemonState();
+  if (now.pid) {
+    console.log(`Cork daemon started via ${now.manager} (pid: ${now.pid}).`);
   } else {
-    console.log("Cork daemon started via launchd.");
+    console.log(`Cork daemon started via ${now.manager}.`);
     console.log("Check status with 'cork status'.");
   }
 }

@@ -27,11 +27,22 @@ export const paths = {
   logFile: path.join(corkDir, "logs", "cork.log"),
   stdoutLog: path.join(corkDir, "logs", "stdout.log"),
   stderrLog: path.join(corkDir, "logs", "stderr.log"),
-  // launchd plist is a fixed macOS location, not under the cork dir.
+  // The daemon is managed by the platform's own service manager, so its
+  // definition lives in that manager's fixed location, not under the cork dir.
+  // Only the file matching the running platform is ever written; both are just
+  // path strings here.
+  //   macOS  → launchd LaunchAgent plist
+  //   Linux  → systemd --user unit (honours XDG_CONFIG_HOME)
   launchdPlist: path.join(
     os.homedir(),
     "Library",
     "LaunchAgents",
     "com.cork.daemon.plist"
+  ),
+  systemdUnit: path.join(
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+    "systemd",
+    "user",
+    "cork.service"
   ),
 } as const;

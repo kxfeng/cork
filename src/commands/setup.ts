@@ -30,5 +30,5 @@ export async function setupCommand(channelName?: string): Promise<void> {
 
   saveConfig(config);
   console.log(`\n✓ Configuration saved to ~/.cork/config.jsonc`);
-  console.log(`\nRun "cork start --foreground" to start the daemon.`);
+  console.log(`\nRun "cork start" to start the daemon in the background.`);
 }

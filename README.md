@@ -2,7 +2,7 @@
 
 > Bridge Lark/Feishu chats to Claude Code, one persistent session per chat.
 
-Cork is a macOS daemon that turns a Lark/Feishu bot into a remote front‑end for [Claude Code](https://www.anthropic.com/claude-code). Every chat (DM or group) gets its own long‑lived `claude` process running in a `tmux` session, so the conversation survives restarts and you can attach a real terminal whenever you want to look over its shoulder.
+Cork is a macOS/Linux daemon that turns a Lark/Feishu bot into a remote front‑end for [Claude Code](https://www.anthropic.com/claude-code). Every chat (DM or group) gets its own long‑lived `claude` process running in a `tmux` session, so the conversation survives restarts and you can attach a real terminal whenever you want to look over its shoulder.
 
 ```
 You ── Lark/Feishu ──▶ cork daemon ──▶ tmux ──▶ claude code (per chat)
@@ -23,7 +23,7 @@ Today only the Lark/Feishu adapter ships. The session/router layer is channel‑
 
 ## Requirements
 
-- **macOS** (the daemon is wired to `launchd`; Linux works in foreground mode but isn't a target)
+- **macOS or Linux** — the background daemon is managed by `launchd` on macOS and by the `systemd --user` instance on Linux (Ubuntu/Debian and any systemd distro). On Linux, run `loginctl enable-linger $USER` once so the daemon survives logout and starts at boot; without it the daemon lives only as long as a login session.
 - **Node.js 22+**
 - **`tmux`** on `PATH`
 - **`claude`** CLI on `PATH` (Claude Code installed and signed in)
@@ -43,7 +43,7 @@ To upgrade, re‑run the same command — pnpm refetches the latest `main`.
 
 ```bash
 cork setup        # interactive: QR‑code login + Lark bot creation
-cork start        # background daemon (registers a launchd agent)
+cork start        # background daemon (launchd agent on macOS, systemd --user unit on Linux)
 cork status       # check daemon + active sessions
 ```
 
@@ -64,7 +64,7 @@ tmux attach -t cork_lark:<chatId>
 | Command           | What it does                                                  |
 | ----------------- | ------------------------------------------------------------- |
 | `cork setup`      | Configure the default workspace + run Lark QR login flow      |
-| `cork start`      | Start the daemon under `launchd` (auto‑restarts, runs at login) |
+| `cork start`      | Start the daemon under the platform service manager — `launchd` (macOS) or `systemd --user` (Linux); auto‑restarts and runs at login/boot |
 | `cork start --foreground` | Run in the current shell (for debugging)              |
 | `cork stop`       | Stop the daemon                                               |
 | `cork restart`    | `stop` + `start`                                              |
@@ -143,10 +143,10 @@ All state lives under `~/.cork/`:
 ├── commands/           # your slash commands: one executable per command
 ├── spool/              # CLI → daemon command queue; entries are consumed and deleted
 ├── agent/              # auto‑written; cork's injected skill, passed to claude via --add-dir
-└── logs/               # cork.log + launchd stdout/stderr
+└── logs/               # cork.log (+ launchd stdout/stderr on macOS; journald on Linux)
 ```
 
-`~/.cork/env` is the easy way to pass things like `ANTHROPIC_MODEL` or proxy settings to every Claude session — `launchd` doesn't read your shell rc files, so exports there won't reach Claude otherwise.
+`~/.cork/env` is the easy way to pass things like `ANTHROPIC_MODEL` or proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise.
 
 `config.jsonc` (excerpt):
 
@@ -210,7 +210,6 @@ pnpm link --global      # use your local checkout as the global `cork`
 PRs welcome. Two areas that especially need work:
 
 - A second channel adapter (Slack / Telegram) to validate the abstraction.
-- Linux `systemd` equivalent for the launchd integration.
 
 ## License
 
