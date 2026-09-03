@@ -366,13 +366,41 @@
     <script src="/assets/addon-fit.js"></script>
     <script src="/assets/addon-webgl.js"></script>
     <script>
-      // The server answers ?token=… with a cookie, so once this page has loaded
-      // the token is redundant. Drop it from the address bar (and from the
-      // bookmark the user is about to make) — the cookie carries it from now on.
-      if (new URLSearchParams(location.search).has("token")) {
-        history.replaceState(null, "", location.pathname);
+      // The token is kept in localStorage, which — unlike a cookie — is isolated
+      // per origin (port included), so a second cork reached at 127.0.0.1 on
+      // another port never receives this one's token. The first visit carries it
+      // in ?token=…; stash it, then drop it from the address bar (and from the
+      // bookmark the user is about to make). Every later request reads it back
+      // from here: an Authorization header on fetches, the ?token query on the WS
+      // (which cannot set headers). A reload finds it already in localStorage.
+      const TOKEN_KEY = "cork_web_token";
+      let TOKEN = "";
+      try {
+        const q = new URLSearchParams(location.search).get("token");
+        if (q) {
+          localStorage.setItem(TOKEN_KEY, q);
+          history.replaceState(null, "", location.pathname);
+        }
+        TOKEN = localStorage.getItem(TOKEN_KEY) || "";
+      } catch {
+        // localStorage can throw (private mode, blocked site data); fall back to
+        // whatever the URL carried so this visit still works, even if a reload
+        // will need the ?token URL again.
+        TOKEN = new URLSearchParams(location.search).get("token") || "";
       }
+
       const $ = (id) => document.getElementById(id);
+
+      /**
+       * fetch to our own API with the token attached as a Bearer header. A custom
+       * header is never sent cross-origin without CORS and the token lives in this
+       * origin's localStorage, so it can only ever reach this server.
+       */
+      function api(path, opts = {}) {
+        const headers = { ...(opts.headers || {}) };
+        if (TOKEN) headers.Authorization = `Bearer ${TOKEN}`;
+        return fetch(path, { ...opts, headers });
+      }
 
       let term = null;
       let fit = null;
@@ -479,8 +507,11 @@
         if (!s.alive) return;
 
         const proto = location.protocol === "https:" ? "wss" : "ws";
+        // The browser WebSocket API cannot set headers, so the token rides in the
+        // query here (read from localStorage, sent only to our own origin).
         ws = new WebSocket(
-          `${proto}://${location.host}/ws?session=${encodeURIComponent(s.key)}`
+          `${proto}://${location.host}/ws?session=${encodeURIComponent(s.key)}` +
+            `&token=${encodeURIComponent(TOKEN)}`
         );
         ws.onopen = () => { sendFit(); focusComposer(); };
         ws.onmessage = (e) => term.write(e.data);
@@ -686,7 +717,7 @@
         busy = true;
         renderActions();
         try {
-          const r = await fetch("/api/session/create", {
+          const r = await api("/api/session/create", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ name, workspace }),
@@ -712,7 +743,7 @@
       async function showInfo(key) {
         let s;
         try {
-          const r = await fetch(`/api/session/status?session=${encodeURIComponent(key)}`);
+          const r = await api(`/api/session/status?session=${encodeURIComponent(key)}`);
           if (!r.ok) throw new Error(`status ${r.status}`);
           s = await r.json();
         } catch (err) {
@@ -795,7 +826,7 @@
       }
 
       const act = (action, key, extra) =>
-        fetch(`/api/session/${action}`, {
+        api(`/api/session/${action}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ session: key, ...extra }),
@@ -807,7 +838,7 @@
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 400));
-          const r = await fetch("/api/sessions");
+          const r = await api("/api/sessions");
           if (!r.ok) continue;
           sessions = (await r.json()).sessions;
           if (sessions.find((s) => s.key === key)?.alive) return true;
@@ -985,7 +1016,7 @@
         t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
       async function refresh() {
-        const r = await fetch("/api/sessions");
+        const r = await api("/api/sessions");
         if (!r.ok) {
           document.body.textContent = "unauthorized — open the URL printed by `cork status`";
           return;

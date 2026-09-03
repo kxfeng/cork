@@ -60,6 +60,22 @@ function rawGet(headers: Record<string, string>, pathQ: string): Promise<string>
   });
 }
 
+/** Like rawGet, but returns the whole response head so headers can be asserted. */
+function rawFull(headers: Record<string, string>, pathQ: string): Promise<string> {
+  return new Promise((resolve) => {
+    const c = net.connect(PORT, "127.0.0.1", () => {
+      const h = Object.entries(headers)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\r\n");
+      c.write(`GET ${pathQ} HTTP/1.1\r\n${h}\r\nConnection: close\r\n\r\n`);
+    });
+    let b = "";
+    c.on("data", (d) => (b += d));
+    c.on("end", () => resolve(b));
+    c.on("error", () => resolve("ERROR"));
+  });
+}
+
 let token: string;
 
 async function startServer(cfg: Record<string, unknown> = {}) {
@@ -81,16 +97,24 @@ const ours = (extra: Record<string, string> = {}) => ({
   ...extra,
 });
 
-/** Connect a WebSocket the way a browser would: chosen Origin, token via cookie. */
+/** The Bearer header the page attaches to every API call, read from localStorage. */
+const auth = (extra: Record<string, string> = {}) => ({
+  Authorization: `Bearer ${token}`,
+  ...extra,
+});
+
+/** Connect a WebSocket the way a browser would: chosen Origin, token via query
+ *  (the browser WebSocket API cannot set headers). */
 function wsConnect(
   origin: string,
   query = `session=${KEY}`,
   headers: Record<string, string> = {}
 ): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?${query}`, {
+    const q = query.includes("token=") ? query : `${query}&token=${token}`;
+    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws?${q}`, {
       origin,
-      headers: { cookie: `cork_web_token=${token}`, ...headers },
+      headers,
     });
     ws.on("open", () => resolve(ws));
     ws.on("error", reject);
@@ -153,25 +177,26 @@ describe("web terminal", () => {
       expect(r.status).toBe(401);
     });
 
-    it("accepts ?token=… and hands back a SameSite=Strict cookie", async () => {
+    it("accepts an Authorization: Bearer token and sets no cookie", async () => {
       await startServer();
-      const r = await fetch(api(`/api/sessions?token=${token}`), { headers: ours() });
-      expect(r.status).toBe(200);
-
-      const cookie = r.headers.get("set-cookie") ?? "";
-      expect(cookie).toContain(`cork_web_token=${token}`);
-      expect(cookie).toContain("HttpOnly");
-      expect(cookie).toContain("SameSite=Strict");
-    });
-
-    it("accepts the cookie afterwards, so the URL needs no token", async () => {
-      await startServer();
-      const r = await fetch(api("/api/sessions"), {
-        headers: ours({ Cookie: `cork_web_token=${token}` }),
-      });
+      const r = await fetch(api("/api/sessions"), { headers: ours(auth()) });
       expect(r.status).toBe(200);
       const body = (await r.json()) as { sessions: { key: string }[] };
       expect(body.sessions.map((s) => s.key)).toContain(KEY);
+      // The whole point of dropping cookies: nothing is ever stored host-wide that
+      // another cork on the same host, different port, would then receive.
+      expect(r.headers.get("set-cookie")).toBeNull();
+    });
+
+    it("serves the HTML shell without a token, so a reload/bookmark loads", async () => {
+      // The page authenticates from localStorage after it loads, so the shell
+      // itself must be reachable with no credential at all.
+      await startServer();
+      const line = await rawGet(
+        { Host: `127.0.0.1:${PORT}`, "Sec-Fetch-Site": "none" },
+        "/"
+      );
+      expect(line).toContain("200");
     });
 
     it("rejects a WebSocket with no token", async () => {
@@ -196,7 +221,7 @@ describe("web terminal", () => {
           Host: `127.0.0.1:${PORT}`,
           Origin: "http://evil.example.com",
           "Sec-Fetch-Site": "cross-site",
-          Cookie: `cork_web_token=${token}`,
+          Authorization: `Bearer ${token}`,
         },
         "/api/sessions"
       );
@@ -212,7 +237,7 @@ describe("web terminal", () => {
           Host: `127.0.0.1:${PORT}`,
           Origin: SELF,
           "Sec-Fetch-Site": "cross-site",
-          Cookie: `cork_web_token=${token}`,
+          Authorization: `Bearer ${token}`,
         },
         "/api/sessions"
       );
@@ -234,10 +259,76 @@ describe("web terminal", () => {
     });
   });
 
+  /**
+   * `ssh -L 6781:localhost:6780` (or any reverse proxy) makes the browser reach
+   * cork at one port while cork listens on another. The page then lives at the
+   * external port and every fetch / WebSocket it makes carries that port in Host
+   * and Origin — not cork's listen port. Two regressions live here:
+   *   1. Same-origin must be judged against the browser's port (the Host header),
+   *      or the WebSocket handshake is rejected and the pane reads "detached".
+   *   2. No cookie is ever set, so a second cork reached at 127.0.0.1 on another
+   *      port can never receive this one's token (cookies are not isolated by
+   *      port; localStorage, where the page keeps the token, is).
+   */
+  describe("behind a port forward (ssh -L / reverse proxy)", () => {
+    const EXT = 19999; // the external port the browser sees; PORT is what we listen on
+
+    it("accepts a WebSocket whose Origin/Host carry the forwarded port", async () => {
+      execSync(`tmux -L ${LABEL} new-session -d -s cork_${KEY} 'sleep 30'`);
+      await startServer();
+      const ws = await wsConnect(`http://127.0.0.1:${EXT}`, `session=${KEY}`, {
+        host: `127.0.0.1:${EXT}`,
+      });
+      expect(ws.readyState).toBe(1);
+      ws.close();
+    }, 15_000);
+
+    it("still rejects a WebSocket whose Origin and Host disagree", async () => {
+      // Origin (listen port) ≠ Host (forwarded port): not same-origin, so a page
+      // that is not ours cannot slip through just by being on some loopback port.
+      execSync(`tmux -L ${LABEL} new-session -d -s cork_${KEY} 'sleep 30'`);
+      await startServer();
+      await expect(
+        wsConnect(SELF, `session=${KEY}`, { host: `127.0.0.1:${EXT}` })
+      ).rejects.toThrow();
+    }, 15_000);
+
+    it("accepts a Bearer API call under the forwarded Host, and sets no cookie", async () => {
+      await startServer();
+      const head = await rawFull(
+        {
+          Host: `127.0.0.1:${EXT}`,
+          Origin: `http://127.0.0.1:${EXT}`,
+          "Sec-Fetch-Site": "same-origin",
+          Authorization: `Bearer ${token}`,
+        },
+        "/api/sessions"
+      );
+      expect(head.split("\r\n")[0]).toContain("200"); // origin judged Host↔Origin, not listen port
+      expect(head.toLowerCase()).not.toContain("set-cookie");
+    });
+
+    it("ignores cookies entirely — a stray token cookie does not authenticate", async () => {
+      // Whatever another cork on this host may have set, cork no longer reads any
+      // cookie, so a request carrying one but no Bearer/query token is unauthorized.
+      await startServer();
+      const line = await rawGet(
+        {
+          Host: `127.0.0.1:${EXT}`,
+          Origin: `http://127.0.0.1:${EXT}`,
+          "Sec-Fetch-Site": "same-origin",
+          Cookie: `cork_web_token=${token}; cork_web_token_${PORT}=${token}`,
+        },
+        "/api/sessions"
+      );
+      expect(line).toContain("401");
+    });
+  });
+
   describe("status (/api/session/status)", () => {
     const get = (qs: string, headers: Record<string, string> = {}) =>
       fetch(api(`/api/session/status${qs}`), {
-        headers: ours({ Cookie: `cork_web_token=${token}`, ...headers }),
+        headers: ours(auth(headers)),
       });
 
     it("answers for a session the daemon never loaded", async () => {

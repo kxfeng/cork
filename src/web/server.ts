@@ -50,14 +50,34 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
 /**
- * The token is also accepted from a cookie, set on the first request that carries
- * it in the query string. That keeps the token out of the URL for every
- * subsequent visit (a bookmark to http://127.0.0.1:<port>/ just works) without
- * weakening anything: SameSite=Strict means a request initiated by any other site
- * carries no cookie at all, and HttpOnly keeps it away from script.
+ * After the first visit the token is NOT kept in a cookie. Cookies are not
+ * isolated by port (RFC 6265 §8.5) — a cookie set for 127.0.0.1 is sent to every
+ * server on 127.0.0.1 regardless of port — so two cork servers reached on the same
+ * host (say a local one on :6780 and another republished by
+ * `ssh -L 6781:localhost:6780`) would each receive the OTHER's token in the Cookie
+ * header. That leaks one service's key to another, which we refuse to do.
+ *
+ * Instead the page keeps the token in localStorage, which IS isolated by origin
+ * (port included), and presents it explicitly:
+ *   - HTTP APIs: an `Authorization: Bearer <token>` header the page sets from
+ *     localStorage. A custom header is never sent cross-origin without CORS, and
+ *     localStorage is per-origin, so the token only ever reaches its own server.
+ *   - WebSocket: the token rides in the `?token=` query, because the browser
+ *     WebSocket API cannot set request headers. It is read from localStorage and
+ *     only sent to the page's own origin; WS URLs are not navigable, carry no
+ *     Referer, and are kept out of our logs.
+ * The HTML shell and its assets carry no secrets and are served without a token,
+ * so a reload or a bookmark of http://127.0.0.1:<port>/ loads the shell, which
+ * then authenticates from localStorage.
  */
-const COOKIE = "cork_web_token";
-const COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
+
+/** The port the browser reached us on, read from its Host header. Under an
+ *  `ssh -L`/reverse-proxy remap this is the external port, which is exactly what
+ *  the Origin the browser sends will carry — not necessarily our listen port. */
+function browserPort(hostHeader: string | undefined, fallback: number): number {
+  const m = hostHeader?.match(/:(\d+)$/);
+  return m ? Number(m[1]) : fallback;
+}
 
 /**
  * A closed tab does not reliably send a WebSocket close frame, so without this
@@ -96,14 +116,11 @@ function hostIsLoopback(hostHeader: string | undefined): boolean {
   return LOOPBACK_HOSTS.has(host);
 }
 
-/** Pull our token out of a Cookie header, if it is there. */
-function cookieToken(header: string | undefined): string | null {
+/** Pull the token out of an `Authorization: Bearer <token>` header, if present. */
+function bearerToken(header: string | undefined): string | null {
   if (!header) return null;
-  for (const part of header.split(";")) {
-    const [k, ...v] = part.trim().split("=");
-    if (k === COOKIE) return v.join("=");
-  }
-  return null;
+  const m = header.match(/^Bearer\s+(.+)$/i);
+  return m ? m[1] : null;
 }
 
 /**
@@ -182,7 +199,7 @@ export class WebServer {
     this.token = readOrCreateToken();
   }
 
-  /** The URL to open once; after that the cookie carries the token. */
+  /** The URL to open once; the page then stashes the token in localStorage. */
   url(): string {
     return `http://${this.host}:${this.config.port}/?token=${this.token}`;
   }
@@ -196,13 +213,24 @@ export class WebServer {
     if (LOOPBACK_HOSTS.has(this.host) && !hostIsLoopback(headers.host)) {
       return false;
     }
-    return sameOrigin(headers, this.config.port, strict);
+    // Same-origin is judged against the port the browser actually used (its Host
+    // header), not the port we listen on. Under `ssh -L 6781:localhost:6780` the
+    // page lives at 127.0.0.1:6781 and its every fetch/WS carries
+    // `Origin: http://127.0.0.1:6781`; comparing that to our listen port (6780)
+    // would fail the check and destroy the WebSocket handshake — which is what
+    // showed the pane as "detached". Host is already required loopback above, so
+    // "Origin's port equals Host's port" is a true same-origin test.
+    return sameOrigin(headers, browserPort(headers.host, this.config.port), strict);
   }
 
-  /** The gate: a valid token, from the query string or the cookie it sets. */
+  /**
+   * The gate: a valid token. The page sends it as `Authorization: Bearer <token>`
+   * on API calls; the WebSocket cannot set headers, so it uses the `?token=` query.
+   * Both are read from the page's localStorage, so a token never leaves its origin.
+   */
   private tokenOk(url: URL, headers: http.IncomingHttpHeaders): boolean {
-    if (tokenMatches(url.searchParams.get("token"), this.token)) return true;
-    return tokenMatches(cookieToken(headers.cookie), this.token);
+    if (tokenMatches(bearerToken(headers.authorization), this.token)) return true;
+    return tokenMatches(url.searchParams.get("token"), this.token);
   }
 
   async start(): Promise<void> {
@@ -288,21 +316,26 @@ export class WebServer {
       return;
     }
 
+    // The HTML shell carries no secrets and must load before any auth can happen:
+    // the token lives in the page's localStorage, which only its own JS can read.
+    // So it is served without a token, and a reload or bookmark of / just works —
+    // the page then authenticates every API call and the WebSocket from there.
+    if (url.pathname === "/") {
+      const html = path.join(here, "public", "index.html");
+      if (!fs.existsSync(html)) {
+        res.writeHead(500).end("index.html missing from the build");
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      fs.createReadStream(html).pipe(res);
+      return;
+    }
+
     if (!this.tokenOk(url, req.headers)) {
       res
         .writeHead(401)
         .end("unauthorized — open the URL printed by `cork status`");
       return;
-    }
-
-    // Authenticated by ?token=… — hand back a cookie so the URL never needs to
-    // carry it again. SameSite=Strict: a request another site initiates (including
-    // a WebSocket handshake) sends no cookie, so this cannot be replayed off-site.
-    if (url.searchParams.has("token")) {
-      res.setHeader(
-        "set-cookie",
-        `${COOKIE}=${this.token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${COOKIE_MAX_AGE}`
-      );
     }
 
     if (url.pathname === "/api/sessions") {
@@ -453,17 +486,6 @@ export class WebServer {
         }
         res.writeHead(204).end();
       });
-      return;
-    }
-
-    if (url.pathname === "/") {
-      const html = path.join(here, "public", "index.html");
-      if (!fs.existsSync(html)) {
-        res.writeHead(500).end("index.html missing from the build");
-        return;
-      }
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      fs.createReadStream(html).pipe(res);
       return;
     }
 
