@@ -11,12 +11,36 @@ export interface TranscriptUsage {
 }
 
 /**
- * Path to claude code's per-session JSONL transcript.
- * Claude Code stores transcripts under ~/.claude/projects/<workspace>/<sessionId>.jsonl
- * where <workspace> is the absolute workspace path with `/` replaced by `-`.
+ * Path to claude code's per-session JSONL transcript, under
+ * ~/.claude/projects/<slug>/<sessionId>.jsonl.
+ *
+ * The slug must match how Claude Code itself names that directory, which is:
+ * take the process's working directory and replace EVERY non-alphanumeric
+ * character with `-`. Two things this has to get right, both of which the old
+ * `/`-only replace got wrong and which only bite on some machines:
+ *
+ *   1. Real path, not the symlinked one. cork launches claude with
+ *      `cd '<workspace>'`, and Claude derives the slug from `process.cwd()`,
+ *      which node resolves through symlinks. So a workspace reached via a
+ *      symlinked HOME (e.g. /home/<user> → /data00/home/<user>) is slugged from
+ *      the resolved target, and we must resolve it too.
+ *   2. Every non-alphanumeric, not just `/`. A `.` in the path — a username like
+ *      `first.last`, say — becomes `-` as well.
+ *
+ * Miss either and the path points at a directory that never exists, so every
+ * transcript lookup silently misses: `/status` shows "(no claude session yet)",
+ * the reply watcher never fires, and resolveResume decides the session was
+ * auto-cleaned and starts a fresh one, losing the conversation.
  */
 export function transcriptPath(workspace: string, sessionId: string): string {
-  const slug = workspace.replace(/\//g, "-");
+  let real = workspace;
+  try {
+    real = fs.realpathSync(workspace);
+  } catch {
+    // Workspace not on disk yet (warmed before its dir exists) — the unresolved
+    // path is the best guess, and matches whenever there is no symlink involved.
+  }
+  const slug = real.replace(/[^a-zA-Z0-9]/g, "-");
   return path.join(os.homedir(), ".claude", "projects", slug, `${sessionId}.jsonl`);
 }
 
