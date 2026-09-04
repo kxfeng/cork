@@ -38,6 +38,14 @@ const TMUX_CONF = `# cork-managed config for the dedicated \`-L\` tmux server.
 # brought up by an explicit start-server before any new-session — that keeps
 # its process line clean and stops it from vanishing between sessions.
 set -g exit-empty off
+
+# The wheel only scrolls a pane's own scrollback when tmux is the one handling
+# it. tmux occupies the alternate screen, and a terminal whose foreground
+# program sits there without asking for mouse tracking turns wheel events into
+# arrow keys — those reach Claude Code as input-history navigation instead of
+# scrolling anything. Hold Shift while dragging to fall back to the terminal's
+# native selection when copying.
+set -g mouse on
 `;
 
 /** Prefix shared by every cork tmux command. */
