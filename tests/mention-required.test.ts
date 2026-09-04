@@ -9,12 +9,17 @@ vi.mock("../src/config/paths.js", () => ({
   paths: { sessionsDir: testDir },
 }));
 
-const { saveSession } = await import("../src/session/store.js");
+const { saveSession, newSessionId, findSessionId } = await import(
+  "../src/session/store.js"
+);
 const { SessionManager } = await import("../src/session/manager.js");
 
 function createSessionFile(chatId: string, mentionRequired: boolean): void {
-  saveSession(`lark_${chatId}`, {
+  // The id is opaque; the chat this record serves is stated in the meta, which
+  // is what the manager looks it up by.
+  saveSession(newSessionId(), {
     sessionId: "test-uuid",
+    channel: "lark",
     chatId,
     chatType: "group",
     chatName: "Test Group",
@@ -56,8 +61,9 @@ describe("SessionManager mention-required", () => {
     const m = newManager();
     m.setMentionRequired("lark", "write_chat", false);
 
+    const id = findSessionId("lark", "write_chat")!;
     const data = JSON.parse(
-      fs.readFileSync(path.join(testDir, "lark_write_chat.json"), "utf-8")
+      fs.readFileSync(path.join(testDir, id, "session.json"), "utf-8")
     );
     expect(data.mentionRequired).toBe(false);
     expect(m.getMentionRequired("lark", "write_chat")).toBe(false);
@@ -94,9 +100,10 @@ describe("SessionManager mention-required", () => {
     expect(m.getSession("lark", "live_chat")!.meta.mentionRequired).toBe(false);
 
     // Re-persisting that meta (as dispatch does) keeps the value.
-    saveSession("lark_live_chat", m.getSession("lark", "live_chat")!.meta);
+    const id = m.getSession("lark", "live_chat")!.key;
+    saveSession(id, m.getSession("lark", "live_chat")!.meta);
     const data = JSON.parse(
-      fs.readFileSync(path.join(testDir, "lark_live_chat.json"), "utf-8")
+      fs.readFileSync(path.join(testDir, id, "session.json"), "utf-8")
     );
     expect(data.mentionRequired).toBe(false);
   });

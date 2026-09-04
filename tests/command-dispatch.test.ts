@@ -27,6 +27,8 @@ const channel = {
 /** Enough of a SessionManager for the command path: it only reads. */
 const sessionManager = {
   getSession: () => undefined,
+  // No session for this chat yet — the script gets an empty CORK_SESSION_KEY.
+  sessionKeyFor: () => undefined,
   defaultWorkspace: () => os.tmpdir(),
 } as never;
 

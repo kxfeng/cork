@@ -51,6 +51,18 @@ program
   });
 
 program
+  .command("migrate-sessions")
+  .description(
+    "One-shot: convert pre-uuid session records to the per-session directory layout"
+  )
+  .action(async () => {
+    const { migrateSessionsCommand } = await import(
+      "./commands/migrate-sessions.js"
+    );
+    migrateSessionsCommand();
+  });
+
+program
   .command("status")
   .description("Show daemon and session status")
   .action(async () => {

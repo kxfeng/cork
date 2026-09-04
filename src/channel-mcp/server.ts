@@ -56,10 +56,11 @@ function log(event: string, fields: Record<string, unknown> = {}): void {
 
 log("subprocess_started", { sockPath });
 
-// The session key is `<channel>_<chatId>[_<threadId>]`, so its prefix names the
-// platform this session talks to. Surface it in the tool description — a Telegram
-// session must not be told it is replying to Lark.
-const channelName = sessionKey.split("_", 1)[0];
+// Which platform this session talks to. Passed explicitly by the daemon: the
+// session key is an opaque id and no longer spells out the channel. Surface it
+// in the tool description — a Telegram session must not be told it is replying
+// to Lark.
+const channelName = process.env.CORK_CHANNEL_NAME || "lark";
 const platform = channelName.charAt(0).toUpperCase() + channelName.slice(1);
 
 // Create the MCP server with channel capability

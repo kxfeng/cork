@@ -186,14 +186,18 @@ describe("Cork Integration Tests (commands)", () => {
       "Mention requirement disabled"
     );
 
-    // Session record should now exist on disk with mentionRequired=false.
-    const sessionFile = path.join(
-      corkHome,
-      "sessions",
-      "test_test-chat-mentionoff.json"
+    // Session record should now exist on disk with mentionRequired=false. Its
+    // directory is named by an opaque id, so find it by the chat it serves.
+    const sessionsDir = path.join(corkHome, "sessions");
+    const metas = fs
+      .readdirSync(sessionsDir)
+      .map((id) => path.join(sessionsDir, id, "session.json"))
+      .filter((f) => fs.existsSync(f))
+      .map((f) => JSON.parse(fs.readFileSync(f, "utf-8")));
+    const data = metas.find(
+      (m) => m.chatId === "test-chat-mentionoff"
     );
-    expect(fs.existsSync(sessionFile)).toBe(true);
-    const data = JSON.parse(fs.readFileSync(sessionFile, "utf-8"));
+    expect(data).toBeDefined();
     expect(data.mentionRequired).toBe(false);
     expect(data.chatType).toBe("group");
   }, 30000);

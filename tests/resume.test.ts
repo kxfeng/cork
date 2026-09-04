@@ -98,7 +98,7 @@ describe("resolveResume", () => {
 
     // and it persisted the new meta
     const saved = JSON.parse(
-      fs.readFileSync(path.join(dir, "sessions", "k.json"), "utf-8")
+      fs.readFileSync(path.join(dir, "sessions", "k", "session.json"), "utf-8")
     );
     expect(saved.sessionId).toBe(m.sessionId);
     expect(saved.claudeSessionStarted).toBe(false);

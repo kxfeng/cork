@@ -5,11 +5,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import {
-  sessionKey,
+  newSessionId,
   loadSession,
   saveSession,
   deleteSession,
   listSessions,
+  findSessionId,
   LOCAL_CHANNEL,
   type SessionMeta,
 } from "./store.js";
@@ -93,8 +94,99 @@ export class SessionManager extends EventEmitter {
   private sessions = new Map<string, ActiveSession>();
   private udsServer: UdsServer | null = null;
 
+  /**
+   * (channel, chatId, threadId) → session id.
+   *
+   * A session id says nothing about the chat it serves (see store.ts), so
+   * routing an inbound message needs this lookup. Built lazily from the store
+   * the first time it is asked for, then maintained in memory: a message must
+   * not cost a directory scan, and the daemon is the only writer.
+   */
+  private idIndex = new Map<string, string>();
+  private idIndexLoaded = false;
+
   constructor(private config: CorkConfig) {
     super();
+  }
+
+  private static indexKey(
+    channel: string,
+    chatId: string,
+    threadId?: string
+  ): string {
+    // NUL cannot appear in any of the three, so this join is unambiguous.
+    return `${channel}\u0000${chatId}\u0000${threadId ?? ""}`;
+  }
+
+  private loadIdIndex(): void {
+    if (this.idIndexLoaded) return;
+    this.idIndexLoaded = true;
+    for (const { key, meta } of listSessions()) this.rememberId(key, meta);
+  }
+
+  private rememberId(key: string, meta: SessionMeta): void {
+    this.idIndex.set(
+      SessionManager.indexKey(meta.channel ?? "lark", meta.chatId, meta.threadId),
+      key
+    );
+  }
+
+  private forgetId(meta: SessionMeta): void {
+    this.idIndex.delete(
+      SessionManager.indexKey(meta.channel ?? "lark", meta.chatId, meta.threadId)
+    );
+  }
+
+  /**
+   * The id of the session serving this chat/thread, or undefined when none
+   * exists yet. The store is consulted only on a miss so that a session created
+   * by another process (the migration script, say) is still found.
+   */
+  private keyFor(
+    channel: string,
+    chatId: string,
+    threadId?: string
+  ): string | undefined {
+    this.loadIdIndex();
+    const hit = this.idIndex.get(
+      SessionManager.indexKey(channel, chatId, threadId)
+    );
+    if (hit) return hit;
+    const found = findSessionId(channel, chatId, threadId);
+    if (found) {
+      this.idIndex.set(
+        SessionManager.indexKey(channel, chatId, threadId),
+        found
+      );
+      return found;
+    }
+    return undefined;
+  }
+
+  /**
+   * Public form of keyFor — the id of the session serving a chat/thread, or
+   * undefined when it has none yet. Used for log context and for addressing a
+   * session the caller did not already hold.
+   */
+  sessionKeyFor(
+    channel: string,
+    chatId: string,
+    threadId?: string
+  ): string | undefined {
+    return this.keyFor(channel, chatId, threadId);
+  }
+
+  /** As keyFor, but mints an id when the chat has no session yet. */
+  private keyForOrNew(
+    channel: string,
+    chatId: string,
+    threadId?: string
+  ): string {
+    const existing = this.keyFor(channel, chatId, threadId);
+    if (existing) return existing;
+    const key = newSessionId();
+    this.idIndex.set(SessionManager.indexKey(channel, chatId, threadId), key);
+    return key;
   }
 
   setUdsServer(uds: UdsServer): void {
@@ -114,8 +206,8 @@ export class SessionManager extends EventEmitter {
     chatId: string,
     threadId?: string
   ): ActiveSession | undefined {
-    const key = sessionKey(channel, chatId, threadId);
-    return this.sessions.get(key);
+    const key = this.keyFor(channel, chatId, threadId);
+    return key ? this.sessions.get(key) : undefined;
   }
 
   getSessionByKey(key: string): ActiveSession | undefined {
@@ -131,7 +223,8 @@ export class SessionManager extends EventEmitter {
   /** Whether a session record exists in memory or on disk for this chat/thread.
    * Used to detect a brand-new thread (no record yet) that needs seeding. */
   sessionExists(channel: string, chatId: string, threadId?: string): boolean {
-    const key = sessionKey(channel, chatId, threadId);
+    const key = this.keyFor(channel, chatId, threadId);
+    if (!key) return false;
     return this.sessions.has(key) || loadSession(key) !== null;
   }
 
@@ -141,7 +234,8 @@ export class SessionManager extends EventEmitter {
    * SessionMeta otherwise. Defaults to true for chats with no record yet.
    */
   getMentionRequired(channel: string, chatId: string): boolean {
-    const key = sessionKey(channel, chatId);
+    const key = this.keyFor(channel, chatId);
+    if (!key) return true;
     const session = this.sessions.get(key);
     if (session) return session.meta.mentionRequired ?? true;
     return loadSession(key)?.mentionRequired ?? true;
@@ -153,7 +247,8 @@ export class SessionManager extends EventEmitter {
    * never clobber it with a stale value.
    */
   setMentionRequired(channel: string, chatId: string, value: boolean): void {
-    const key = sessionKey(channel, chatId);
+    const key = this.keyFor(channel, chatId);
+    if (!key) return;
     const session = this.sessions.get(key);
     if (session) {
       session.meta.mentionRequired = value;
@@ -178,7 +273,8 @@ export class SessionManager extends EventEmitter {
    */
   setChatName(channel: string, chatId: string, name: string): void {
     if (!name) return;
-    const key = sessionKey(channel, chatId);
+    const key = this.keyFor(channel, chatId);
+    if (!key) return;
     const session = this.sessions.get(key);
     if (session) {
       session.meta.chatName = name;
@@ -197,7 +293,11 @@ export class SessionManager extends EventEmitter {
    * Does NOT start tmux — just loads metadata.
    */
   ensureSession(message: IncomingMessage): ActiveSession {
-    const key = sessionKey(message.channel, message.chatId, message.threadId);
+    const key = this.keyForOrNew(
+      message.channel,
+      message.chatId,
+      message.threadId
+    );
 
     let session = this.sessions.get(key);
     if (session) return session;
@@ -264,7 +364,11 @@ export class SessionManager extends EventEmitter {
   async dispatch(
     message: IncomingMessage
   ): Promise<void> {
-    const key = sessionKey(message.channel, message.chatId, message.threadId);
+    const key = this.keyForOrNew(
+      message.channel,
+      message.chatId,
+      message.threadId
+    );
     let session = this.sessions.get(key);
 
     if (!session) {
@@ -362,21 +466,24 @@ export class SessionManager extends EventEmitter {
    * Returns the keys destroyed.
    */
   destroyChatSessions(channel: string, chatId: string): string[] {
-    const prefix = sessionKey(channel, chatId);
-    // A thread session's key is `<prefix>_<threadId>`. Match those and the chat's
-    // own key, but not a different chat whose id merely starts the same way.
-    const belongs = (key: string) =>
-      key === prefix || key.startsWith(`${prefix}_`);
+    // A session id says nothing about its chat, so membership is decided by the
+    // meta — both for sessions this process holds and for records only on disk.
+    const belongs = (meta: SessionMeta) =>
+      (meta.channel ?? "lark") === channel && meta.chatId === chatId;
 
     const keys = new Set<string>();
-    for (const key of this.sessions.keys()) if (belongs(key)) keys.add(key);
-    for (const { key } of listSessions()) if (belongs(key)) keys.add(key);
+    for (const [key, session] of this.sessions) {
+      if (belongs(session.meta)) keys.add(key);
+    }
+    for (const { key, meta } of listSessions()) if (belongs(meta)) keys.add(key);
 
     for (const key of keys) {
       // Runs even for a disk-only key: the pane may have outlived the daemon.
       this.killTmux(key);
       const session = this.sessions.get(key);
       if (session?.startingTimer) clearTimeout(session.startingTimer);
+      const meta = session?.meta ?? loadSession(key);
+      if (meta) this.forgetId(meta);
       this.sessions.delete(key);
       deleteSession(key);
     }
@@ -443,10 +550,12 @@ export class SessionManager extends EventEmitter {
    * it. Only cork stops tracking the pairing.
    */
   forgetSessionByKey(key: string): boolean {
-    if (!this.sessions.has(key) && !loadSession(key)) return false;
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return false;
     this.killTmux(key);
     const session = this.sessions.get(key);
     if (session?.startingTimer) clearTimeout(session.startingTimer);
+    this.forgetId(meta);
     this.sessions.delete(key);
     deleteSession(key);
     logger.info("forgot session", { key });
@@ -467,16 +576,11 @@ export class SessionManager extends EventEmitter {
     key: string;
     meta: SessionMeta;
   } {
-    // A random chat id keeps the key unique and the shape identical to a chat
-    // session's — the id just names nothing on the other side. 8 hex is 2^32,
-    // so a clash needs thousands of sessions to be worth thinking about — but
-    // the cost of one is silently overwriting a live session's record, so draw
-    // again rather than carry that.
-    let chatId = uuidv4().slice(0, 8);
-    while (loadSession(sessionKey(LOCAL_CHANNEL, chatId))) {
-      chatId = uuidv4().slice(0, 8);
-    }
-    const key = sessionKey(LOCAL_CHANNEL, chatId);
+    // A random chat id keeps the shape identical to a chat session's — it just
+    // names nothing on the other side. Uniqueness is the id's job now, so this
+    // no longer needs to redraw on a clash.
+    const chatId = uuidv4().slice(0, 8);
+    const key = newSessionId();
     const workspace = resolveWorkspacePath(
       opts.workspace?.trim() || this.config.defaultWorkspace
     );
@@ -494,6 +598,7 @@ export class SessionManager extends EventEmitter {
       mentionRequired: false,
     };
     saveSession(key, meta);
+    this.rememberId(key, meta);
 
     const session: ActiveSession = {
       key,
@@ -548,7 +653,10 @@ export class SessionManager extends EventEmitter {
     threadId?: string,
     workspace?: string
   ): SessionMeta {
-    const key = sessionKey(channel, chatId, threadId);
+    // Reuse the id when this chat already has a session: /new means "start the
+    // conversation over", not "become a different session". deleteSession below
+    // still wipes the directory, so nothing from the old one survives.
+    const key = this.keyForOrNew(channel, chatId, threadId);
     const ws = workspace
       ? resolveWorkspacePath(workspace)
       : resolveWorkspacePath(this.config.defaultWorkspace);
@@ -602,7 +710,7 @@ export class SessionManager extends EventEmitter {
     mentionRequired?: boolean;
   }): void {
     const { channel, chatId, threadId } = opts;
-    const key = sessionKey(channel, chatId, threadId);
+    const key = this.keyForOrNew(channel, chatId, threadId);
 
     let session = this.sessions.get(key);
     if (!session) {
@@ -764,9 +872,14 @@ export class SessionManager extends EventEmitter {
     // back correctly through pbpaste, which makes the same mistake in reverse,
     // so the corruption only shows up once the text is pasted somewhere else.
     const locale = process.env.LANG || process.env.LC_ALL || "en_US.UTF-8";
+    // CORK_CHANNEL_NAME is passed explicitly because the session key no longer
+    // carries the channel: the channel MCP used to read it off the key prefix
+    // and tell the model which platform it is replying to.
     const claudeCmd =
       `LANG='${locale}' LC_CTYPE='${locale}' ` +
-      `CORK_SESSION_KEY='${key}' claude ${claudeArgs.join(" ")}`;
+      `CORK_SESSION_KEY='${key}' ` +
+      `CORK_CHANNEL_NAME='${meta.channel ?? "lark"}' ` +
+      `claude ${claudeArgs.join(" ")}`;
 
     // ~/.cork/env values augment the daemon's env so shell-only exports
     // (e.g. ANTHROPIC_MODEL) reach claude even though launchd does not

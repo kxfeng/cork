@@ -42,9 +42,14 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/** The id the manager gave the session serving this chat. */
+function idOf(mgr: any, chatId: string): string {
+  return mgr.sessionKeyFor("lark", chatId);
+}
+
 function savedMeta(key: string): Record<string, unknown> {
   return JSON.parse(
-    fs.readFileSync(path.join(dir, "sessions", `${key}.json`), "utf-8")
+    fs.readFileSync(path.join(dir, "sessions", key, "session.json"), "utf-8")
   );
 }
 
@@ -58,7 +63,7 @@ describe("prepareSession", () => {
     });
 
     expect(startSession).toHaveBeenCalledTimes(1);
-    const m = savedMeta("lark_oc_x");
+    const m = savedMeta(idOf(mgr, "oc_x"));
     expect(m.mentionRequired).toBe(false);
     expect(m.chatType).toBe("group");
     expect(m.chatId).toBe("oc_x");
@@ -71,7 +76,7 @@ describe("prepareSession", () => {
 
     // Simulate the pane having connected (what a user message racing ahead, or
     // the warm-up itself, would leave behind).
-    mgr.sessions.get("lark_oc_x").state = "connected";
+    mgr.sessions.get(idOf(mgr, "oc_x")).state = "connected";
 
     mgr.prepareSession({ channel: "lark", chatId: "oc_x", mentionRequired: false });
     expect(startSession).toHaveBeenCalledTimes(1); // still one pane
@@ -80,17 +85,17 @@ describe("prepareSession", () => {
   it("reconciles mentionRequired on an existing session without restarting it", async () => {
     const { mgr, startSession } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_x" }); // mention stays default true
-    mgr.sessions.get("lark_oc_x").state = "connected";
+    mgr.sessions.get(idOf(mgr, "oc_x")).state = "connected";
 
     mgr.prepareSession({ channel: "lark", chatId: "oc_x", mentionRequired: false });
     expect(startSession).toHaveBeenCalledTimes(1); // not restarted
-    expect(savedMeta("lark_oc_x").mentionRequired).toBe(false); // but updated
+    expect(savedMeta(idOf(mgr, "oc_x")).mentionRequired).toBe(false); // but updated
   });
 
   it("defaults the workspace to the configured one", async () => {
     const { mgr } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
-    expect(savedMeta("lark_oc_y").workspace).toBe(WS);
+    expect(savedMeta(idOf(mgr, "oc_y")).workspace).toBe(WS);
   });
 
   it("names the session after its chat id until told otherwise", async () => {
@@ -98,7 +103,7 @@ describe("prepareSession", () => {
     // yet — the caller looks it up afterwards rather than making the pane wait.
     const { mgr } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
-    expect(savedMeta("lark_oc_y").chatName).toBe("oc_y");
+    expect(savedMeta(idOf(mgr, "oc_y")).chatName).toBe("oc_y");
   });
 });
 
@@ -109,19 +114,19 @@ describe("setChatName", () => {
 
     mgr.setChatName("lark", "oc_y", "Cork · Dev Chat");
 
-    expect(mgr.sessions.get("lark_oc_y").meta.chatName).toBe("Cork · Dev Chat");
-    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
+    expect(mgr.sessions.get(idOf(mgr, "oc_y")).meta.chatName).toBe("Cork · Dev Chat");
+    expect(savedMeta(idOf(mgr, "oc_y")).chatName).toBe("Cork · Dev Chat");
   });
 
   it("renames a session that exists only on disk", async () => {
     // After a daemon restart the map is empty but the record survives.
     const { mgr } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_y" });
-    mgr.sessions.delete("lark_oc_y");
+    mgr.sessions.delete(idOf(mgr, "oc_y"));
 
     mgr.setChatName("lark", "oc_y", "Cork · Dev Chat");
 
-    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
+    expect(savedMeta(idOf(mgr, "oc_y")).chatName).toBe("Cork · Dev Chat");
   });
 
   it("ignores an empty name rather than blanking the title", async () => {
@@ -132,7 +137,7 @@ describe("setChatName", () => {
 
     mgr.setChatName("lark", "oc_y", "");
 
-    expect(savedMeta("lark_oc_y").chatName).toBe("oc_y");
+    expect(savedMeta(idOf(mgr, "oc_y")).chatName).toBe("oc_y");
   });
 
   it("is a no-op for a chat with no session", async () => {
@@ -158,6 +163,6 @@ describe("setChatName", () => {
       chatName: undefined,
     } as never);
 
-    expect(savedMeta("lark_oc_y").chatName).toBe("Cork · Dev Chat");
+    expect(savedMeta(idOf(mgr, "oc_y")).chatName).toBe("Cork · Dev Chat");
   });
 });

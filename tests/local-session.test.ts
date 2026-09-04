@@ -5,9 +5,9 @@ import path from "node:path";
 
 /**
  * A local session is a Claude Code session with no chat behind it, opened from
- * the web view. It reuses the whole session machinery — same key shape, same
- * store file, same tmux name — and what makes it work is everything it opts
- * out of. Those opt-outs are invisible in the happy path and expensive when
+ * the web view. It reuses the whole session machinery — same id shape, same
+ * store directory, same tmux name — and what makes it work is everything it
+ * opts out of. Those opt-outs are invisible in the happy path and expensive when
  * they regress, so they are what this file pins down:
  *
  * - the chat wiring must not be on its argv. The channel MCP would register a
@@ -39,7 +39,7 @@ async function makeManager() {
 
 function savedMeta(key: string): Record<string, unknown> {
   return JSON.parse(
-    fs.readFileSync(path.join(dir, "sessions", `${key}.json`), "utf-8")
+    fs.readFileSync(path.join(dir, "sessions", key, "session.json"), "utf-8")
   );
 }
 
@@ -120,14 +120,15 @@ describe("renameSessionByKey on a chat session", () => {
     // survive until the next one and then silently revert.
     const { mgr } = await makeManager();
     mgr.prepareSession({ channel: "lark", chatId: "oc_x" });
+    const key = mgr.sessionKeyFor("lark", "oc_x");
 
-    expect(mgr.renameSessionByKey("lark_oc_x", "Mine Now")).toBe(false);
-    expect(savedMeta("lark_oc_x").chatName).toBe("oc_x");
+    expect(mgr.renameSessionByKey(key, "Mine Now")).toBe(false);
+    expect(savedMeta(key).chatName).toBe("oc_x");
   });
 
   it("refuses a key with no record at all", async () => {
     const { mgr } = await makeManager();
-    expect(mgr.renameSessionByKey("local_nope", "X")).toBe(false);
+    expect(mgr.renameSessionByKey("no-such-session", "X")).toBe(false);
   });
 });
 
@@ -149,8 +150,13 @@ describe("createLocalSession", () => {
   it("keys itself like any other session, under the local channel", async () => {
     const { mgr } = await makeManager();
     const { key, meta } = mgr.createLocalSession({});
-    expect(key).toBe(`local_${meta.chatId}`);
+    // The id is opaque like every other session's; what marks it local is the
+    // channel in its meta, which is what buildClaudeArgs branches on.
+    expect(key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(meta.channel).toBe("local");
     expect(savedMeta(key).channel).toBe("local");
+    // And it is addressable the same way as a chat session.
+    expect(mgr.sessionKeyFor("local", meta.chatId)).toBe(key);
   });
 
   it("records the session as started, so the next start resumes it", async () => {
@@ -173,7 +179,7 @@ describe("createLocalSession", () => {
     expect(meta.workspace).toBe("/tmp");
   });
 
-  it("gives each one its own key, session id and store file", async () => {
+  it("gives each one its own key, session id and store dir", async () => {
     const { mgr } = await makeManager();
     const a = mgr.createLocalSession({});
     const b = mgr.createLocalSession({});
@@ -182,36 +188,17 @@ describe("createLocalSession", () => {
     expect(fs.readdirSync(path.join(dir, "sessions"))).toHaveLength(2);
   });
 
-  it("draws a new id rather than overwriting an existing session", async () => {
-    // 2^32 makes a clash vanishingly unlikely, but its cost is silently
-    // destroying a live session's record, so the loop must actually retry.
-    // Feed the ids by hand to make the clash happen: the second session draws
-    // the first one's id, and must not settle for it.
-    vi.resetModules();
-    const queue = [
-      "aaaaaaaa-0000-4000-8000-000000000001", // #1 chat id
-      "11111111-0000-4000-8000-000000000001", // #1 claude session id
-      "aaaaaaaa-0000-4000-8000-000000000002", // #2 chat id — taken
-      "bbbbbbbb-0000-4000-8000-000000000002", // #2 redraw — free
-      "22222222-0000-4000-8000-000000000002", // #2 claude session id
-    ];
-    let i = 0;
-    vi.doMock("uuid", () => ({ v4: () => queue[i++] ?? `zzzzzzzz-${i}` }));
-    const { SessionManager } = await import("../src/session/manager.js");
-    const mgr = new SessionManager({
-      defaultWorkspace: WS,
-      claude: { permissionMode: "default", extraArgs: [] },
-      channels: {},
-    } as never) as any;
-    vi.spyOn(mgr, "spawnPane").mockImplementation(() => {});
-
+  it("never overwrites an existing session's record", async () => {
+    // The id used to be derived from a short random chat id, so two sessions
+    // could collide and silently destroy each other's record. It is its own
+    // uuid now — this pins the property, not the old redraw loop.
+    const { mgr } = await makeManager();
     const first = mgr.createLocalSession({ name: "First" });
     const second = mgr.createLocalSession({ name: "Second" });
 
-    expect(first.key).toBe("local_aaaaaaaa");
-    expect(second.key).toBe("local_bbbbbbbb");
+    expect(first.key).not.toBe(second.key);
     expect(savedMeta(first.key).chatName).toBe("First"); // not clobbered
-    vi.doUnmock("uuid");
+    expect(savedMeta(second.key).chatName).toBe("Second");
   });
 
   it("renames itself, in memory and on disk", async () => {
@@ -257,6 +244,6 @@ describe("createLocalSession", () => {
 
     expect(mgr.forgetSessionByKey(key)).toBe(true);
     expect(mgr.sessions.has(key)).toBe(false);
-    expect(fs.existsSync(path.join(dir, "sessions", `${key}.json`))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "sessions", key))).toBe(false);
   });
 });

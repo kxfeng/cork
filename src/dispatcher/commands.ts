@@ -1,7 +1,6 @@
 import type { Channel, IncomingMessage } from "../channels/types.js";
 import type { SessionManager } from "../session/manager.js";
 import { resolveWorkspacePath } from "../config/loader.js";
-import { sessionKey } from "../session/store.js";
 import { collectStatus, formatStatusMarkdown } from "../session/status.js";
 import { findScriptCommand, runScriptCommand } from "./script-commands.js";
 import fs from "node:fs";
@@ -84,9 +83,16 @@ async function handleScript(
     message.chatId,
     message.threadId
   );
+  // "" when this chat has no session yet — a script gets an empty
+  // CORK_SESSION_KEY rather than an id that addresses nothing.
   const key =
     session?.key ??
-    sessionKey(message.channel, message.chatId, message.threadId);
+    sessionManager.sessionKeyFor(
+      message.channel,
+      message.chatId,
+      message.threadId
+    ) ??
+    "";
   const workspace = session?.meta.workspace ?? sessionManager.defaultWorkspace();
 
   const { reply } = await runScriptCommand(

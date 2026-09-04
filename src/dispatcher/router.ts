@@ -6,7 +6,6 @@ import type {
 } from "../channels/types.js";
 import type { CorkConfig } from "../config/schema.js";
 import { SessionManager } from "../session/manager.js";
-import { sessionKey } from "../session/store.js";
 import { handleCommand } from "./commands.js";
 import { ChatQueue } from "./queue.js";
 import { getLogger } from "../logger.js";
@@ -31,11 +30,12 @@ export class MessageRouter implements Dispatcher {
     // chat — so different threads in one group, and different channels, run
     // concurrently instead of blocking each other, while messages within one
     // thread stay ordered.
-    const queueKey = sessionKey(
-      message.channel,
-      message.chatId,
-      message.threadId
-    );
+    // Keyed by the chat/thread itself rather than by session id: a message can
+    // arrive before the session exists, and the queue only needs a stable
+    // string to serialize on.
+    const queueKey = `${message.channel}\u0000${message.chatId}\u0000${
+      message.threadId ?? ""
+    }`;
     await this.queue.enqueue(queueKey, async () => {
       logger.debug("dequeued, processing", { messageId: message.messageId });
       try {
@@ -72,7 +72,8 @@ export class MessageRouter implements Dispatcher {
   }
 
   resolveSessionKey(channel: string, chatId: string, threadId?: string): string {
-    return sessionKey(channel, chatId, threadId);
+    // "" when the chat has no session yet — this only feeds log context.
+    return this.sessionManager.sessionKeyFor(channel, chatId, threadId) ?? "";
   }
 
   sessionExists(channel: string, chatId: string, threadId?: string): boolean {
@@ -98,7 +99,8 @@ export class MessageRouter implements Dispatcher {
     reactionId: string,
     threadId?: string
   ): void {
-    const key = sessionKey(channel, chatId, threadId);
+    const key = this.sessionManager.sessionKeyFor(channel, chatId, threadId);
+    if (!key) return;
     this.sessionManager.trackPendingReaction(key, messageId, reactionId);
   }
 

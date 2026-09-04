@@ -19,7 +19,9 @@ import WebSocket from "ws";
  * Runs against its own CORK_DIR and its own tmux server (CORK_TMUX_LABEL) so it
  * can never touch the user's live sessions.
  */
-const KEY = "test_web-chat";
+// An opaque session id, the way the store names one. The chat it serves is
+// stated in the meta below, not in the id.
+const KEY = "web-test-session";
 const LABEL = "corktest-web";
 
 /**
@@ -126,9 +128,9 @@ describe("web terminal", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-web-test-"));
     process.env.CORK_DIR = dir;
     process.env.CORK_TMUX_LABEL = LABEL;
-    fs.mkdirSync(path.join(dir, "sessions"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "sessions", KEY), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, "sessions", `${KEY}.json`),
+      path.join(dir, "sessions", KEY, "session.json"),
       JSON.stringify({
         sessionId: "s1",
         channel: "test",
