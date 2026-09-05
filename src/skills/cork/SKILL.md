@@ -87,7 +87,8 @@ Rules that will otherwise bite:
 - **Must be executable and not writable by others**, or cork ignores it (it
   runs as the daemon user).
 - **Built-ins win.** `/status`, `/new`, `/workspace`, `/mention-off`,
-  `/mention-on` are matched first; a script by those names is dead weight.
+  `/mention-on`, `/autopilot` are matched first; a script by those names is dead
+  weight.
 - **PATH is a snapshot** taken when cork was installed (it lives in the launchd
   plist), not your shell's live PATH. A tool installed later may not be on it —
   prefer absolute paths, or check the plist before assuming.

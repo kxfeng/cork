@@ -184,18 +184,22 @@ function advance(ms: number): void {
   vi.advanceTimersByTime(ms);
 }
 
+let notices: string[] = [];
+
 function makeWatcher(): TranscriptWatcher {
   return new TranscriptWatcher({
     workspace: "/tmp/test-cork-watcher",
     sessionId: "test-sid",
     sessionKey: "test_key",
     inject,
+    notify: (text) => notices.push(text),
     now,
   });
 }
 
 beforeEach(() => {
   injectCalls = [];
+  notices = [];
   injectShouldSucceed = true;
   currentTime = 1_700_000_000_000;
   vi.useFakeTimers();
@@ -259,6 +263,35 @@ describe("TranscriptWatcher retry scheduling", () => {
     expect(injectCalls[0].senderId).toBe(WATCHER_SENDER_ID);
   });
 
+  it("tells the chat when it has restarted an interrupted answer", () => {
+    // From the chat an API error looks like the model going quiet. Cork
+    // recovering from it is worth a line — that is the harness working.
+    const w = makeWatcher();
+    w.ingest(
+      `${larkUserRow("ou_user", "do something")}\n` +
+        `${midStreamErrorRow()}\n` +
+        `${turnDurationRow()}\n`
+    );
+    expect(notices).toHaveLength(0);
+
+    advance(BACKOFF_START_MS);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("API error");
+  });
+
+  it("says nothing when the retry could not be delivered", () => {
+    const w = makeWatcher();
+    injectShouldSucceed = false;
+    w.ingest(
+      `${larkUserRow("ou_user", "do something")}\n` +
+        `${midStreamErrorRow()}\n` +
+        `${turnDurationRow()}\n`
+    );
+    advance(BACKOFF_START_MS);
+    expect(injectCalls).toHaveLength(1);
+    expect(notices).toHaveLength(0);
+  });
+
   it("does NOT retry when the error is 'Request timed out'", () => {
     const w = makeWatcher();
     w.ingest(
@@ -282,7 +315,7 @@ describe("TranscriptWatcher retry scheduling", () => {
   });
 
   it("DOES retry when a reply happened earlier but the turn still died on the error", () => {
-    // Long task: replied an interim update, then kept working, then the
+    // Autopilot: replied an interim update, then kept working, then the
     // stream died with no self-recovery. The error is the last assistant row.
     const w = makeWatcher();
     w.ingest(

@@ -4,13 +4,13 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * The skill cork injects into every session. Properties that were silently
+ * The skills cork injects into every session. Properties that were silently
  * broken once, or would be silent if broken: the text must come from the
- * versioned src/skills/SKILL.md (NOT a string inlined in the .ts — that
+ * versioned src/skills/<name>/SKILL.md (NOT a string inlined in the .ts — that
  * regressed and shipped a stale copy), and a missing template must not take the
- * daemon down, since writeSkill runs during startup.
+ * daemon down, since writeSkills runs during startup.
  */
-const TEMPLATE = path.join(process.cwd(), "src", "skills", "SKILL.md");
+const TEMPLATE = path.join(process.cwd(), "src", "skills", "cork", "SKILL.md");
 
 let dir: string;
 
@@ -38,12 +38,12 @@ function written(): string {
   return fs.readFileSync(path.join(skillsRootDir(), "cork", "SKILL.md"), "utf8");
 }
 
-describe("writeSkill", () => {
+describe("writeSkills", () => {
   it("copies the versioned template verbatim", async () => {
     // No substitution anymore: the skill reads the bot app id from config at
     // runtime, so the written file must match the template byte for byte.
-    const { writeSkill } = await loadSkill();
-    writeSkill();
+    const { writeSkills } = await loadSkill();
+    writeSkills();
 
     const out = written();
     expect(out).toBe(fs.readFileSync(TEMPLATE, "utf8"));
@@ -54,8 +54,8 @@ describe("writeSkill", () => {
     // The file ships with cork and is rewritten on every start, so anything
     // environment-specific in it would be both wrong on other machines and a
     // way for one user's ids to reach a shared repo.
-    const { writeSkill } = await loadSkill();
-    writeSkill();
+    const { writeSkills } = await loadSkill();
+    writeSkills();
     const out = written();
     expect(out).not.toContain("{{APP_ID}}");
     expect(out).not.toMatch(/cli_[a-z0-9]{16}/); // bot app id
@@ -64,12 +64,15 @@ describe("writeSkill", () => {
   });
 
   it("names the skill dir the same as the template frontmatter", async () => {
-    // claude keys a skill by its dir name; if SKILL_NAME and the frontmatter
+    // claude keys a skill by its dir name; if the name in SKILL_NAMES and the frontmatter
     // disagree the skill is confusing at best, so pin them to each other.
-    const { writeSkill, SKILL_NAME, skillPath } = await loadSkill();
-    writeSkill();
-    expect(path.basename(path.dirname(skillPath()))).toBe(SKILL_NAME);
-    expect(written().split("\n")).toContain(`name: ${SKILL_NAME}`);
+    const { writeSkills, SKILL_NAMES, skillPath } = await loadSkill();
+    writeSkills();
+    for (const name of SKILL_NAMES) {
+      expect(path.basename(path.dirname(skillPath(name)))).toBe(name);
+      const body = fs.readFileSync(skillPath(name), "utf8");
+      expect(body.split("\n")).toContain(`name: ${name}`);
+    }
   });
 
   it("takes its text from SKILL.md, not from a string inside the module", async () => {
@@ -83,28 +86,28 @@ describe("writeSkill", () => {
       .find((l) => l.startsWith("description:"));
     expect(marker).toBeTruthy();
 
-    const { writeSkill } = await loadSkill();
-    writeSkill();
+    const { writeSkills } = await loadSkill();
+    writeSkills();
     expect(written()).toContain(marker!.trim());
   });
 
   it("ships an English template", async () => {
     // The skill is authored in English by request; a CJK character means a
     // localized copy crept back in.
-    const { writeSkill } = await loadSkill();
-    writeSkill();
+    const { writeSkills } = await loadSkill();
+    writeSkills();
     expect(/[一-龥]/.test(written())).toBe(false);
   });
 
   it("prunes a skill dir cork does not ship", async () => {
     // A renamed skill would otherwise linger forever and claude would load both
     // copies — the stale one still carrying what the rename meant to replace.
-    const { writeSkill } = await loadSkill();
+    const { writeSkills } = await loadSkill();
     const stale = path.join(skillsRootDir(), "cork-task", "SKILL.md");
     fs.mkdirSync(path.dirname(stale), { recursive: true });
     fs.writeFileSync(stale, "skill left behind by an earlier name");
 
-    writeSkill();
+    writeSkills();
 
     expect(fs.existsSync(stale)).toBe(false);
     expect(fs.existsSync(path.join(skillsRootDir(), "cork"))).toBe(true);
@@ -113,8 +116,8 @@ describe("writeSkill", () => {
   it("keeps what is on disk when the template could not be read", async () => {
     // Rendering nothing means the asset failed to ship — a packaging bug, not a
     // signal to prune the skill a working install already has.
-    const { writeSkill } = await loadSkill();
-    writeSkill(); // populate first
+    const { writeSkills } = await loadSkill();
+    writeSkills(); // populate first
     const stale = path.join(skillsRootDir(), "cork-task");
     fs.mkdirSync(stale, { recursive: true });
 
@@ -122,7 +125,7 @@ describe("writeSkill", () => {
       throw new Error("ENOENT: template missing");
     });
     try {
-      expect(() => writeSkill()).not.toThrow();
+      expect(() => writeSkills()).not.toThrow();
     } finally {
       spy.mockRestore();
     }
@@ -132,12 +135,12 @@ describe("writeSkill", () => {
   });
 
   it("survives a missing template instead of killing daemon startup", async () => {
-    const { writeSkill } = await loadSkill();
+    const { writeSkills } = await loadSkill();
     const spy = vi.spyOn(fs, "readFileSync").mockImplementation(() => {
       throw new Error("ENOENT: template missing");
     });
     try {
-      expect(() => writeSkill()).not.toThrow();
+      expect(() => writeSkills()).not.toThrow();
     } finally {
       spy.mockRestore();
     }

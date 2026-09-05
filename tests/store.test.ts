@@ -75,7 +75,7 @@ describe("session CRUD", () => {
   });
 
   it("takes the session's other files down with it", () => {
-    // GOAL.md / PROJECT.md / LONGTASK.json live beside the meta, so forgetting
+    // GOAL.md / PROJECT.md / AUTOPILOT.json live beside the meta, so forgetting
     // a session must not leave them behind for the next one to inherit.
     saveSession("id-files", sampleMeta);
     fs.writeFileSync(path.join(sessionDir("id-files"), "GOAL.md"), "x");

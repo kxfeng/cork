@@ -15,11 +15,19 @@
  * when the model is already continuing because a Stop hook blocked) gates
  * a second block, so a model that ignores the prompt cannot loop forever.
  *
+ * The hook stands down entirely while this session is running autopilot.
+ * Such a session works for hours across many turns, and a rule that makes every
+ * one of them post to the chat would bury the user — the cork-autopilot skill
+ * asks the model to report at meaningful points instead. Cork's own watcher is
+ * what keeps an autopilot run moving, so nothing is left unwatched by this.
+ *
  * The hook always exits 0 (the block is signalled via stdout JSON, not an
  * exit code). Any internal failure is swallowed — a broken hook must never
  * break Claude Code.
  */
 import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 const REPLY_TOOL = "mcp__cork-channel__reply";
 // Claude Code wraps every inbound Lark message as `<channel source="cork-channel" …>`
@@ -50,6 +58,36 @@ const BLOCK_REASON =
 interface HookInput {
   transcript_path?: string;
   stop_hook_active?: boolean;
+}
+
+/**
+ * Whether cork is running autopilot for this session.
+ *
+ * Read straight off disk rather than imported: the hook is spawned per turn as
+ * its own short-lived process, so it holds no cork state, and CORK_SESSION_KEY
+ * is already in the pane's environment for the channel MCP.
+ *
+ * Any doubt answers "no". Being wrong that way costs one redundant nudge to
+ * reply; being wrong the other way silences the chat for a session that is not
+ * running a task at all.
+ */
+function autopilotRunning(): boolean {
+  const key = process.env.CORK_SESSION_KEY;
+  if (!key) return false;
+  const corkDir = process.env.CORK_DIR || path.join(os.homedir(), ".cork");
+  try {
+    const raw = fs.readFileSync(
+      path.join(corkDir, "sessions", key, "AUTOPILOT.json"),
+      "utf-8"
+    );
+    // Every live state, not just "running": a task waiting for its `/goal` to
+    // register is already the model's job, and forcing a channel reply in that
+    // window would put a turn between the command and its confirmation.
+    const state = JSON.parse(raw)?.state;
+    return state === "starting" || state === "running" || state === "stopping";
+  } catch {
+    return false;
+  }
 }
 
 interface TranscriptRow {
@@ -179,6 +217,9 @@ async function main(): Promise<void> {
 
   // Already prompted once this turn — don't block again, just let it stop.
   if (input.stop_hook_active) return;
+
+  // Autopilot reports on its own schedule; see the note at the top.
+  if (autopilotRunning()) return;
 
   const transcriptPath = input.transcript_path;
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return;

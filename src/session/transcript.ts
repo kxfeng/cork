@@ -45,6 +45,56 @@ export function transcriptPath(workspace: string, sessionId: string): string {
 }
 
 /**
+ * The last `maxBytes` of a transcript, as whole lines. Used to check what claude
+ * code recorded in the last moment or two — whether a slash command cork typed
+ * into the pane actually registered, most of all.
+ *
+ * Returns [] when the file is missing: a session whose transcript does not exist
+ * yet has recorded nothing, which is the answer callers want.
+ */
+export function readTranscriptTail(
+  workspace: string,
+  sessionId: string,
+  maxBytes = 256 * 1024
+): unknown[] {
+  const file = transcriptPath(workspace, sessionId);
+  let text: string;
+  try {
+    const stat = fs.statSync(file);
+    const start = Math.max(0, stat.size - maxBytes);
+    const fd = fs.openSync(file, "r");
+    try {
+      const buf = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      text = buf.toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    // The first line is partial (and possibly mid-UTF8) when we did not start
+    // at the beginning of the file.
+    if (start > 0) {
+      const nl = text.indexOf("\n");
+      text = nl >= 0 ? text.slice(nl + 1) : "";
+    }
+  } catch {
+    return [];
+  }
+
+  const rows: unknown[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      rows.push(JSON.parse(t));
+    } catch {
+      // A row still being written. Skipping it is right: the caller is looking
+      // for something that will be complete by the next poll anyway.
+    }
+  }
+  return rows;
+}
+
+/**
  * Stream the transcript and return the LAST assistant message that carried a
  * `message.usage` block. That row reflects the tokens actually loaded into
  * context for the most recent model turn — which is what Claude Code's

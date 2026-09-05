@@ -2,10 +2,12 @@ import { v4 as uuidv4 } from "uuid";
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import {
   newSessionId,
+  sessionDir,
   loadSession,
   saveSession,
   deleteSession,
@@ -22,13 +24,22 @@ import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
-import { TranscriptWatcher } from "./transcript-watcher.js";
+import { TranscriptWatcher, type AutopilotHooks } from "./transcript-watcher.js";
 import {
   TMUX_PREFIX,
   corkTmux,
   ensureCorkTmuxServer,
   killCorkTmuxServer,
+  liveTmuxSessions,
 } from "./tmux.js";
+import {
+  loadAutopilot,
+  updateAutopilot,
+  stopAutopilot,
+  isRunning,
+  type AutopilotRecord,
+  type AutopilotStopReason,
+} from "./autopilot.js";
 
 export { TMUX_PREFIX };
 
@@ -41,6 +52,271 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const logger = getLogger("session-manager");
 
 const STARTING_TIMEOUT_MS = 30_000;
+
+/**
+ * What claude compacts at when the config says nothing — its own default for
+ * CLAUDE_AUTOCOMPACT_PCT_OVERRIDE's absence is the same ballpark, and the only
+ * thing this affects is when one advisory message is sent.
+ */
+const DEFAULT_COMPACT_PERCENT = 75;
+
+/**
+ * How long to keep looking for the typed command at the prompt before calling
+ * the attempt failed.
+ *
+ * The TUI lays a long multi-line input out over a noticeable time — a 21-line
+ * goal was not on screen half a second after the last key. Checking once and
+ * retyping is how a goal ended up in the box twice.
+ */
+const PROMPT_SETTLE_MS = 8_000;
+
+/**
+ * Key presses used to empty the input box, in each direction.
+ *
+ * Backspace takes what is before the cursor and Delete what is after, and both
+ * are needed: a cleared draft was measured down to the last few characters,
+ * which were sitting after the cursor and which the next attempt then typed
+ * around. Comfortably past MAX_GOAL_CHARS so the longest allowed goal cannot
+ * outlast it.
+ */
+const CLEAR_PRESSES = 4000;
+
+/**
+ * Scrollback lines to read when looking for the input box.
+ *
+ * A 3000-character goal wraps to well over a hundred display lines on a narrow
+ * pane; this covers that with room to spare. Extra history costs nothing —
+ * the check reads the LAST `❯` line, which is always the input box.
+ */
+const CAPTURE_SCROLLBACK = 400;
+
+/**
+ * How long to wait for a session started on demand to be ready for typing.
+ *
+ * Longer than the state machine's own 30-second starting timeout, so a session
+ * that is going to fail has failed by the time this gives up.
+ */
+const SESSION_START_WAIT_MS = 45_000;
+const SESSION_START_POLL_MS = 500;
+
+/**
+ * Pause between typing the command and pressing Enter.
+ *
+ * Sent back to back, the Enter is simply lost: the text lands in the input box
+ * and stays there, unsubmitted, with the pane looking for all the world like it
+ * is waiting for the user. The TUI needs a moment to take in a few hundred
+ * characters before it will act on the key that follows them.
+ */
+const TYPE_SETTLE_MS = 500;
+
+/** How many times to clear-and-retype before giving up on a dirty prompt. */
+const TYPE_ATTEMPTS = 3;
+
+/**
+ * How long to wait for claude to finish a turn before typing into its pane.
+ *
+ * Long enough for an ordinary turn to end, short enough that `/autopilot stop`
+ * on a task that never goes quiet still gets sent — the transcript check is
+ * what decides whether it worked, not this.
+ */
+const QUIET_WAIT_MS = 45_000;
+const QUIET_POLL_MS = 500;
+
+/**
+ * How many times to press Escape to bring the turn in progress to a stop.
+ *
+ * One is not always enough: with editorMode "vim" the first press only leaves
+ * INSERT mode — measured, one press left the model still streaming 12 seconds
+ * later, three stopped it in 2.2. In the default mode one does it and the
+ * extra two are no-ops.
+ */
+const ESCAPE_PRESSES = 3;
+
+/**
+ * What cork should press to get past a dialog claude is showing.
+ *
+ * `moves` is how far DOWN from the currently selected option the wanted one
+ * is, so the answer is that many Down presses and then Enter. It is worked out
+ * by finding both lines in the pane rather than assuming an order: the trust
+ * prompt puts the option cork wants second, the resume prompt does too, and
+ * neither is guaranteed to keep doing so.
+ *
+ * Known dialogs, and why cork picks what it picks:
+ *
+ * - the `--dangerously-load-development-channels` prompt → yes, that is what
+ *   the channel MCP is;
+ * - the first-run trust prompt, whose default is **"No, exit"** — Enter alone
+ *   would quit claude and the session would die at startup with nothing but a
+ *   30-second timeout to show for it;
+ * - the resume prompt claude shows for a session that is old and large
+ *   ("This session is 4h 32m old and 226.2k tokens… We recommend resuming from
+ *   a summary") → the full session. A cork session is one continuous
+ *   conversation from the user's side, hours apart in the same Lark thread, and
+ *   a summary leaves the model having forgotten what it said an hour ago. Never
+ *   "Don't ask me again": that is the user's setting to change, not cork's.
+ *
+ * Anything else returns null, and the caller reports it rather than guessing —
+ * pressing keys into an unrecognised dialog is how a `/goal` ended up typed
+ * into one.
+ */
+export interface DialogAnswer {
+  /** Down presses before Enter. */
+  moves: number;
+  /** For the log. */
+  dialog: string;
+}
+
+const DIALOGS: { dialog: string; when: RegExp; want: RegExp }[] = [
+  {
+    dialog: "dev-channel",
+    when: /Loading development channels|I am using this for local development/,
+    want: /I am using this for local development/,
+  },
+  {
+    dialog: "trust",
+    when: /Is this a project you (?:created or one you )?trust|Yes, I trust this folder/,
+    want: /Yes, I trust this folder/,
+  },
+  {
+    dialog: "resume",
+    when: /Resume from summary|Resume full session/,
+    want: /Resume full session/,
+  },
+];
+
+export function dialogAction(pane: string): DialogAnswer | null {
+  for (const { dialog, when, want } of DIALOGS) {
+    if (!when.test(pane)) continue;
+    const moves = movesToOption(pane, want);
+    if (moves !== null) return { moves, dialog };
+  }
+  return null;
+}
+
+/**
+ * How many Down presses separate the selected option from the wanted one, or
+ * null if either cannot be found.
+ *
+ * The selected option is the line claude marks with `❯`. Counting lines
+ * between them makes the order irrelevant — and a wanted option ABOVE the
+ * selection is not answered at all rather than answered wrongly, since Down
+ * would walk away from it.
+ */
+function movesToOption(pane: string, want: RegExp): number | null {
+  const lines = pane.split("\n");
+  const selected = lines.findIndex((l) => l.trimStart().startsWith("❯"));
+  const wanted = lines.findIndex((l) => want.test(l));
+  if (selected < 0 || wanted < 0 || wanted < selected) return null;
+  return wanted - selected;
+}
+
+/**
+ * Whether the pane is showing a numbered choice list — the shape every claude
+ * startup dialog has. Used only to tell "waiting on a question cork cannot
+ * answer" apart from "still booting", so the user is told about the first and
+ * not pestered about the second.
+ */
+export function looksLikeDialog(pane: string): boolean {
+  return pane
+    .split("\n")
+    .some((l) => /^(?:❯\s*)?\d+\.\s+\S/.test(l.trimStart()));
+}
+
+/**
+ * Whether the pane's input line begins with the command cork just typed.
+ *
+ * The input box is the last `❯` line — claude also prefixes command OUTPUT with
+ * `❯`, so the FIRST such line is usually something else entirely, and matching
+ * on it is how a diagnosis went wrong for several rounds.
+ *
+ * Only the opening of the command is compared: a long one wraps, and the pane
+ * is a fixed width.
+ */
+export function commandIsAtPrompt(pane: string, command: string): boolean {
+  const lines = pane.split("\n");
+  let input: string | null = null;
+  for (const line of lines) {
+    const t = line.trimEnd();
+    if (t.startsWith("❯")) input = t;
+  }
+  if (input === null) return false;
+  const typed = input.slice(1).trim();
+  // A multi-line command only ever shows its first line on the prompt row;
+  // the rest are continuation rows carrying no marker.
+  const head = command.split("\n")[0].slice(0, 24);
+  return typed.startsWith(head);
+}
+
+/**
+ * What claude itself says this session is doing, or null when it cannot be
+ * read. Claude keeps a small registry of live sessions under
+ * ~/.claude/sessions/<pid>.json, keyed by its own session id.
+ *
+ * Observed values: "busy" (mid-turn), "shell" (waiting on a tool), "idle".
+ */
+export function claudeSessionStatus(sessionId: string): string | null {
+  const dir = path.join(os.homedir(), ".claude", "sessions");
+  let files: string[];
+  try {
+    files = fs.readdirSync(dir);
+  } catch {
+    return null;
+  }
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    try {
+      const d = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+      if (d?.sessionId === sessionId) return typeof d.status === "string" ? d.status : null;
+    } catch {
+      // A half-written registry file; the next one may still match.
+    }
+  }
+  return null;
+}
+
+/**
+ * The pane's text, including enough scrollback to hold a long input.
+ *
+ * `capture-pane` alone returns the VISIBLE region, and a multi-line goal is
+ * taller than the pane: the `❯` marking the start of the input box scrolls off
+ * the top, and the check for "is the command at the prompt" then has nothing to
+ * find. That is not hypothetical — a 21-line goal on a 154x47 pane (the web
+ * terminal resizes it to the browser's viewport) filled the screen with its own
+ * continuation lines and the command was never submitted.
+ */
+function capturePane(tmuxName: string): string {
+  return execSync(corkTmux(`capture-pane -t "${tmuxName}" -p -S -${CAPTURE_SCROLLBACK}`), {
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
+/** The pane's visible text, or "" when it cannot be read yet. */
+function capturePaneSafe(tmuxName: string): string {
+  try {
+    return execSync(corkTmux(`capture-pane -t "${tmuxName}" -p`), {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch {
+    return ""; // pane not up yet
+  }
+}
+
+/** The last n non-blank lines, for quoting a pane back to the user. */
+function lastLines(text: string, n: number): string {
+  return text
+    .split("\n")
+    .map((l) => l.trimEnd())
+    .filter((l) => l.length > 0)
+    .slice(-n)
+    .join("\n");
+}
+
+/** Single-quote for /bin/sh, the way tmux will receive it. */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
 
 type SessionState = "inactive" | "starting" | "connected";
 
@@ -89,6 +365,8 @@ interface ActiveSession {
  * Events:
  * - "reply" (sessionKey, content) — reply from Claude, forward to Lark
  * - "permission_request" (sessionKey, msg) — permission prompt from Claude
+ * - "notify" (sessionKey, text) — cork itself has something to tell the chat
+ *   (an autopilot run finished, stalled, or could not be restarted)
  */
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, ActiveSession>();
@@ -453,6 +731,316 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Type a slash command into the session's pane, and confirm claude code took
+   * it as a COMMAND rather than as a message.
+   *
+   * That confirmation is the whole point. Two ways this fails silently, both
+   * observed:
+   *
+   *   - anything already in the input box puts our text after it, so `/goal`
+   *     is no longer at the start of the line and the whole thing is sent as an
+   *     ordinary chat message. Nothing reports this.
+   *   - past ~800 characters claude folds the input into a pasted block, with
+   *     the same result. (Callers keep commands far below that; see
+   *     MAX_GOAL_CHARS.)
+   *
+   * A third, found the same way: sending the text and the Enter back to back
+   * loses the Enter. The command sits in the input box unsubmitted, and the
+   * pane looks exactly like a prompt waiting for input. Hence the pause between
+   * them, and the Enter re-pressed while waiting.
+   *
+   * So: clear the input first, type, pause, submit, then look for the command
+   * in the transcript. Do NOT try to read the input box back instead — an empty one
+   * shows placeholder text that looks exactly like content, and the check would
+   * be pinned to whatever claude's placeholder says this month.
+   *
+   * Cork does not wait for the model to be idle — an autopilot run that is working
+   * never is. What it waits for instead is the command to actually run, which
+   * is not the same as it being accepted:
+   *
+   *   - while the model is between tool calls, a slash command runs at once;
+   *   - while the model is streaming, the TUI QUEUES the input ("Press up to
+   *     edit queued messages") and runs it when the turn ends — measured at
+   *     over ten seconds.
+   *
+   * Both look identical from outside, which is why the confirmation window is
+   * generous rather than tight.
+   */
+  async sendSlashCommand(
+    key: string,
+    command: string,
+    // Test seam, like runScriptCommand's timeout: the real waits are tens of
+    // seconds, which is right in production and useless in a unit test.
+    timing: {
+      confirmMs?: number;
+      quietMs?: number;
+      settleMs?: number;
+      startMs?: number;
+    } = {}
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const session = this.sessions.get(key);
+    const meta = session?.meta ?? loadSession(key);
+    if (!meta) return { ok: false, reason: "no such session" };
+
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    // The pane may not be up at all: a session nothing has spoken to since the
+    // daemon started has no claude process behind it. An ordinary message gets
+    // a start for free — the dispatcher queues it and delivers it once the
+    // session connects — but a slash command is typed straight into the pane,
+    // so there has to be one first.
+    if (!liveTmuxSessions().has(tmuxName)) {
+      const started = await this.ensureConnected(
+        key,
+        timing.startMs ?? SESSION_START_WAIT_MS
+      );
+      if (!started) {
+        return { ok: false, reason: "the session's pane could not be started" };
+      }
+    }
+
+    // Wait for claude to come out of the middle of a turn before typing.
+    //
+    // A slash command typed while the model is streaming does not reliably run
+    // as a command: the TUI queues the input, and what happens to a queued
+    // slash command is not something cork can count on — an end-to-end run had
+    // one delivered to the model as an ordinary chat message, which set no goal
+    // and reported nothing. Typed at a quiet moment it runs immediately, every
+    // time.
+    //
+    // Bounded, and then sent anyway: an autopilot run that is working may never be
+    // idle, and `/goal clear` still has to reach it. Best effort, with the
+    // transcript check below as the thing that actually decides.
+    await this.waitForQuietPane(meta.sessionId, timing.quietMs ?? QUIET_WAIT_MS);
+
+    // Type it, and check it actually landed at the START of the input before
+    // submitting. Anything already in the box pushes the command along the line,
+    // and a `/goal` that is not first is not a command at all — it is sent as an
+    // ordinary chat message, with nothing anywhere reporting it. That is not
+    // hypothetical: an end-to-end run found the box holding a line no part of
+    // cork had put there.
+    //
+    // Note what is checked: not "is the box empty" (an empty one shows
+    // placeholder text that reads exactly like content, so that test would be
+    // pinned to claude's placeholder wording), but "is OUR text at the front",
+    // which is a fact about something cork itself just sent.
+    const lines = command.split("\n");
+    let typed = false;
+    for (let attempt = 0; attempt < TYPE_ATTEMPTS && !typed; attempt++) {
+      try {
+        // Escape first: it leaves whatever mode the pane is in (queued-message
+        // editing, a completion menu) where clearing alone would not.
+        execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+        // Then `i`. With editorMode "vim" — a user-level setting every cork
+        // session inherits — Escape lands in NORMAL mode, where the `/` of
+        // `/goal` opens vim's search and the command arrives mangled.
+        execSync(corkTmux(`send-keys -t "${tmuxName}" i`), { stdio: "pipe" });
+        // Empty the box in both directions. Backspace alone leaves anything
+        // sitting after the cursor — measured: a draft cleared down to the
+        // three characters the cursor had been left in front of, which the
+        // next attempt then typed around. tmux's `-N` repeats the key without
+        // one process per press.
+        execSync(
+          corkTmux(`send-keys -t "${tmuxName}" -N ${CLEAR_PRESSES} BSpace`),
+          { stdio: "pipe" }
+        );
+        execSync(corkTmux(`send-keys -t "${tmuxName}" -N ${CLEAR_PRESSES} DC`), {
+          stdio: "pipe",
+        });
+
+        // The first line goes in ALONE, and is checked before the rest follows.
+        //
+        // This is the only moment the check can work. Once the box holds more
+        // lines than the pane is tall, the TUI shows the tail of the draft and
+        // the `❯` marks wherever the display was cut — not the start of the
+        // input — so "is the command at the front of the line" has nothing to
+        // read. Verified on a 21-line goal: the text was all there, the `❯`
+        // line was blank, and cork retyped over it three times.
+        execSync(
+          corkTmux(`send-keys -t "${tmuxName}" -l -- ${shellQuote(lines[0])}`),
+          { stdio: "pipe" }
+        );
+
+        const settleBy = Date.now() + (timing.settleMs ?? PROMPT_SETTLE_MS);
+        for (;;) {
+          await new Promise((r) => setTimeout(r, TYPE_SETTLE_MS));
+          typed = commandIsAtPrompt(capturePane(tmuxName), command);
+          if (typed || Date.now() >= settleBy) break;
+        }
+        if (!typed) continue; // clear and try again; nothing has been submitted
+
+        // The rest, line by line, with M-Enter (a soft newline) between them.
+        // Claude folds any single input that is long OR pasted as several lines
+        // into a `[Pasted text]` block, where a leading `/goal` is not a command
+        // at all — sent as an ordinary message, silently. Typed this way each
+        // line is its own short input, and the newlines still reach the
+        // condition intact.
+        for (const line of lines.slice(1)) {
+          execSync(corkTmux(`send-keys -t "${tmuxName}" M-Enter`), { stdio: "pipe" });
+          execSync(
+            corkTmux(`send-keys -t "${tmuxName}" -l -- ${shellQuote(line)}`),
+            { stdio: "pipe" }
+          );
+        }
+        // Let the TUI take them in before Enter — see TYPE_SETTLE_MS.
+        await new Promise((r) => setTimeout(r, TYPE_SETTLE_MS));
+        if (!typed) {
+          logger.warn("input line did not start with the command, retrying", {
+            key,
+            attempt: attempt + 1,
+          });
+        }
+      } catch (err) {
+        return { ok: false, reason: (err as Error).message };
+      }
+    }
+
+    if (!typed) {
+      return {
+        ok: false,
+        reason:
+          "could not get a clean prompt to type into — something else is in the input box",
+      };
+    }
+
+    try {
+      execSync(corkTmux(`send-keys -t "${tmuxName}" Enter`), { stdio: "pipe" });
+    } catch (err) {
+      return { ok: false, reason: (err as Error).message };
+    }
+
+    // Typed and submitted. Whether claude took it as a COMMAND is not settled
+    // here: the answer lands in the transcript, sometimes a minute later if it
+    // queued behind a turn, and the watcher is what reads it. Cork's own
+    // notion of the task is `starting` / `stopping` until then, and every
+    // message the user gets about it comes from that reading.
+    return { ok: true };
+  }
+
+  /**
+   * Block until claude reports it is not mid-turn, or the budget runs out.
+   * Returns the status it settled on, for the log.
+   */
+  private async waitForQuietPane(
+    sessionId: string,
+    maxMs: number
+  ): Promise<string | null> {
+    const deadline = Date.now() + maxMs;
+    let status: string | null = null;
+    for (;;) {
+      status = claudeSessionStatus(sessionId);
+      // null: no registry entry (an older claude, or a session it has not
+      // written yet) — nothing to wait for, so do not.
+      if (status === null || status !== "busy") return status;
+      if (Date.now() >= deadline) {
+        logger.info("typing into a busy pane anyway", { sessionId });
+        return status;
+      }
+      await new Promise((r) => setTimeout(r, QUIET_POLL_MS));
+    }
+  }
+
+  /**
+   * What the transcript watcher needs to run autopilot for this session.
+   *
+   * Everything here is a capability the watcher deliberately does not import:
+   * it decides WHEN to act from the transcript alone, and these decide what
+   * acting means. `contextWindow` is the one piece it cannot observe — nothing
+   * in the transcript states the model's window — so it is configured, and
+   * being wrong about it only moves one advisory message.
+   */
+  private autopilotHooks(key: string): AutopilotHooks {
+    return {
+      read: () => loadAutopilot(key),
+      update: (patch: Partial<AutopilotRecord>) => {
+        updateAutopilot(key, patch);
+      },
+      stop: (reason: AutopilotStopReason, detail?: string) => {
+        stopAutopilot(key, reason, detail);
+      },
+      notify: (text: string) => this.emit("notify", key, text),
+      isAlive: () => liveTmuxSessions().has(`${TMUX_PREFIX}${key}`),
+      restart: () => this.startSessionByKey(key),
+      clearGoal: () => {
+        // Interrupt first, same as `/autopilot stop` does: the model is working
+        // on the goal, and a command typed into a busy pane queues behind it.
+        this.interruptPane(key);
+        void this.sendSlashCommand(key, "/goal clear");
+        return true;
+      },
+      contextWindow: () => this.config.claude.contextWindow ?? 0,
+      compactPercent: () => this.config.claude.autoCompactPercent ?? DEFAULT_COMPACT_PERCENT,
+    };
+  }
+
+  /**
+   * Bring back the sessions that were mid-long-task when cork stopped.
+   *
+   * Only the "should cork be watching this" flag is restored from disk; whether
+   * the goal is still live is settled by the watcher's first pass over the
+   * transcript, exactly as it would be for a task that ended while cork was up.
+   * A goal met during the outage therefore closes out through the ordinary
+   * path, with no startup special case to keep in step with it.
+   *
+   * Panes are gone by now (cork kills its tmux server on start), so this
+   * respawns them; claude restores the goal from its own transcript on resume.
+   */
+  /**
+   * Whether claude says this session is between turns.
+   *
+   * `/goal` typed into a busy pane is queued behind the turn in progress —
+   * measured at 53 seconds on a long answer — so a start that needs to be
+   * prompt asks first. A session with no registry entry (an older claude, or
+   * one that has not written it yet) counts as idle: there is nothing to wait
+   * for and refusing on that basis would be refusing on no evidence.
+   */
+  sessionIsIdle(key: string): boolean {
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return false;
+    const status = claudeSessionStatus(meta.sessionId);
+    return status === null || status === "idle";
+  }
+
+  /**
+   * Bring the turn in progress to a stop, so a command typed next runs at once
+   * rather than queueing behind it. See stopAutopilotRun for why more than one.
+   */
+  interruptPane(key: string, presses = ESCAPE_PRESSES): void {
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    if (!liveTmuxSessions().has(tmuxName)) return;
+    for (let i = 0; i < presses; i++) {
+      try {
+        execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+      } catch {
+        return; // pane went away; nothing to interrupt
+      }
+    }
+  }
+
+  /**
+   * Make sure the watcher for this session is live, for a task that has just
+   * been started. A connected session already has one; this covers the case
+   * where it does not yet.
+   */
+  watchAutopilot(key: string): void {
+    if (this.sessions.get(key)?.transcriptWatcher) return;
+    this.startSessionByKey(key);
+  }
+
+  resumeAutopilots(): string[] {
+    const resumed: string[] = [];
+    for (const { key, meta } of listSessions()) {
+      if (isLocal(meta)) continue;
+      if (!isRunning(loadAutopilot(key))) continue;
+      this.rememberId(key, meta);
+      if (this.startSessionByKey(key)) resumed.push(key);
+    }
+    if (resumed.length > 0) {
+      logger.info("resumed autopilot runs", { keys: resumed });
+    }
+    return resumed;
+  }
+
+  /**
    * Tear down every session belonging to a chat — the chat's own session and any
    * thread sessions under it. For when the chat itself is gone: disbanded, or the
    * bot removed from it. Nobody can reach those panes again, so leaving them
@@ -509,6 +1097,27 @@ export class SessionManager extends EventEmitter {
    * unlike `destroyChatSessions` — the web view lists a chat and each of its
    * threads separately and acts on exactly the one that was clicked.
    */
+  /**
+   * Make sure the session has a claude process that is ready to be typed into,
+   * starting one if it has none. False when it did not come up in time.
+   *
+   * "Connected" rather than "the tmux session exists": a pane that is still
+   * answering the trust prompt would take a typed command as an answer to it.
+   */
+  private async ensureConnected(key: string, timeoutMs: number): Promise<boolean> {
+    if (this.sessions.get(key)?.state === "connected") return true;
+    if (!this.startSessionByKey(key)) return false;
+    logger.info("starting a session to type a command into", { key });
+
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, SESSION_START_POLL_MS));
+      if (this.sessions.get(key)?.state === "connected") return true;
+    }
+    logger.warn("session did not connect in time for a command", { key });
+    return false;
+  }
+
   startSessionByKey(key: string): boolean {
     const meta = this.sessions.get(key)?.meta ?? loadSession(key);
     if (!meta) return false;
@@ -814,7 +1423,7 @@ export class SessionManager extends EventEmitter {
    * visible to the launched process, and a silent regression there would cost
    * the whole new-chat flow with no other symptom.
    */
-  buildClaudeArgs(meta: SessionMeta, resume: boolean): string[] {
+  buildClaudeArgs(meta: SessionMeta, resume: boolean, key?: string): string[] {
     const claudeArgs = resume
       ? ["-r", meta.sessionId]
       : ["--session-id", meta.sessionId];
@@ -842,12 +1451,39 @@ export class SessionManager extends EventEmitter {
     // Load cork's skills (new-chat, …) without touching ~/.claude or the
     // workspace: claude scans <agentDir>/.claude/skills for an --add-dir dir.
     claudeArgs.push("--add-dir", paths.agentDir);
+    // The session's own directory, so the model can read and write the files
+    // cork keeps there for it (GOAL.md, PROJECT.md, AUTOPILOT.json). Without
+    // this they sit outside every dir claude is allowed to touch.
+    if (key) claudeArgs.push("--add-dir", sessionDir(key));
     claudeArgs.push(
       "--dangerously-load-development-channels",
       "server:cork-channel"
     );
 
     return claudeArgs;
+  }
+
+  /**
+   * `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=<pct>` for the pane, or "" when the config
+   * asks for nothing usable.
+   *
+   * Claude Code reads it as an integer percentage in (0, 100] and compacts at
+   * `min(floor(window * pct/100), window - 13000)`. Anything outside that range
+   * is ignored by claude, so cork drops it here rather than putting a value in
+   * the environment that silently does nothing.
+   *
+   * Its own name for this internally is `testPctOverride` and it is not in the
+   * public docs, so treat it as best-effort: if a future claude stops honouring
+   * it, sessions fall back to compacting at `window - 13000` and keep working.
+   */
+  private autoCompactEnv(): string {
+    const pct = this.config.claude.autoCompactPercent;
+    if (pct === undefined) return "";
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+      logger.warn("ignoring out-of-range autoCompactPercent", { pct });
+      return "";
+    }
+    return `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE='${Math.floor(pct)}' `;
   }
 
   /**
@@ -879,6 +1515,7 @@ export class SessionManager extends EventEmitter {
       `LANG='${locale}' LC_CTYPE='${locale}' ` +
       `CORK_SESSION_KEY='${key}' ` +
       `CORK_CHANNEL_NAME='${meta.channel ?? "lark"}' ` +
+      this.autoCompactEnv() +
       `claude ${claudeArgs.join(" ")}`;
 
     // ~/.cork/env values augment the daemon's env so shell-only exports
@@ -905,11 +1542,17 @@ export class SessionManager extends EventEmitter {
 
     // Ensure workspace exists
     fs.mkdirSync(meta.workspace, { recursive: true });
+    // And the session's own dir: buildClaudeArgs passes it as --add-dir, and
+    // claude refuses to launch when an --add-dir does not exist. Every path
+    // that gets here has saved the session (which creates it) — this is the
+    // belt to that braces, because the failure would be "no session ever
+    // starts again".
+    fs.mkdirSync(sessionDir(key), { recursive: true });
 
     // Resume the existing Claude session, or start a new one with the stored
     // UUID. resolveResume downgrades to "new" when the transcript was reaped.
     const resume = this.resolveResume(key, meta);
-    const claudeArgs = this.buildClaudeArgs(meta, resume);
+    const claudeArgs = this.buildClaudeArgs(meta, resume, key);
 
     // CORK_SESSION_KEY is passed via env, inherited by Claude → MCP subprocess
     // A locale is part of the pane's contract with everything Claude Code shells
@@ -967,12 +1610,22 @@ export class SessionManager extends EventEmitter {
     // Start the transcript watcher for this session. fs.watchFile handles
     // the not-yet-existing transcript gracefully (claude code creates it
     // after the first row); watcher reads only rows written from now on.
+    //
+    // Stop any previous one FIRST. A pane that dies on its own does not go
+    // through killTmux, so its watcher is still running when the session is
+    // started again — and simply overwriting the field would leave it holding a
+    // file watch and a timer forever. With an autopilot run that is not just a leak:
+    // two watchers would nudge the same stalled session twice and race to
+    // restart the same dead pane.
+    session.transcriptWatcher?.stop();
     session.transcriptWatcher = new TranscriptWatcher({
       workspace: meta.workspace,
       sessionId: meta.sessionId,
       sessionKey: key,
       inject: (text, senderId) =>
         this.dispatchSystemMessage(key, meta.chatId, text, senderId),
+      notify: (text: string) => this.emit("notify", key, text),
+      autopilot: this.autopilotHooks(key),
     });
     session.transcriptWatcher.start();
 
@@ -1085,18 +1738,16 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Watch the tmux pane for the dev-channel confirmation dialog and dismiss
-   * it by sending Enter. Stops once the dialog text is no longer visible, so
-   * stray Enters never reach the main prompt.
+   * Watch the tmux pane for the dialogs claude shows before it is usable, and
+   * answer them. Stops once no dialog is on screen, so stray keys never reach
+   * the main prompt.
+   *
+   * Two of them, and they are NOT answered the same way — see dialogAction.
    */
   private pollAndDismissChannelDialog(
     session: ActiveSession,
     tmuxName: string
   ): void {
-    // Match the prompt rendered for `--dangerously-load-development-channels`.
-    // Two strings unique to this dialog — header + option label.
-    const DIALOG_PATTERN =
-      /Loading development channels|I am using this for local development/;
     const POLL_INTERVAL_MS = 500;
     const POLL_TIMEOUT_MS = 15_000;
     const POLL_START_DELAY_MS = 1000;
@@ -1104,6 +1755,20 @@ export class SessionManager extends EventEmitter {
     const key = session.key;
     const startedAt = Date.now();
     let dialogSeen = false;
+    let unknownTicks = 0;
+    let quietTicks = 0;
+
+    const reportUnknown = (pane: string) => {
+      logger.warn("startup dialog not recognised", { key, dialogSeen });
+      this.emit(
+        "notify",
+        key,
+        "⚠️ This session is waiting on a prompt cork does not recognise. " +
+          "Nothing has been typed into it — open the pane and answer it:\n\n```\n" +
+          lastLines(pane, 20) +
+          "\n```"
+      );
+    };
 
     const markDismissed = () => {
       if (session.dialogDismissed) return;
@@ -1111,40 +1776,58 @@ export class SessionManager extends EventEmitter {
       this.tryCompleteConnection(session);
     };
 
+    const send = (keys: string) => {
+      try {
+        execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
+      } catch {
+        // pane not ready yet; the next tick tries again
+      }
+    };
+
     const tick = () => {
       if (session.state !== "starting") return;
 
       if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
-        logger.warn("channel dialog poll timeout, proceeding", {
-          key,
-          dialogSeen,
-        });
+        logger.warn("channel dialog poll timeout", { key, dialogSeen });
         markDismissed();
         return;
       }
 
-      let pane = "";
-      try {
-        pane = execSync(corkTmux(`capture-pane -t "${tmuxName}" -p`), {
-          encoding: "utf8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-      } catch {
-        // tmux pane not ready yet; keep polling
-      }
+      const pane = capturePaneSafe(tmuxName);
 
-      if (DIALOG_PATTERN.test(pane)) {
+      const action = dialogAction(pane);
+      if (action) {
         dialogSeen = true;
-        try {
-          execSync(corkTmux(`send-keys -t "${tmuxName}" Enter`), { stdio: "pipe" });
-        } catch {
-          // ignore
-        }
+        unknownTicks = 0;
+        quietTicks = 0;
+        logger.info("answering a startup dialog", { key, ...action });
+        for (let i = 0; i < action.moves; i++) send("Down");
+        send("Enter");
         setTimeout(tick, POLL_INTERVAL_MS);
         return;
       }
 
-      if (dialogSeen) {
+      // Anything else with a choice list on it is a question cork has no
+      // answer for. Typing into one of these is how a `/goal` once ended up
+      // inside a dialog, so cork keeps its hands off and hands it to the user
+      // — then stops gating on it, since the pane may well come up once the
+      // question is answered and an unknown dialog must not block startup.
+      //
+      // Both counters want two ticks in a row: claude redrawing one dialog
+      // into the next flashes half-written screens either way.
+      if (!looksLikeDialog(pane)) {
+        unknownTicks = 0;
+        quietTicks++;
+      } else if (++unknownTicks >= 2) {
+        reportUnknown(pane);
+        markDismissed();
+        return;
+      }
+
+      // Known dialogs come one after another, so keep looking after answering
+      // one. Cork does not try to recognise the input interface itself: the
+      // channel MCP registering over UDS is what says claude is up.
+      if (dialogSeen && quietTicks >= 2) {
         markDismissed();
         return;
       }

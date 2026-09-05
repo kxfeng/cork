@@ -30,6 +30,32 @@ export interface WebConfig {
 export interface ClaudeConfig {
   permissionMode: "bypassPermissions" | "default";
   extraArgs: string[];
+  /**
+   * Compact at this percentage of the context window, for every session cork
+   * starts. Passed to claude as CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, whose
+   * threshold is `min(floor(window * pct/100), window - 13000)` — an integer
+   * percentage (75, not 0.75), evaluated against whatever window is in effect,
+   * so switching model mid-session recomputes it without cork's help. (The CLI
+   * flag `--autocompact` takes a fixed token count instead, which is exactly
+   * what a session that can change model must not be pinned to.)
+   *
+   * Claude Code compacts on its own at `window - 13000` regardless; this only
+   * moves it earlier, to leave room for an autopilot run to record its state before
+   * the summary happens. Out of range (or <= 0) means "don't set it", which is
+   * also what happens if a future claude drops the variable.
+   */
+  autoCompactPercent?: number;
+  /**
+   * Override for the context window cork measures an autopilot run against when
+   * deciding it is close enough to compaction to be told to write its state
+   * down.
+   *
+   * Normally unset: the window is read off the model id the transcript records
+   * on every assistant row, so it follows a model switched mid-task. Set this
+   * only for a model cork does not know, and only knowing that it moves one
+   * advisory message and nothing else — claude decides when to compact.
+   */
+  contextWindow?: number;
 }
 
 export interface ChannelsConfig {
@@ -81,6 +107,7 @@ export const DEFAULT_CONFIG: CorkConfig = {
   claude: {
     permissionMode: "bypassPermissions",
     extraArgs: [],
+    autoCompactPercent: 75,
   },
   channels: {},
   web: { port: 6780 },

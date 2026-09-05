@@ -39,9 +39,9 @@ export interface SessionMeta {
  * A session id is an opaque uuid, and each session owns a DIRECTORY named by it:
  *
  *   ~/.cork/sessions/<id>/session.json   ← the SessionMeta below
- *   ~/.cork/sessions/<id>/GOAL.md        ← longtask files, written later
+ *   ~/.cork/sessions/<id>/GOAL.md        ← autopilot files, written later
  *   ~/.cork/sessions/<id>/PROJECT.md
- *   ~/.cork/sessions/<id>/LONGTASK.json
+ *   ~/.cork/sessions/<id>/AUTOPILOT.json
  *
  * The id deliberately says nothing about which chat it serves: `channel`,
  * `chatId` and `threadId` live in the meta, so a session can be re-pointed at a
@@ -67,7 +67,7 @@ export function newSessionId(): string {
   return uuidv4();
 }
 
-/** A session's own directory — where longtask files live alongside the meta. */
+/** A session's own directory — where autopilot files live alongside the meta. */
 export function sessionDir(id: string): string {
   return path.join(paths.sessionsDir, id);
 }
@@ -93,7 +93,7 @@ export function saveSession(id: string, meta: SessionMeta): void {
 }
 
 /**
- * Forget a session: the whole directory goes, longtask files included. Claude's
+ * Forget a session: the whole directory goes, autopilot files included. Claude's
  * own transcript is untouched — that lives under ~/.claude and is not ours.
  */
 export function deleteSession(id: string): void {

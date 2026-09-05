@@ -14,10 +14,16 @@ if (fs.existsSync(from)) {
   for (const f of fs.readdirSync(from)) fs.copyFileSync(path.join(from, f), path.join(to, f));
 }
 
-// Cork skill template (tsc emits only .js, so the .md must be copied alongside).
-const skillFrom = path.join(root, "src", "skills", "SKILL.md");
-const skillTo = path.join(root, "dist", "skills", "SKILL.md");
-if (fs.existsSync(skillFrom)) {
-  fs.mkdirSync(path.dirname(skillTo), { recursive: true });
-  fs.copyFileSync(skillFrom, skillTo);
+// Cork skill templates, one dir each (tsc emits only .js, so the .md files must
+// be copied alongside). Every src/skills/<name>/SKILL.md ships.
+const skillsFrom = path.join(root, "src", "skills");
+if (fs.existsSync(skillsFrom)) {
+  for (const entry of fs.readdirSync(skillsFrom, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const from = path.join(skillsFrom, entry.name, "SKILL.md");
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(root, "dist", "skills", entry.name, "SKILL.md");
+    fs.mkdirSync(path.dirname(to), { recursive: true });
+    fs.copyFileSync(from, to);
+  }
 }

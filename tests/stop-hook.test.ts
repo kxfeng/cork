@@ -36,9 +36,15 @@ const TEXT_ROW = JSON.stringify({
 });
 
 /** Run the hook against a transcript; resolves with its stdout. */
-function runHook(transcriptPath: string): Promise<string> {
+function runHook(
+  transcriptPath: string,
+  env: Record<string, string> = {}
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const p = spawn("node", [HOOK], { stdio: ["pipe", "pipe", "pipe"] });
+    const p = spawn("node", [HOOK], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env },
+    });
     let out = "";
     p.stdout.on("data", (c) => (out += c));
     p.on("error", reject);
@@ -93,4 +99,68 @@ describe("stop-hook", () => {
 
     expect(blocked(await running)).toBe(false);
   }, 10_000);
+});
+
+/**
+ * An autopilot run goes on for hours over many turns. Making every one of them post to
+ * the chat would bury the user, so the hook stands down while one is running and
+ * the cork-autopilot skill asks the model to report at meaningful points instead.
+ * Cork's watcher, not this hook, is what keeps an autopilot run moving.
+ */
+describe("stop-hook during an autopilot run", () => {
+  let dir: string;
+  let transcript: string;
+
+  const noReply = () =>
+    fs.writeFileSync(transcript, [CHANNEL_ROW("hello"), TEXT_ROW].join("\n") + "\n");
+
+  function writeAutopilot(state: string): void {
+    const file = path.join(dir, "sessions", "sess-1", "AUTOPILOT.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ state }));
+  }
+
+  const env = () => ({ CORK_DIR: dir, CORK_SESSION_KEY: "sess-1" });
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-hook-lt-"));
+    transcript = path.join(dir, "transcript.jsonl");
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("stands down while a task is running", async () => {
+    noReply();
+    writeAutopilot("running");
+    expect(blocked(await runHook(transcript, env()))).toBe(false);
+  });
+
+  it("still blocks once the task has stopped", async () => {
+    noReply();
+    writeAutopilot("stopped");
+    expect(blocked(await runHook(transcript, env()))).toBe(true);
+  });
+
+  it("blocks when there is no record at all", async () => {
+    // The default has to be "not running": being wrong that way costs one
+    // redundant nudge, while the other way silences an ordinary chat.
+    noReply();
+    expect(blocked(await runHook(transcript, env()))).toBe(true);
+  });
+
+  it("blocks when the record is corrupt", async () => {
+    noReply();
+    const file = path.join(dir, "sessions", "sess-1", "AUTOPILOT.json");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "{ truncated");
+    expect(blocked(await runHook(transcript, env()))).toBe(true);
+  });
+
+  it("blocks when the pane has no session key to look one up by", async () => {
+    noReply();
+    writeAutopilot("running");
+    expect(blocked(await runHook(transcript, { CORK_DIR: dir }))).toBe(true);
+  });
 });

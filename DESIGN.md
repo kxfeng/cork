@@ -253,11 +253,13 @@ tmux new-session -d -s "cork_{sessionKey}" -x 200 -y 50 \
 
 The choice between `--session-id` (new) and `-r` (resume) is driven by `claudeSessionStarted` on the session metadata, set to `true` only after the channel MCP first registers successfully (see §7.3).
 
-**Auto-dismiss interactive dialogs:**
+**Auto-answer interactive dialogs:**
 
-Even with `--dangerously-skip-permissions`, Claude Code displays two interactive prompts on first run:
-1. Workspace trust dialog (~3s after launch) — auto-dismissed via `tmux send-keys ... Enter`
-2. Development channel confirmation (~5s after launch) — auto-dismissed via `tmux send-keys ... Enter`. The timestamp of this Enter is recorded; readiness is gated until 1500ms after.
+Even with `--dangerously-skip-permissions`, Claude Code asks questions before a session is usable: the workspace trust dialog, the development-channel confirmation, and — when resuming a session that is old and large — whether to resume from a summary.
+
+Cork polls the pane every 500ms (`pollAndDismissChannelDialog`) and answers whichever dialog is on screen, repeating until two consecutive ticks find none. It does not try to recognise the input interface — the status line is the user's own `statusLine` command, not a protocol — because the readiness signal already exists: the channel MCP registering over UDS. Nothing depends on which dialog comes first, or on where in a dialog the wanted option sits: each known dialog is recognised by its text, the wanted option is located by its own text, and cork sends that many `Down` presses then `Enter`. The options cork wants are "Yes, I trust this folder" (the default is **"No, exit"**, which quits claude), "Yes, I am using this for local development", and "Resume full session" (a cork session is one continuous conversation, so a summary loses what was said an hour ago).
+
+If a choice list cork does not recognise is on screen for two consecutive ticks, cork presses nothing: it sends the pane to the chat, lets the user answer it there, and stops polling. The session stays in `starting` and completes normally if the answer brings claude up. An unrecognised dialog that is silently dismissed is how a `/goal` once got typed into one.
 
 **User interaction:**
 - `tmux attach -t cork_{sessionKey}` — view and interact with Claude Code
@@ -330,9 +332,21 @@ Note: tmux sessions (Claude Code instances) continue running independently. They
 cork status
 ```
 
-Shows daemon status (running/stopped, PID via launchd) and lists all sessions with chat name, workspace, Claude session ID, last active time, last message preview, and the `tmux attach -t cork_{sessionKey}` command to view the live Claude Code interface.
+Shows daemon status (running/stopped, PID via launchd) and lists all sessions with chat name, workspace, Claude session ID, last active time, last message preview, and the `tmux attach -t cork_{sessionId}` command to view the live Claude Code interface.
 
-### 4.5 `pnpm run link` (development)
+### 4.5 `cork migrate-sessions`
+
+```bash
+cork stop && cork migrate-sessions && cork start
+```
+
+One-shot conversion of a pre-uuid session store (`sessions/<channel>_<chatId>.json`)
+to the per-session directory layout. Deliberately not run at daemon startup: a
+one-time job there is a permanent cost and a failure mode that only appears on a
+restart. Old records are moved to `sessions/.migrated/`, not deleted. Because a
+restart is part of the sequence, it makes no attempt to keep running panes alive.
+
+### 4.6 `pnpm run link` (development)
 
 ```bash
 pnpm run link    # Build (tsc) + npm link, install globally
@@ -352,6 +366,11 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 | `/status` | Show session info (chat type, mention setting, workspace, session state, tmux name) |
 | `/mention-off` | Disable @bot requirement in group chat (requires @bot) |
 | `/mention-on` | Re-enable @bot requirement in group chat (requires @bot) |
+| `/autopilot [description]` | Draft an autopilot run — marks the session and hands the request to the model. The description is optional; a bare `/autopilot` has the model work the job out with the user |
+| `/autopilot start` | Type the whole of GOAL.md into the pane as `/goal …` and start watching |
+| `/autopilot stop` | Clear the goal and stop watching |
+| `/autopilot status` | Where the current autopilot run is up to |
+| `/ap …` | Short form of `/autopilot`, accepted everywhere the long one is |
 
 ## 6. Message Processing
 
@@ -423,7 +442,12 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 ├── cork.sock                            # UDS server socket
 ├── mcp-config.json                      # Global MCP config consumed by Claude Code (--mcp-config)
 ├── sessions/
-│   └── <session_key>.json               # Session metadata (includes mention setting)
+│   └── <session_id>/                    # One dir per session; id is an opaque uuid
+│       ├── session.json                 # Session metadata (channel, chat, mention setting…)
+│       ├── GOAL.md                      # Autopilot: the /goal condition, verbatim
+│       ├── PROJECT.md                   # Autopilot: the model's memory across compactions
+│       └── AUTOPILOT.json                # Autopilot: whether cork should be watching
+│   └── .migrated/                       # Pre-uuid records, kept by `cork migrate-sessions`
 ├── logs/
 │   ├── cork.log                         # Application log (winston JSON)
 │   ├── stdout.log                       # launchd stdout
@@ -439,7 +463,9 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
   "defaultWorkspace": "~/Workspace",
   "claude": {
     "permissionMode": "bypassPermissions",
-    "extraArgs": []
+    "extraArgs": [],
+    "autoCompactPercent": 75,     // compact at 75% of the window, for every session
+    "contextWindow": 0            // optional override; normally read from the model id
   },
   "channels": {
     "lark": {
@@ -494,6 +520,105 @@ Written once on first session start, identical for all sessions. Per-session ide
   }
 }
 ```
+
+## 7.5 Autopilot
+
+Autopilot is one `/goal` run that outlives many turns, compactions and
+restarts.
+
+```
+/autopilot [desc]  → state: drafting; the model agrees the job with the user
+                    and writes GOAL.md + PROJECT.md (a bare /autopilot asks)
+/autopilot start   → cork types `/goal <all of GOAL.md>`; state: starting
+/autopilot stop    → cork interrupts the turn, types `/goal clear`; state: stopping
+
+drafting → starting → running → stopping → stopped
+             ↑typed     ↑the transcript   ↑typed    ↑the transcript
+                         showed it set               showed it gone
+```
+
+**Typing a command and the command taking effect are different events**, and
+only the transcript says whether the second one happened — sometimes a minute
+later, if it queued behind a turn in progress (measured: ~2.6s while the model
+waits on a tool, 53.7s mid-answer). So cork types and moves on, in state
+`starting` or `stopping`, and every message the user gets about a task starting
+or ending comes from the watcher reading the result. A start additionally fails
+the moment an ordinary user message shows up instead of the command — that is
+what a `/goal` claude did not take as a command looks like — and both waits give
+up after a minute. A failed stop is retried once first, because unlike a failed
+start it leaves a goal set and a model working toward it.
+
+`/autopilot start` types only into an idle pane, and asks the model to come to a
+stop when it is not. `/autopilot stop` makes its own quiet: three Escapes end the
+turn in progress (one is not always enough — with `editorMode: "vim"` the first
+only leaves INSERT mode).
+
+On a daemon restart the watcher reconciles before it starts tailing: the last
+`goal_status` row in the transcript says whether the goal is live, ended, or was
+never set, which settles a task interrupted in any state — including one that
+finished while cork was down.
+
+**The transcript is the only authority on whether the goal is live.** Claude
+writes `goal_status` attachments for every state change and every verdict, and
+cork classifies them by `sentinel` first — a `sentinel` row announces a change
+(set / cleared), everything else is the evaluator's verdict (met / failed /
+not yet). `/goal clear` announces itself as `met: true, sentinel: true`, so
+reading `met` alone would report a cancelled task as a completed one.
+
+`AUTOPILOT.json` records only whether cork should be watching, which is the one
+thing the transcript cannot say. That split is what makes a daemon restart
+simple: resume watching, and let the watcher's first pass over the transcript
+work out the rest.
+
+While a task runs:
+
+- the transcript watcher's mid-stream retry is **off** — the stall check below
+  subsumes it, and both would inject a "keep going" message
+- nothing written for 5 / 10 / 15 minutes → the model is nudged; three nudges
+  → the user is told once
+- the pane died → restarted with a 1 / 2 / 4-minute backoff, three attempts.
+  `/goal` is **not** re-sent: claude restores the goal from its own transcript
+  on resume
+- a compaction → the model is told to rebuild from PROJECT.md; five points
+  below `autoCompactPercent` → told to write PROJECT.md down first, so the
+  warning tracks the threshold it precedes instead of being a fixed fraction.
+  The window comes from the model id on the transcript's assistant rows, so it
+  follows a model switched mid-task: 200K for the models known to have it, 1M
+  for everything else including ids cork has not seen, and any id carrying
+  `[1m]`. That default is inverted on purpose — guessing small for a large
+  window spends the one warning a tenth of the way in, which is exactly what
+  assuming 200K for every session did. Claude hands a real `context_window`
+  object to a **statusLine** command, but a hook's stdin does not carry it and
+  the status line is the user's own script, so the model id is the best source
+  cork can rely on.
+- the Stop hook that normally forces a reply every turn **stands down**, so the
+  chat is not buried; the cork-autopilot skill asks for reports at meaningful
+  points instead
+
+**GOAL.md is the condition, whole.** Not a summary line with material behind
+it: the evaluator that judges the goal runs with `tools: []` and is told to
+answer from transcript evidence only, so it cannot open a file the condition
+names — and a condition that appears to depend on something unavailable is one
+it is told to report as *impossible*. One document, delivered entire, leaves
+nothing to keep in step. GOAL.md is capped at 3000 characters (the evaluator
+re-reads all of it every turn) and 512 per line (see below).
+
+Typing into a pane starts by making sure there is one: a session nothing has
+spoken to since the daemon started has no claude process behind it, and an
+ordinary message would have started one on its way through. Then the input is
+cleared, the command typed line by line with `M-Enter` between lines,
+submitted, and confirmed to appear in the transcript. Three ways that goes silently wrong, all
+handled here:
+
+- a `/goal` that is not at the START of the input is an ordinary chat message
+- claude folds any ONE input past ~800 characters, or pasted as several lines,
+  into a `[Pasted text]` block, and a `/goal` inside one is not a command —
+  hence line-by-line typing with soft newlines, which also lets a goal run to
+  thousands of characters (measured: 21 lines, 2913 characters, set cleanly)
+- with `editorMode: "vim"` — a user-level setting every cork session inherits
+  — the `Escape` that clears the input lands in NORMAL mode, where `C-u`
+  scrolls instead of clearing and the `/` of `/goal` opens vim's search; cork
+  sends `i` after `Escape` to get back to INSERT
 
 ## 8. Project Structure
 

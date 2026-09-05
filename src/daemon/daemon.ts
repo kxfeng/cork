@@ -4,7 +4,7 @@ import type { CorkConfig } from "../config/schema.js";
 import { ensureDirs } from "../config/loader.js";
 import { UdsServer, type ReplyMessage, type PermissionRequestMessage } from "./uds-server.js";
 import { CommandSpool, type SpoolCommand } from "./command-spool.js";
-import { writeSkill } from "../skills/index.js";
+import { writeSkills } from "../skills/index.js";
 import { paths } from "../config/paths.js";
 import { ensureCorkTmuxServer } from "../session/tmux.js";
 import { WebServer } from "../web/server.js";
@@ -45,10 +45,10 @@ export class CorkDaemon {
     // Refresh ~/.cork/claude-settings.json (Stop hook) likewise.
     this.router.sessionManager.writeClaudeSettings();
 
-    // Refresh cork's injected skill so the on-disk copy matches this cork
-    // version. The skill reads the bot app id from config at runtime, so nothing
+    // Refresh cork's injected skills so the on-disk copies match this cork
+    // version. A skill reads the bot app id from config at runtime, so nothing
     // is passed in here. Never throws.
-    writeSkill();
+    writeSkills();
 
     // Bring up cork's dedicated tmux server before any session spawns, so its
     // process line stays clean (forked by start-server, not by a session).
@@ -74,6 +74,13 @@ export class CorkDaemon {
     // Handle session errors (starting timeout, etc.)
     this.router.sessionManager.on("error", (sessionKey: string, errorMsg: string) => {
       this.handleSessionError(sessionKey, errorMsg);
+    });
+
+    // Things cork itself has to say — an autopilot run finished, stalled, or could
+    // not be restarted. Unlike "error" these are not failures, so they carry no
+    // warning sign of their own.
+    this.router.sessionManager.on("notify", (sessionKey: string, text: string) => {
+      this.handleSessionNotice(sessionKey, text);
     });
 
     // Start channels (Lark WebSocket, etc.)
@@ -102,6 +109,13 @@ export class CorkDaemon {
 
     this.running = true;
     logger.info("cork daemon started");
+
+    // Last: pick up any session that was mid-long-task when cork stopped. It
+    // spawns panes, so everything those panes talk to has to be up first.
+    const resumed = this.router.sessionManager.resumeAutopilots();
+    if (resumed.length > 0) {
+      logger.info("resumed autopilot runs", { count: resumed.length });
+    }
   }
 
   async stop(): Promise<void> {
@@ -294,6 +308,15 @@ export class CorkDaemon {
   }
 
   private handleSessionError(sessionKey: string, errorMsg: string): void {
+    this.postToSessionChat(sessionKey, `⚠️ ${errorMsg}`);
+  }
+
+  /** A notice from cork about this session, posted as-is. */
+  private handleSessionNotice(sessionKey: string, text: string): void {
+    this.postToSessionChat(sessionKey, text);
+  }
+
+  private postToSessionChat(sessionKey: string, text: string): void {
     const session = this.router.sessionManager.getSessionByKey(sessionKey);
     if (!session) return;
 
@@ -301,9 +324,9 @@ export class CorkDaemon {
     if (!channel) return;
 
     channel
-      .sendReply(session.meta.chatId, `⚠️ ${errorMsg}`, this.threadReplyOpts(session))
+      .sendReply(session.meta.chatId, text, this.threadReplyOpts(session))
       .catch((err) => {
-        logger.error("failed to send error message", { err });
+        logger.error("failed to send session message", { err });
       });
   }
 
