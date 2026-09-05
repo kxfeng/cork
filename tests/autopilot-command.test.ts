@@ -345,10 +345,15 @@ describe("/autopilot stop", () => {
 });
 
 describe("/autopilot status", () => {
-  it("reports an idle session", async () => {
-    const { handleCommand } = await load();
+  it("says there is nothing here, and writes no record to say it", async () => {
+    // A session that has never run one has no AUTOPILOT.json, and asking about
+    // it must not create one. "Autopilot: idle" also just invites the question
+    // of which autopilot.
+    const { handleCommand, autopilotPath } = await load();
     await handleCommand(channel, message("/autopilot status"), sessionManager);
-    expect(lastReply()).toContain("idle");
+
+    expect(lastReply()).toContain("No autopilot");
+    expect(fs.existsSync(autopilotPath(KEY))).toBe(false);
   });
 
   it("reports a running one with its goal and counters", async () => {

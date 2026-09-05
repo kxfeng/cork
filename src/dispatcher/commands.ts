@@ -435,6 +435,14 @@ async function stopAutopilotRun(
 
 function autopilotStatus(key: string): string {
   const rec = loadAutopilot(key);
+
+  // `idle` is also what a session with no record at all reads as, and the two
+  // are the same thing to the user: nothing here. Saying "Autopilot: idle"
+  // invites the question of which autopilot.
+  if (rec.state === "idle") {
+    return "📋 No autopilot in this session. `/autopilot <what you want done>` starts one.";
+  }
+
   const lines = [`📋 **Autopilot**: ${rec.state}`];
 
   if (rec.goal) lines.push(`**Goal:** ${preview(rec.goal)}`);

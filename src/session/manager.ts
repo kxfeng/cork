@@ -303,16 +303,6 @@ function capturePaneSafe(tmuxName: string): string {
   }
 }
 
-/** The last n non-blank lines, for quoting a pane back to the user. */
-function lastLines(text: string, n: number): string {
-  return text
-    .split("\n")
-    .map((l) => l.trimEnd())
-    .filter((l) => l.length > 0)
-    .slice(-n)
-    .join("\n");
-}
-
 /** Single-quote for /bin/sh, the way tmux will receive it. */
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -1758,18 +1748,6 @@ export class SessionManager extends EventEmitter {
     let unknownTicks = 0;
     let quietTicks = 0;
 
-    const reportUnknown = (pane: string) => {
-      logger.warn("startup dialog not recognised", { key, dialogSeen });
-      this.emit(
-        "notify",
-        key,
-        "⚠️ This session is waiting on a prompt cork does not recognise. " +
-          "Nothing has been typed into it — open the pane and answer it:\n\n```\n" +
-          lastLines(pane, 20) +
-          "\n```"
-      );
-    };
-
     const markDismissed = () => {
       if (session.dialogDismissed) return;
       session.dialogDismissed = true;
@@ -1808,10 +1786,11 @@ export class SessionManager extends EventEmitter {
       }
 
       // Anything else with a choice list on it is a question cork has no
-      // answer for. Typing into one of these is how a `/goal` once ended up
-      // inside a dialog, so cork keeps its hands off and hands it to the user
-      // — then stops gating on it, since the pane may well come up once the
-      // question is answered and an unknown dialog must not block startup.
+      // answer for. Cork presses nothing — typing into one of these is how a
+      // `/goal` once ended up inside a dialog — and stops gating startup on
+      // it: the session is usable if the dialog turns out not to matter, and
+      // if it does matter the user will notice by talking to it. It is only
+      // logged; a chat message about a dialog nobody can see is noise.
       //
       // Both counters want two ticks in a row: claude redrawing one dialog
       // into the next flashes half-written screens either way.
@@ -1819,7 +1798,10 @@ export class SessionManager extends EventEmitter {
         unknownTicks = 0;
         quietTicks++;
       } else if (++unknownTicks >= 2) {
-        reportUnknown(pane);
+        logger.warn("startup dialog not recognised, leaving it alone", {
+          key,
+          dialogSeen,
+        });
         markDismissed();
         return;
       }
