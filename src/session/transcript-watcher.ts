@@ -121,6 +121,33 @@ const MAX_CLEAR_ATTEMPTS = 2;
 const STUCK_AFTER_NUDGES = 3;
 
 /**
+ * How long a run may go unchecked against its goal before cork asks the model
+ * to check it itself.
+ *
+ * The evaluator only ever runs when the model tries to stop, so a model that
+ * never stops is never checked — it can work for hours, productively and in
+ * the wrong direction, and nothing in cork would notice: the pane is alive,
+ * rows keep arriving, no nudge is due. The evaluator cannot help here even in
+ * principle, and it is the weaker judge anyway: no tools, no thinking, and a
+ * transcript it reads truncated.
+ *
+ * The one with the whole context and the ability to check its own work is the
+ * model doing it. So cork asks it, on a clock, and the clock restarts whenever
+ * the evaluator does run — a verdict IS a check, and there is no point asking
+ * for a second one right after.
+ */
+const DRIFT_CHECK_INTERVAL_MS = 60 * 60_000;
+
+const DRIFT_TEXT =
+  "This autopilot run has gone a long time without its goal being checked. " +
+  "Stop and re-read GOAL.md in full — the file, not your memory of it — and " +
+  "compare it against what you have actually done so far. Record the check " +
+  "and what it found in PROJECT.md. If the work has drifted, steer it back " +
+  "yourself and say in the chat what drifted and what you changed — the goal " +
+  "is the fixed point, so correcting toward it needs nobody's permission. Do " +
+  "not edit GOAL.md.";
+
+/**
  * How far below the compaction point to ask the model to write its state down.
  *
  * Expressed against the percentage cork actually configures rather than as a
@@ -195,7 +222,9 @@ export const AUTOPILOT_CONSTANTS = {
   RESTART_DELAYS_MS,
   MAX_RESTART_ATTEMPTS,
   STUCK_AFTER_NUDGES,
+  DRIFT_CHECK_INTERVAL_MS,
   NUDGE_TEXT,
+  DRIFT_TEXT,
   COMPACT_TEXT,
   CONTEXT_TEXT,
 };
@@ -323,6 +352,8 @@ export class TranscriptWatcher {
    *  the session a full stall window before anyone pushes it. */
   private lastRowAt = 0;
   private lastNudgeAt = 0;
+  /** When the goal was last checked — by the evaluator, or by cork asking. */
+  private lastGoalCheckAt = 0;
   private lastRestartAt = 0;
   /** The "compaction is coming" message is sent once per compaction cycle. */
   private contextWarned = false;
@@ -358,6 +389,7 @@ export class TranscriptWatcher {
       sessionKey: opts.sessionKey,
     });
     this.lastRowAt = this.now();
+    this.lastGoalCheckAt = this.now();
   }
 
   start(): void {
@@ -381,6 +413,7 @@ export class TranscriptWatcher {
     );
 
     this.lastRowAt = this.now();
+    this.lastGoalCheckAt = this.now();
     this.reconcile();
     // The stall/liveness rules need a clock of their own: a session that has
     // stopped writing produces no file events to react to. Unref'd for the same
@@ -656,6 +689,11 @@ export class TranscriptWatcher {
     this.runStartedAt = rec.startedAt;
     this.contextWarned = false;
     this.lastNudgeAt = 0;
+    // The drift clock starts here rather than at rec.startedAt: a watcher that
+    // has just taken over a running task (a daemon restart) cannot know
+    // whether the evaluator ran while it was away, and a full hour of grace is
+    // better than opening with an interruption.
+    this.lastGoalCheckAt = this.now();
     this.lastRowAt = this.now(); // a fresh run gets a full stall window
     this.log.info("watching a new autopilot run", { startedAt: rec.startedAt });
   }
@@ -711,6 +749,12 @@ export class TranscriptWatcher {
 
     const status = readGoalStatus(row);
     if (status) {
+      // Any verdict is a check of the goal — met, failed, or "not yet". The
+      // drift clock counts from the last time the goal was looked at, and by
+      // whom does not matter, so a verdict restarts it. `set` and `cleared`
+      // are state changes rather than verdicts, but both begin or end a run,
+      // and either way there is nothing to have drifted from yet.
+      this.lastGoalCheckAt = this.now();
       // Read before anything writes: stopRec below turns the state to
       // "stopped", and how a goal ending should be worded depends on whether
       // the user asked for it.
@@ -897,6 +941,7 @@ export class TranscriptWatcher {
     // The pane is up: forget earlier failures.
     if (rec.restartCount) this.updateRec({ restartCount: 0 });
 
+    this.checkDrift(rec);
     this.checkStall(rec);
   }
 
@@ -973,6 +1018,30 @@ export class TranscriptWatcher {
     } else {
       this.updateRec({ restartCount: attempts + 1 });
     }
+  }
+
+  /**
+   * Ask the model to check its own work against GOAL.md, once an hour of
+   * going unchecked.
+   *
+   * Said in the chat as well, like every other thing cork does to a run: the
+   * answer arrives as ordinary conversation, and without this line the user
+   * would not know it was asked for rather than volunteered.
+   */
+  private checkDrift(rec: AutopilotRecord): void {
+    const since = this.now() - this.lastGoalCheckAt;
+    if (since < DRIFT_CHECK_INTERVAL_MS) return;
+
+    if (!this.inject(DRIFT_TEXT, WATCHER_SENDER_ID)) return; // not reachable; try next tick
+
+    this.lastGoalCheckAt = this.now();
+    const count = (rec.driftChecks ?? 0) + 1;
+    this.updateRec({ driftChecks: count });
+    this.log.info("asked the model to check itself against the goal", { check: count });
+    this.say(
+      `🧭 ${formatDuration(since)} without a goal check — cork asked the model to ` +
+        `re-read GOAL.md and compare its work against it.`
+    );
   }
 
   private checkStall(rec: AutopilotRecord): void {

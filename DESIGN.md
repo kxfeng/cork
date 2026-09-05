@@ -576,6 +576,18 @@ While a task runs:
   subsumes it, and both would inject a "keep going" message
 - nothing written for 5 / 10 / 15 minutes → the model is nudged; three nudges
   → the user is told once
+- an hour with the goal unchecked → the model is asked to re-read GOAL.md and
+  compare its own work against it, writing the check into PROJECT.md. This is
+  the only rule that looks at **direction** rather than liveness: the evaluator
+  only runs when the model tries to stop, so a model that never stops is never
+  checked, and it can work for hours, productively, in the wrong direction with
+  every other signal looking healthy. The clock counts from the last time the
+  goal was looked at by anyone — an evaluator verdict restarts it, since a
+  verdict is a check — and the judge asked is the model doing the work, which
+  has the whole context and can re-run things, rather than the evaluator, which
+  has no tools and a truncated transcript. A drift the model finds it corrects
+  itself, saying what it changed: the run is unattended, and GOAL.md being the
+  fixed point means steering toward it needs no permission
 - the pane died → restarted with a 1 / 2 / 4-minute backoff, three attempts.
   `/goal` is **not** re-sent: claude restores the goal from its own transcript
   on resume

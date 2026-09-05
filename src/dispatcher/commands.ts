@@ -383,6 +383,7 @@ async function startAutopilot(
     restartCount: 0,
     compactCount: 0,
     clearAttempts: 0,
+    driftChecks: 0,
   });
   sessionManager.watchAutopilot(key);
   return null; // the watcher speaks next
@@ -445,6 +446,7 @@ function autopilotStatus(key: string): string {
   if (rec.state === "running") {
     if (rec.nudgeCount) lines.push(`Nudges since last progress: ${rec.nudgeCount}`);
     if (rec.compactCount) lines.push(`Compactions: ${rec.compactCount}`);
+    if (rec.driftChecks) lines.push(`Goal checks asked for: ${rec.driftChecks}`);
   }
   if (rec.state === "drafting") {
     lines.push(`Waiting for GOAL.md — run \`/autopilot start\` when it is ready.`);

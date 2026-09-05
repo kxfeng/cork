@@ -79,6 +79,8 @@ export interface AutopilotRecord {
   pendingSince?: number;
   /** How many times `/goal clear` has been typed for this stop. */
   clearAttempts?: number;
+  /** How many times cork has asked the model to check itself against the goal. */
+  driftChecks?: number;
 }
 
 const FILE = "AUTOPILOT.json";

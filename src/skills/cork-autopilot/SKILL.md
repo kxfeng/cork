@@ -92,6 +92,11 @@ job's own progress notes from quietly becoming its acceptance criteria.
 
 ## 2. Running
 
+**Start by reading GOAL.md and PROJECT.md** — both of them, from this session's
+cork directory. Skip this only if you just wrote them and they are still in
+front of you. You may be picking up a task set hours ago by a version of
+yourself whose context is gone; nothing else tells you what you agreed to do.
+
 **Keep PROJECT.md current.** Every decision, every finished piece, every dead
 end and why. Update it as you go, not at the end — the compaction will not
 announce itself. When cork tells you the session was compacted, re-read
@@ -106,6 +111,19 @@ their input. Every few turns, not every turn.
 **And answer the user when they speak to you.** The same suspension means a
 question asked mid-task goes unanswered unless you notice it. Deal with it as it
 arrives, then carry on.
+
+**About once an hour cork will ask you to check yourself against the goal.**
+Do it properly: open GOAL.md and read it, rather than working from what you
+remember it saying — memory of a goal drifts, and after a compaction it is
+gone. Compare it against what you have actually done, and write the check and
+its conclusion into PROJECT.md.
+
+If the work has drifted, **steer it back yourself** and say in the chat what
+drifted and what you changed. You are running unattended; waiting for the user
+to confirm a course correction defeats the point, and there is nothing to
+decide — GOAL.md is the fixed point and the correction is toward it. Never edit
+GOAL.md. The one thing worth stopping for is a goal that turns out to be
+unachievable or wrong, which is a different conversation (see below).
 
 **When you are blocked**, do not spin. Write the blocker into PROJECT.md, say so
 in the chat, and — if there is other work in scope — carry on with that.

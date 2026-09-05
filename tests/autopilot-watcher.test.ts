@@ -577,6 +577,64 @@ describe("stalls", () => {
     expect(t.injected).toHaveLength(2); // nudged again on the short delay
   });
 
+  it("asks the model to check itself against the goal every hour", () => {
+    // The evaluator only runs when the model tries to stop, so a model that
+    // never stops is never checked. This is the only thing in cork that looks
+    // at direction rather than liveness.
+    const t = makeWatcher();
+    t.tick(); // claims the run, which starts the clock
+
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS - 1000);
+    t.tick();
+    expect(t.injected.filter((x) => x === C.DRIFT_TEXT)).toHaveLength(0);
+
+    t.advance(2000);
+    t.tick();
+    expect(t.injected.filter((x) => x === C.DRIFT_TEXT)).toHaveLength(1);
+    expect(t.rec.driftChecks).toBe(1);
+    expect(t.notified.join()).toContain("goal check");
+
+    // Not again until another hour has passed.
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS - 1000);
+    t.tick();
+    expect(t.rec.driftChecks).toBe(1);
+
+    t.advance(2000);
+    t.tick();
+    expect(t.rec.driftChecks).toBe(2);
+  });
+
+  it("counts from the evaluator's own verdict, not only from the last check", () => {
+    // A verdict IS a check of the goal. Asking for a second opinion a minute
+    // after the evaluator gave one costs a turn and answers nothing.
+    const t = makeWatcher();
+    t.tick();
+
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS - 60_000);
+    t.w.ingest(goalRow({ met: false, condition: "the goal", reason: "not yet" }));
+
+    t.advance(120_000); // past the hour, but only 2 minutes since the verdict
+    t.tick();
+    expect(t.rec.driftChecks ?? 0).toBe(0);
+
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS);
+    t.tick();
+    expect(t.rec.driftChecks).toBe(1);
+  });
+
+  it("does not burn a check when the session is unreachable", () => {
+    const t = makeWatcher();
+    t.tick();
+    t.setInjectOk(false);
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS + 1000);
+    t.tick();
+    expect(t.rec.driftChecks ?? 0).toBe(0);
+
+    t.setInjectOk(true);
+    t.tick();
+    expect(t.rec.driftChecks).toBe(1);
+  });
+
   it("reports every nudge, and says so plainly once it looks stuck", () => {
     // A silent task and a task cork is pushing back into motion look identical
     // from the chat. Telling the user each time is the point of leaving one
@@ -586,11 +644,15 @@ describe("stalls", () => {
       t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
       t.tick();
     }
-    expect(t.injected.length).toBeGreaterThanOrEqual(C.STUCK_AFTER_NUDGES);
-    expect(t.notified).toHaveLength(t.injected.length);
-    expect(t.notified[0]).toContain("nudge 1");
-    expect(t.notified[0]).not.toContain("check the pane");
-    expect(t.notified[C.STUCK_AFTER_NUDGES - 1]).toContain("check the pane");
+    // Filtered rather than indexed: 80 minutes of stall also crosses the
+    // hourly goal check, which speaks for itself in the same chat.
+    const nudges = t.injected.filter((x) => x === C.NUDGE_TEXT);
+    const said = t.notified.filter((x) => x.includes("nudged"));
+    expect(nudges.length).toBeGreaterThanOrEqual(C.STUCK_AFTER_NUDGES);
+    expect(said).toHaveLength(nudges.length);
+    expect(said[0]).toContain("nudge 1");
+    expect(said[0]).not.toContain("check the pane");
+    expect(said[C.STUCK_AFTER_NUDGES - 1]).toContain("check the pane");
   });
 
   it("does not burn a nudge when the session is not reachable yet", () => {
