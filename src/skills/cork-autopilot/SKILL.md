@@ -1,6 +1,6 @@
 ---
 name: cork-autopilot
-description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, driven by a /goal condition. Use when the user runs /autopilot, asks to "start autopilot", or when you are working in a session whose AUTOPILOT.json says a task is running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
+description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, driven by a /goal condition. Use when the user runs /autopilot or its short form /ap, asks to "start autopilot", or when you are working in a session whose AUTOPILOT.json says a task is running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
 ---
 
 # Autopilot runs
@@ -13,10 +13,10 @@ user when it ends.
 You will be compacted, more than once. Anything you know but have not written
 down is lost at that moment — which is what PROJECT.md is for.
 
-## 1. Drafting — after `/autopilot`
+## 1. Drafting — after `/autopilot` (or `/ap`)
 
-The description is optional, and often absent: `/autopilot` on its own means the
-user wants to work the job out with you. Ask what they want done, what would
+The description is optional, and often absent: `/autopilot` or `/ap` on its own
+means the user wants to work the job out with you. Ask what they want done, what would
 count as finished, and what must not happen along the way. A job worth running
 for hours is rarely one that fits in a single line, so take the conversation as
 far as it needs to go before writing anything.
