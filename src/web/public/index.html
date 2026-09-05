@@ -365,6 +365,7 @@
     <script src="/assets/xterm.js"></script>
     <script src="/assets/addon-fit.js"></script>
     <script src="/assets/addon-webgl.js"></script>
+    <script src="/assets/addon-clipboard.js"></script>
     <script>
       // The token is kept in localStorage, which — unlike a cookie — is isolated
       // per origin (port included), so a second cork reached at 127.0.0.1 on
@@ -471,6 +472,48 @@
           });
           fit = new FitAddon.FitAddon();
           term.loadAddon(fit);
+          // Claude Code copies through `tmux load-buffer -w`, and the -w makes
+          // tmux emit an OSC 52 carrying the same text. With no handler for it
+          // xterm drops the sequence, so a selection made in the pane never
+          // reaches the clipboard of whatever machine runs this browser — the
+          // text is left sitting in a tmux buffer on the remote host.
+          //
+          // The provider is write-only on purpose. OSC 52 also defines a read
+          // direction, and the stock provider answers it from
+          // navigator.clipboard.readText(), which would let anything able to
+          // write bytes to the pty siphon off the local clipboard.
+          try {
+            term.loadAddon(
+              new ClipboardAddon.ClipboardAddon(undefined, {
+                async readText() {
+                  return "";
+                },
+                async writeText(selection, text) {
+                  // OSC 52 carries a selection field, and tmux leaves it empty
+                  // — it emits `ESC]52;;<base64>`, which xterm hands through
+                  // verbatim. Accepting only "c" therefore drops every copy
+                  // made inside tmux, which is all of them here. xterm's own
+                  // spec reads an omitted field as naming the clipboard.
+                  if (selection !== "c" && selection !== "") return;
+                  try {
+                    await navigator.clipboard.writeText(text);
+                  } catch (e) {
+                    // Refused: no transient user activation behind this write,
+                    // served over plain http on a LAN address rather than
+                    // localhost, or the tab is unfocused. Nothing to fall back
+                    // to, but say so — a silent drop here is indistinguishable
+                    // from a copy that never arrived.
+                    console.warn("clipboard write refused:", e && e.message);
+                  }
+                },
+              }),
+            );
+          } catch {
+            // The addon script did not load — a stale dist whose server has no
+            // route for it, or a blocked request. Copy then stays as it was
+            // before this addon: text lands in the tmux buffer, reachable with
+            // prefix + ]. A convenience must never take the pane down with it.
+          }
           term.open($("term"));
           // The DOM renderer hands a whole row to the browser to lay out, and
           // the browser's own advance widths do not add up to what xterm sized

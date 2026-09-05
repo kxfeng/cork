@@ -169,6 +169,10 @@ const ASSETS: Record<string, { file: string; type: string }> = {
     file: "@xterm/addon-webgl/lib/addon-webgl.js",
     type: "text/javascript",
   },
+  "/assets/addon-clipboard.js": {
+    file: "@xterm/addon-clipboard/lib/addon-clipboard.js",
+    type: "text/javascript",
+  },
 };
 
 /** Resolve a bundled xterm asset out of node_modules, wherever cork is installed. */
