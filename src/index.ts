@@ -2,6 +2,14 @@
 
 import { Command } from "commander";
 
+// A listing long enough to page is a listing someone pipes into `head` or
+// `less`, and when the reader exits first node's default is to throw the
+// broken pipe as an unhandled error — a stack trace where the output simply
+// ended. Exit quietly instead; the reader got what it asked for.
+process.stdout.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE") process.exit(0);
+});
+
 const program = new Command();
 
 program
@@ -64,13 +72,21 @@ program
 
 program
   .command("status")
-  .description("Show daemon and session status")
+  .description("Show daemon status and session count")
   .action(async () => {
     const { showStatus } = await import("./commands/lifecycle.js");
     await showStatus();
   });
 
 const session = program.command("session").description("Manage sessions");
+
+session
+  .command("list")
+  .description("List sessions with workspace, context, and attach command")
+  .action(async () => {
+    const { sessionList } = await import("./commands/session.js");
+    await sessionList();
+  });
 
 session
   .command("create")

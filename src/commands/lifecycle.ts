@@ -1,43 +1,7 @@
 import { loadConfig } from "../config/loader.js";
 import { paths } from "../config/paths.js";
 import { listSessions } from "../session/store.js";
-import type { SessionMeta } from "../session/store.js";
-import { TMUX_PREFIX, tmuxAttachHint } from "../session/tmux.js";
-import { readLatestUsage, formatModelContext } from "../session/transcript.js";
 import { daemonState, restart, teardown } from "../daemon/service.js";
-
-/**
- * What to call a chat. A session warmed before anyone spoke, or one on a
- * channel that cannot look titles up, is stored under its own chat id — show
- * that rather than an empty column.
- */
-function displayName(meta: SessionMeta): string {
-  return meta.chatName && meta.chatName !== meta.chatId
-    ? meta.chatName
-    : meta.chatId;
-}
-
-/**
- * Order sessions for `cork status`: by name, not by recency as the web view
- * does. The two differ because a terminal scrolls — 8 lines per session means
- * a long list leaves you at the bottom, so putting the most recent first hides
- * it. A name order also holds still between runs, which is what a command you
- * run several times a day wants.
- *
- * Key breaks the tie, which is load-bearing rather than cosmetic: a thread
- * session carries its parent chat's name, so without it a thread can sort
- * above the chat it belongs to. Keys share the parent's prefix, so the parent
- * always comes first.
- */
-export function sortSessionsForDisplay<
-  T extends { key: string; meta: SessionMeta },
->(sessions: T[]): T[] {
-  return [...sessions].sort(
-    (a, b) =>
-      displayName(a.meta).localeCompare(displayName(b.meta)) ||
-      a.key.localeCompare(b.key)
-  );
-}
 
 export async function stopDaemon(): Promise<void> {
   const st = daemonState();
@@ -94,31 +58,14 @@ export async function showStatus(): Promise<void> {
     );
   }
 
-  console.log();
-
-  const sessions = sortSessionsForDisplay(listSessions());
-  console.log(`=== Sessions (${sessions.length}) ===`);
-  if (sessions.length === 0) {
-    console.log("No sessions.");
-    return;
-  }
-
-  for (const { key, meta } of sessions) {
-    const typeLabel = meta.chatType === "group" ? "Group" : "P2P";
-    // Without this a thread is indistinguishable from its parent chat: both
-    // carry the same name and type, and only the key suffix tells them apart.
-    const label = meta.threadId ? `${typeLabel}, thread` : typeLabel;
-    const name = displayName(meta);
-    const usage = await readLatestUsage(meta.workspace, meta.sessionId);
-    // Labels padded to a common 15-char column so the colons line up.
-    console.log(`[${key}]`);
-    console.log(`  Chat:           ${name} (${label})`);
-    console.log(`  Workspace:      ${meta.workspace}`);
-    console.log(`  Claude session: ${meta.sessionId}`);
-    console.log(`  Claude context: ${formatModelContext(usage)}`);
-    console.log(`  Last active:    ${meta.lastActiveAt}`);
-    console.log(`  Last msg:       ${meta.lastMessagePreview || "(none)"}`);
-    console.log(`  Terminal:       ${tmuxAttachHint(`${TMUX_PREFIX}${key}`)}`);
-    console.log();
-  }
+  // Just the count. The per-session detail is 8 lines each, so listing it
+  // here scrolls the daemon header — the reason you ran `status` — off the
+  // top of the screen as soon as a few chats are live. `cork session list`
+  // owns the inventory.
+  const count = listSessions().length;
+  console.log(
+    count === 0
+      ? "Sessions: none"
+      : `Sessions: ${count} (run 'cork session list' for details)`
+  );
 }

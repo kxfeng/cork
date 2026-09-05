@@ -266,7 +266,7 @@ If a choice list cork does not recognise is on screen for two consecutive ticks,
 - `tmux attach -t cork_{sessionKey} -r` — view in read-only mode
 - `Ctrl+B D` — detach without stopping Claude Code
 
-`cork status` prints the exact `tmux attach` command for each session.
+`cork session list` prints the exact `tmux attach` command for each session.
 
 ## 4. CLI Commands
 
@@ -332,9 +332,19 @@ Note: tmux sessions (Claude Code instances) continue running independently. They
 cork status
 ```
 
-Shows daemon status (running/stopped, PID via launchd) and lists all sessions with chat name, workspace, Claude session ID, last active time, last message preview, and the `tmux attach -t cork_{sessionId}` command to view the live Claude Code interface.
+Shows daemon status (running/stopped, PID via launchd), the log path, the web URL, and how many sessions are live.
 
-### 4.5 `cork migrate-sessions`
+Deliberately only the session *count*: each session needs eight lines to describe, so listing them here pushes the daemon header — the reason the command was run — off the top of the screen once a handful of chats are active. The inventory lives in `cork session list`.
+
+### 4.5 `cork session list`
+
+```bash
+cork session list
+```
+
+Lists all sessions with chat name, workspace, Claude session ID, context usage, last active time, last message preview, and the `tmux attach -t cork_{sessionId}` command to view the live Claude Code interface. Ordered by chat name (the web view orders by recency instead — see `sortSessionsForDisplay`).
+
+### 4.6 `cork migrate-sessions`
 
 ```bash
 cork stop && cork migrate-sessions && cork start
@@ -346,7 +356,7 @@ one-time job there is a permanent cost and a failure mode that only appears on a
 restart. Old records are moved to `sessions/.migrated/`, not deleted. Because a
 restart is part of the sequence, it makes no attempt to keep running panes alive.
 
-### 4.6 `pnpm run link` (development)
+### 4.7 `pnpm run link` (development)
 
 ```bash
 pnpm run link    # Build (tsc) + npm link, install globally
@@ -500,7 +510,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 
 **Field notes:**
 - `claudeSessionStarted` — `false` until the channel MCP first registers successfully. Drives `--session-id` (false → start a new Claude session with this UUID) vs `-r` (true → resume).
-- `lastMessagePreview` — only the first non-empty line of the user's message, truncated to 50 chars. Avoids ugly multi-line snippets in `cork status`.
+- `lastMessagePreview` — only the first non-empty line of the user's message, truncated to 50 chars. Avoids ugly multi-line snippets in `cork session list`.
 - `mentionRequired` — replaces the legacy `chat_setting_lark_*.json` files. Toggled by `/mention-on` / `/mention-off` in group chats.
 
 ### 7.4 mcp-config.json
@@ -645,7 +655,8 @@ cork/
 │   ├── commands/
 │   │   ├── setup.ts              # cork setup
 │   │   ├── start.ts              # cork start (foreground + launchd)
-│   │   └── lifecycle.ts          # cork stop, cork status
+│   │   ├── lifecycle.ts          # cork stop, cork restart, cork status
+│   │   └── session.ts            # cork session list, cork session create
 │   ├── daemon/
 │   │   ├── daemon.ts             # Daemon lifecycle (start UDS + channels), reply/permission handlers
 │   │   ├── signal.ts             # SIGTERM/SIGINT/uncaughtException handlers

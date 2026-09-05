@@ -44,7 +44,8 @@ To upgrade, re‑run the same command — pnpm refetches the latest `main`.
 ```bash
 cork setup        # interactive: QR‑code login + Lark bot creation
 cork start        # background daemon (launchd agent on macOS, systemd --user unit on Linux)
-cork status       # check daemon + active sessions
+cork status       # check daemon
+cork session list # list active sessions
 ```
 
 Then `@‑mention` your bot in Lark, send a message, and watch the bot reply with whatever Claude says back.
@@ -68,7 +69,8 @@ tmux attach -t cork_lark:<chatId>
 | `cork start --foreground` | Run in the current shell (for debugging)              |
 | `cork stop`       | Stop the daemon                                               |
 | `cork restart`    | `stop` + `start`                                              |
-| `cork status`     | Show daemon state, socket, and live sessions                  |
+| `cork status`     | Show daemon state, socket, and how many sessions are live     |
+| `cork session list` | List live sessions: chat, workspace, Claude context, `tmux attach` command |
 
 ### In‑chat slash commands
 
@@ -125,7 +127,7 @@ then `cork restart` so the daemon registers the new handlers.
 
 | Feature | Enable | Where | If you skip it |
 | ------- | ------ | ----- | -------------- |
-| Free the session when a chat is disbanded | event `im.chat.disbanded_v1` | Events & callbacks | The chat's Claude process and tmux pane stay alive until the next `cork restart`, and the chat keeps appearing in `cork status` |
+| Free the session when a chat is disbanded | event `im.chat.disbanded_v1` | Events & callbacks | The chat's Claude process and tmux pane stay alive until the next `cork restart`, and the chat keeps appearing in `cork session list` |
 | Same, when the bot is removed from a chat that survives | event `im.chat.member.bot.deleted_v1` | Events & callbacks | Same |
 
 ## Configuration
@@ -183,7 +185,7 @@ The full design — message flow, dedup, queueing, permission relay — is in [D
 
 ## Troubleshooting
 
-**`cork status` says daemon is running but no sessions appear.**
+**`cork status` says daemon is running but `cork session list` shows none.**
 Check `~/.cork/logs/cork.log` for Lark WS errors. Most often: app secret rotated, or the bot hasn't been added to the chat yet.
 
 **Bot stays silent in group chats.**

@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { sortSessionsForDisplay } from "../src/commands/lifecycle.js";
+import { sortSessionsForDisplay } from "../src/commands/session.js";
 import type { SessionMeta } from "../src/session/store.js";
 
 /**
- * `cork status` orders by name while the web view orders by recency, and the
+ * `cork session list` orders by name while the web view orders by recency, and the
  * divergence is deliberate: a terminal scrolls, so a recency order buries the
  * session you most likely came to look at, and a name order holds still
  * between runs.
