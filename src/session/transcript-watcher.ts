@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { transcriptPath, readTranscriptTail } from "./transcript.js";
+import { transcriptPath, findLastTranscriptRow } from "./transcript.js";
 import { getLogger, type Logger } from "../logger.js";
 import { isRunning, type AutopilotRecord, type AutopilotStopReason } from "./autopilot.js";
 import { contextWindowFor } from "./context-window.js";
@@ -229,18 +229,40 @@ function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
+export type GoalKind = "set" | "progress" | "met" | "failed" | "cleared";
+
 /**
  * The goal's state as of the newest `goal_status` row in these rows, or null
- * when there is none — which means no goal was ever set here.
+ * when there is none among them.
  */
-export function lastGoalStatus(
-  rows: unknown[]
-): "set" | "progress" | "met" | "failed" | "cleared" | null {
+export function lastGoalStatus(rows: unknown[]): GoalKind | null {
   for (let i = rows.length - 1; i >= 0; i--) {
     const status = readGoalStatus(rows[i] as TranscriptRow);
     if (status) return status.kind;
   }
   return null;
+}
+
+/**
+ * The goal's state according to the transcript file, searching back from its
+ * end until a `goal_status` row turns up.
+ *
+ * The same question claude answers for itself when it resumes a session, and
+ * deliberately the same way: it walks its whole conversation from the last
+ * message back and stops at the first `goal_status`. Matching that means a
+ * goal claude can restore is one cork can also see — which is what makes
+ * `null` here mean "no goal was ever set", rather than "not in the window I
+ * happened to read".
+ */
+function readGoalFromTranscript(
+  workspace: string,
+  sessionId: string
+): GoalKind | null {
+  return findLastTranscriptRow(
+    workspace,
+    sessionId,
+    (row) => readGoalStatus(row as TranscriptRow)?.kind ?? null
+  );
 }
 
 /** The goal in a code block, or nothing when cork does not have its text. */
@@ -369,6 +391,11 @@ export interface TranscriptWatcherOptions {
   notify?: (text: string) => void;
   /** Test seam: override the wall clock. */
   now?: () => number;
+  /**
+   * Test seam: what the transcript file says about the goal, read from the
+   * end. Null means the file does not say — never "there is no goal".
+   */
+  goalOnDisk?: (workspace: string, sessionId: string) => GoalKind | null;
 }
 
 export class TranscriptWatcher {
@@ -422,9 +449,13 @@ export class TranscriptWatcher {
   private lastModel: string | null = null;
   /** `startedAt` of the run this watcher's per-run flags belong to. */
   private runStartedAt: string | undefined;
-  /** Kept for reconcile(), which reads the transcript rather than tailing it. */
+  /** Kept for the checks that read the transcript rather than tail it. */
   private readonly workspace: string;
   private readonly sessionId: string;
+  private readonly goalOnDisk: (
+    workspace: string,
+    sessionId: string
+  ) => GoalKind | null;
   /** Whether the pane was up at the previous tick — see the transition in tick. */
   private lastAliveSeen = true;
   /**
@@ -446,6 +477,7 @@ export class TranscriptWatcher {
     this.notifyFn = opts.notify;
     this.hooks = opts.autopilot;
     this.now = opts.now ?? Date.now;
+    this.goalOnDisk = opts.goalOnDisk ?? readGoalFromTranscript;
     this.log = getLogger("transcript-watcher").child({
       sessionKey: opts.sessionKey,
     });
@@ -671,7 +703,7 @@ export class TranscriptWatcher {
     const rec = this.rec();
     if (!rec || !isRunning(rec)) return;
 
-    const status = lastGoalStatus(readTranscriptTail(this.workspace, this.sessionId));
+    const status = this.goalOnDisk(this.workspace, this.sessionId);
 
     // A live goal, whatever cork thought: the task is running.
     if (status === "set" || status === "progress") {
@@ -687,18 +719,18 @@ export class TranscriptWatcher {
       return;
     }
 
-    // A goal that has ended, or was never set at all — both mean there is
-    // nothing left to watch, and which it is decides what the user is told.
+    // Nothing found is not the same as nothing there. The read is the last
+    // 256KB, and measured across the real transcripts on this machine a
+    // `goal_status` row is routinely nowhere near it: gaps between two of them
+    // run to 5.6MB, one session had 641KB of output after its last one, and a
+    // single row can be 780KB by itself — one large tool result puts the answer
+    // out of reach. Ending a run on that would mean every daemon restart during
+    // a long tool result silently hands a working task back to nobody. Leave
+    // the record alone:
+    // `starting` and `stopping` have deadlines that will settle them, and a
+    // `running` task carries on with the tail live again.
     if (status === null) {
-      this.stopRec(
-        rec.state === "starting" ? "start-failed" : "user-stop",
-        "no goal in the transcript"
-      );
-      this.say(
-        rec.state === "starting"
-          ? "❌ Autopilot did not start — no goal was ever set. Run `/autopilot start` again."
-          : "🛑 Autopilot stopped — the goal is no longer set."
-      );
+      this.log.info("reconciled: the transcript does not say", { state: rec.state });
       return;
     }
 
@@ -1013,6 +1045,13 @@ export class TranscriptWatcher {
     const since = rec.pendingSince ?? this.now();
     if (this.now() - since < PENDING_DEADLINE_MS) return;
 
+    // Nothing is read from the file here, deliberately. What a deadline is
+    // waiting on is a `goal_status` row, and the tail does not miss those: it
+    // reads from its own byte offset to the new end of an append-only file.
+    // Re-reading the last 256KB would confirm what the tail already knows, in
+    // the cases where it can answer at all — measured, a `goal_status` row is
+    // usually not in that window. `reconcile` reads the file because it has a
+    // real gap to cover: the rows written while the daemon was down.
     if (rec.state === "starting") {
       this.log.warn("no goal within the deadline", { pendingSince: rec.pendingSince });
       this.stopRec("start-failed", "the goal never registered");

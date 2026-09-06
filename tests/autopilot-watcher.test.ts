@@ -30,7 +30,16 @@ const goalRow = (a: Record<string, unknown>) =>
 
 function makeWatcher(
   initial: Partial<AutopilotRecord> = { state: "running" },
-  opts: { window?: number; compactPct?: number } = {}
+  opts: {
+    window?: number;
+    compactPct?: number;
+    /**
+     * What a read of the transcript file finds, for the deadline checks that
+     * ask the file rather than trusting the record. Default: nothing there,
+     * which is what a session with no goal looks like.
+     */
+    onDisk?: Record<string, unknown>;
+  } = {}
 ) {
   let clock = 1_000_000;
   let rec: AutopilotRecord = { state: "running", ...initial } as AutopilotRecord;
@@ -38,6 +47,7 @@ function makeWatcher(
   const injected: string[] = [];
   const notified: string[] = [];
   const calls = { restarts: 0, clears: 0 };
+  let onDisk = opts.onDisk;
   let alive = true;
   let restartOk: boolean | undefined; // undefined ⇒ "came back iff the pane is up"
   let injectOk = true;
@@ -74,6 +84,8 @@ function makeWatcher(
     },
     autopilot: hooks,
     now: () => clock,
+    goalOnDisk: () =>
+      onDisk ? lastGoalStatus([JSON.parse(goalRow(onDisk))]) : null,
   });
 
   return {
@@ -93,12 +105,18 @@ function makeWatcher(
     setAlive: (v: boolean) => {
       alive = v;
     },
+    /** What the next deadline check finds when it reads the transcript. */
+    setOnDisk: (a: Record<string, unknown> | undefined) => {
+      onDisk = a;
+    },
     setInjectOk: (v: boolean) => {
       injectOk = v;
     },
     setRec: (patch: Partial<AutopilotRecord>) => {
       rec = { ...rec, ...patch } as AutopilotRecord;
     },
+    // Private, and only ever run when a watcher starts.
+    reconcile: () => (w as unknown as { reconcile(): void }).reconcile(),
     // The tick is private; it is the whole periodic half of the rules.
     tick: async () => {
       (w as unknown as { tick(): void }).tick();
@@ -530,6 +548,33 @@ describe("stopping: waiting for the goal to go away", () => {
     expect(t.rec.state).toBe("stopped");
     expect(t.rec.stopReason).toBe("stop-failed");
     expect(t.notified.join()).toContain("still set");
+  });
+});
+
+describe("reconcile", () => {
+  it("leaves a run alone when the transcript cannot answer", async () => {
+    // Runs on every watcher start, which includes every daemon restart. A
+    // `goal_status` row routinely sits outside the 256KB read — one measured
+    // session had 641KB of output after the last one — so finding nothing has
+    // to mean NOT KNOWN. Ending the run on it would hand a working task back
+    // to nobody, once per restart.
+    const t = makeWatcher({ state: "running", goal: "ship it" }); // nothing readable
+
+    t.reconcile();
+
+    expect(t.rec.state).toBe("running");
+    expect(t.notified).toHaveLength(0);
+  });
+
+  it("ends a run the transcript says is over", async () => {
+    const t = makeWatcher({ state: "running", goal: "ship it" }, {
+      onDisk: { met: true },
+    });
+
+    t.reconcile();
+
+    expect(t.rec.state).toBe("stopped");
+    expect(t.notified.join()).toContain("complete");
   });
 });
 

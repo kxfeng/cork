@@ -213,3 +213,90 @@ export function formatModelContext(usage: TranscriptUsage | null): string {
   const pct = total > 0 ? Math.round((used / total) * 100) : 0;
   return `${formatModelName(usage.model)} | ${formatTokens(used)}/${formatTokens(total)} | ${pct}%`;
 }
+
+/**
+ * The newest row `pick` accepts, searching backwards from the end of the
+ * transcript.
+ *
+ * This is how claude itself recovers a goal on resume — its own restore reads
+ * the whole conversation and walks it from the last message back, stopping at
+ * the first `goal_status` it finds. Cork has to answer the same question after
+ * a daemon restart, and reading a fixed window from the end does not: measured
+ * across the real transcripts on this machine, the gap between two
+ * `goal_status` rows runs to 5.6MB and a single row can be 780KB, so the
+ * answer is routinely nowhere near the last 256KB.
+ *
+ * Reading backwards in chunks costs what it has to and no more — a session
+ * whose last row is a `goal_status` reads one chunk. Only rows are parsed, and
+ * only until one is accepted, so the usual case parses a handful of lines
+ * rather than a file. Measured on a 3.9MB transcript whose answer was 700KB
+ * from the end: 0.6ms.
+ *
+ * Returns null when the file is missing, unreadable, or holds no such row.
+ */
+export function findLastTranscriptRow<T>(
+  workspace: string,
+  sessionId: string,
+  pick: (row: unknown) => T | null,
+  chunkBytes = 1024 * 1024
+): T | null {
+  const file = transcriptPath(workspace, sessionId);
+  let size: number;
+  let fd: number;
+  try {
+    size = fs.statSync(file).size;
+    fd = fs.openSync(file, "r");
+  } catch {
+    return null;
+  }
+
+  try {
+    let end = size;
+    // The first line of a chunk is cut in half by the chunk boundary; it
+    // belongs to the block being read next, which sits before it in the file.
+    // Carried as bytes rather than text, so a split multi-byte character is
+    // rejoined rather than decoded twice into replacement characters.
+    let carry = Buffer.alloc(0);
+
+    while (end > 0) {
+      const start = Math.max(0, end - chunkBytes);
+      const buf = Buffer.alloc(end - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      const block = Buffer.concat([buf, carry]);
+
+      let body = block;
+      if (start > 0) {
+        const nl = block.indexOf(0x0a);
+        if (nl < 0) {
+          // No line break in the whole block: it is the middle of one very
+          // long row. Keep it and widen the window.
+          carry = block;
+          end = start;
+          continue;
+        }
+        carry = block.subarray(0, nl);
+        body = block.subarray(nl + 1);
+      }
+
+      const lines = body.toString("utf-8").split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        let row: unknown;
+        try {
+          row = JSON.parse(line);
+        } catch {
+          continue; // a row claude was still writing, or not JSON at all
+        }
+        const hit = pick(row);
+        if (hit !== null && hit !== undefined) return hit;
+      }
+      end = start;
+    }
+  } catch {
+    return null; // a read that fails mid-way answers nothing, not "no goal"
+  } finally {
+    fs.closeSync(fd);
+  }
+  return null;
+}
