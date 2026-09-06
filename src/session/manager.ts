@@ -817,12 +817,26 @@ export class SessionManager extends EventEmitter {
     let typed = false;
     for (let attempt = 0; attempt < TYPE_ATTEMPTS && !typed; attempt++) {
       try {
-        // Escape first: it leaves whatever mode the pane is in (queued-message
-        // editing, a completion menu) where clearing alone would not.
-        execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
-        // Then `i`. With editorMode "vim" — a user-level setting every cork
-        // session inherits — Escape lands in NORMAL mode, where the `/` of
-        // `/goal` opens vim's search and the command arrives mangled.
+        // Escape is NOT sent on the first attempt, because what it does depends
+        // on the mode the pane is already in. Measured, with editorMode "vim"
+        // (a user-level setting every cork session inherits), while the model
+        // was streaming: Escape from INSERT only switches to NORMAL and the
+        // model keeps going; Escape from NORMAL **interrupts the model**. A
+        // pane sits in NORMAL after any earlier interrupt or stray Escape, so
+        // sending one unconditionally means sometimes killing the turn cork was
+        // only trying to type alongside.
+        //
+        // `i` alone reaches a typable state from every ordinary mode without
+        // that risk: INSERT takes it as a character (the sweep below removes
+        // it), NORMAL enters INSERT, and with editorMode "normal" there are no
+        // modes to be in. Later attempts do send Escape, for the one state `i`
+        // cannot leave: pressing `/` in NORMAL opens the **history filter**
+        // panel — not vim's search, as this comment used to claim — where every
+        // keystroke becomes filter text. Escape closes it, and claude's own
+        // hint line there reads "Esc i / for slash commands".
+        if (attempt > 0) {
+          execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+        }
         execSync(corkTmux(`send-keys -t "${tmuxName}" i`), { stdio: "pipe" });
         // Empty the box in both directions. Backspace alone leaves anything
         // sitting after the cursor — measured: a draft cleared down to the
@@ -856,7 +870,15 @@ export class SessionManager extends EventEmitter {
           typed = commandIsAtPrompt(capturePane(tmuxName), command);
           if (typed || Date.now() >= settleBy) break;
         }
-        if (!typed) continue; // clear and try again; nothing has been submitted
+        if (!typed) {
+          // Logged here rather than after the lines below, where it used to sit
+          // and could never run: `continue` had already been taken.
+          logger.warn("input line did not start with the command, retrying", {
+            key,
+            attempt: attempt + 1,
+          });
+          continue; // clear and try again; nothing has been submitted
+        }
 
         // The rest, line by line, with M-Enter (a soft newline) between them.
         // Claude folds any single input that is long OR pasted as several lines
@@ -873,12 +895,6 @@ export class SessionManager extends EventEmitter {
         }
         // Let the TUI take them in before Enter — see TYPE_SETTLE_MS.
         await new Promise((r) => setTimeout(r, TYPE_SETTLE_MS));
-        if (!typed) {
-          logger.warn("input line did not start with the command, retrying", {
-            key,
-            attempt: attempt + 1,
-          });
-        }
       } catch (err) {
         return { ok: false, reason: (err as Error).message };
       }

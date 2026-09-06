@@ -142,14 +142,15 @@ describe("sendSlashCommand", () => {
 
     expect(r.ok).toBe(true);
     const keys = sentKeys();
-    // Escape leaves whatever mode the pane is in (a queued-message edit, a
-    // completion menu). Then `i`, because with editorMode "vim" Escape lands
-    // in NORMAL mode, where the `/` of `/goal` opens vim's search. Then the
-    // box is emptied in both directions before anything is typed.
-    expect(keys[0]).toContain("Escape");
-    expect(keys[1]).toMatch(/send-keys .* i$/);
-    expect(keys[2]).toMatch(/-N \d+ BSpace$/);
-    expect(keys[3]).toMatch(/-N \d+ DC$/);
+    // No Escape on the first attempt. Measured with editorMode "vim" while the
+    // model was streaming: Escape from INSERT only switches mode, but Escape
+    // from NORMAL interrupts the model — and a pane sits in NORMAL after any
+    // earlier interrupt. `i` reaches a typable state from either mode without
+    // that risk; in INSERT it is just a character, which the sweep removes.
+    expect(keys.some((k) => k.includes("Escape"))).toBe(false);
+    expect(keys[0]).toMatch(/send-keys .* i$/);
+    expect(keys[1]).toMatch(/-N \d+ BSpace$/);
+    expect(keys[2]).toMatch(/-N \d+ DC$/);
     expect(keys.find((k) => k.includes("/goal do the thing"))).toBeTruthy();
     expect(keys[keys.length - 1]).toContain("Enter");
   });
@@ -260,6 +261,26 @@ describe("sendSlashCommand", () => {
     expect(r.reason).toContain("input box");
     // Never submitted.
     expect(sentKeys().some((k) => k.includes("Enter"))).toBe(false);
+  });
+
+  it("brings Escape out only once typing alone has failed", async () => {
+    // Escape can interrupt the model (from NORMAL it does), so the first
+    // attempt never sends one. It is still the only way out of the history
+    // filter panel, which `i` cannot leave — so a retry does send it.
+    const mgr = await makeManager();
+    pane.swallowTyping = true; // force every attempt to fail the check
+
+    await mgr.sendSlashCommand("sess-1", "/goal do the thing", {
+      confirmMs: 1500,
+      settleMs: 700,
+    });
+
+    const keys = sentKeys();
+    const escapes = keys.filter((k) => k.includes("Escape"));
+    const firstI = keys.findIndex((k) => /send-keys .* i$/.test(k));
+    // One per retry, never on the first attempt.
+    expect(escapes).toHaveLength(2);
+    expect(keys.indexOf(escapes[0])).toBeGreaterThan(firstI);
   });
 
   it("waits for a slow pane to render instead of retyping over it", async () => {
