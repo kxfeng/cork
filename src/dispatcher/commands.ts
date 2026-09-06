@@ -13,11 +13,14 @@ import {
   goalFilePath,
   MAX_GOAL_CHARS,
   MAX_GOAL_LINE_CHARS,
+  archiveRun,
+  saveAutopilot,
   type GoalProblem,
   type AutopilotRecord,
   type AutopilotStopReason,
 } from "../session/autopilot.js";
 import { formatDuration } from "../session/transcript-watcher.js";
+import { readableTime, zoneLabel } from "../time.js";
 import fs from "node:fs";
 
 export interface CommandResult {
@@ -310,12 +313,18 @@ async function handleAutopilot(
   // so it can see where GOAL.md goes. Pasting boilerplate in front of the
   // user's words would only bury them — and make every session's message
   // preview read the same.
-  updateAutopilot(key, {
-    state: "drafting",
-    goal: undefined,
-    stopReason: undefined,
-    stopDetail: undefined,
-  });
+  // File the last run before anything overwrites it. Only a run that has
+  // ENDED is archived; there is no other state this branch can be reached in
+  // with a goal still worth keeping.
+  const archived = archiveRun(key);
+
+  // The whole record, not a patch. Drafting is a run that has not begun, and
+  // every field but `state` describes one that has: times, counters, the
+  // verdict. Clearing the ones that looked dangerous left the rest to leak —
+  // a drafting session reported `Started: … 1h3min`, which was the previous
+  // run's whole duration, presented as if it were this one's. Whatever the
+  // last run left behind is in the archive now; the record starts empty.
+  saveAutopilot(key, { state: "drafting" });
 
   // Said before the model sees the message, because this branch takes anything
   // it does not recognise — including a question that merely begins with
@@ -323,7 +332,13 @@ async function handleAutopilot(
   // asked for. Both sides were content: cork wrote the record, the model
   // answered the question, and the one person who could tell the two apart was
   // the only one not told. Changing the record is worth a line.
-  await sendCmdReply(channel, message, "📝 Autopilot drafting.");
+  await sendCmdReply(
+    channel,
+    message,
+    archived
+      ? "📝 Autopilot drafting — previous run archived."
+      : "📝 Autopilot drafting."
+  );
   return { handled: false };
 }
 
@@ -516,24 +531,20 @@ const ENDINGS: Record<AutopilotStopReason, string> = {
   unreachable: "the session could not be brought back",
 };
 
-/** Minutes, in the zone the person reading this is in. */
-const STATUS_TZ_OFFSET_MIN = 8 * 60;
-const STATUS_TZ_LABEL = "UTC+8";
-
 /**
  * When it started and how long that is, as one line.
  *
  * The record keeps UTC, which is right for a record and wrong for a person:
- * the daemon's clock is not the one the reader is looking at. Shown in their
- * zone and labelled, so it is never ambiguous which of the two a timestamp is.
- * The elapsed time is usually the actual question, and for a run that has
- * ended it is how long the whole thing took.
+ * the daemon's clock is not the one the reader is looking at. Shown in the
+ * configured zone and labelled, so it is never ambiguous which of the two a
+ * timestamp is. The elapsed time is usually the actual question, and for a run
+ * that has ended it is how long the whole thing took.
  */
 function startedLine(rec: AutopilotRecord): string {
   const started = Date.parse(rec.startedAt as string);
   if (!Number.isFinite(started)) return rec.startedAt as string;
-  const local = new Date(started + STATUS_TZ_OFFSET_MIN * 60_000);
-  const stamp = `${local.toISOString().slice(0, 16).replace("T", " ")} (${STATUS_TZ_LABEL})`;
+  const at = new Date(started);
+  const stamp = `${readableTime(at)} (${zoneLabel(at)})`;
   const ms = (rec.stoppedAt ? Date.parse(rec.stoppedAt) : Date.now()) - started;
   if (!Number.isFinite(ms) || ms <= 0) return stamp;
   return `${stamp} · ${formatDuration(ms)}${rec.stoppedAt ? "" : " ago"}`;

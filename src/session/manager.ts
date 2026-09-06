@@ -1285,7 +1285,10 @@ export class SessionManager extends EventEmitter {
       if (existing.startingTimer) clearTimeout(existing.startingTimer);
     }
     this.sessions.delete(key);
-    deleteSession(key);
+    // The chat carries on existing, so what it has already finished carries on
+    // too: `/new` restarts the conversation, it does not undo the work. Only
+    // forgetting a session or losing the chat takes the archive with it.
+    deleteSession(key, { keepArchive: true });
 
     const meta: SessionMeta = {
       sessionId: uuidv4(),

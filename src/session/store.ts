@@ -12,6 +12,15 @@ import { paths } from "../config/paths.js";
  */
 export const LOCAL_CHANNEL = "local";
 
+/**
+ * Where finished autopilot runs are kept, inside a session's directory.
+ *
+ * Named here rather than beside the code that writes it, because deleting a
+ * session has to know what to spare and store.ts cannot import autopilot.ts —
+ * that import already runs the other way.
+ */
+export const ARCHIVE_DIR = "archive";
+
 export interface SessionMeta {
   sessionId: string;
   /** Channel this session belongs to (e.g. "lark", "telegram"). Lets the daemon
@@ -93,12 +102,33 @@ export function saveSession(id: string, meta: SessionMeta): void {
 }
 
 /**
- * Forget a session: the whole directory goes, autopilot files included. Claude's
- * own transcript is untouched — that lives under ~/.claude and is not ours.
+ * Forget a session: the directory goes, autopilot files included. Claude's own
+ * transcript is untouched — that lives under ~/.claude and is not ours.
+ *
+ * `keepArchive` spares finished runs, and exists because the two things that
+ * call this mean different things. `/new` restarts the conversation in a chat
+ * that carries on existing, and the record of what that chat has already
+ * finished outlives any one conversation. Forgetting a session, or a chat
+ * being disbanded, ends the thing itself — leaving a folder of archived runs
+ * behind for a session nobody can reach is just litter.
  */
-export function deleteSession(id: string): void {
+export function deleteSession(id: string, opts?: { keepArchive?: boolean }): void {
   if (!validId(id)) return;
-  fs.rmSync(sessionDir(id), { recursive: true, force: true });
+  const dir = sessionDir(id);
+  if (!opts?.keepArchive) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  }
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return; // nothing there to clear
+  }
+  for (const entry of entries) {
+    if (entry === ARCHIVE_DIR) continue;
+    fs.rmSync(path.join(dir, entry), { recursive: true, force: true });
+  }
 }
 
 export function listSessions(): Array<{ key: string; meta: SessionMeta }> {

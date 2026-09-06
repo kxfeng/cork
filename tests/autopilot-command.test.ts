@@ -84,6 +84,12 @@ const lastReply = () => sent[sent.length - 1]?.content ?? "";
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-lt-cmd-"));
   process.env.CORK_DIR = dir;
+  // Times are shown in the configured zone; pin one so the assertions below
+  // mean the same thing on a machine in any other.
+  fs.writeFileSync(
+    path.join(dir, "config.jsonc"),
+    JSON.stringify({ timezone: "Asia/Singapore" })
+  );
   sent = [];
   slashCalls = [];
   injected = [];
@@ -109,7 +115,52 @@ describe("/autopilot <description>", () => {
     // The message reaches the model unchanged; the record changing is what
     // gets announced.
     expect(msg.text).toBe("/autopilot refactor the session store");
-    expect(lastReply()).toBe("📝 Autopilot drafting.");
+    expect(lastReply()).toContain("Autopilot drafting");
+  });
+
+  it("starts the record from empty, keeping nothing of the last run", async () => {
+    // Drafting is a run that has not begun, and every field but `state`
+    // describes one that has. Clearing only the ones that looked dangerous
+    // left the rest to leak: a drafting session reported "Started: … 1h3min",
+    // which was the PREVIOUS run's whole duration shown as if it were this
+    // one's.
+    const { handleCommand, saveAutopilot, loadAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "stopped",
+      goal: "the old one",
+      startedAt: "2026-09-05T17:45:25.355Z",
+      stoppedAt: "2026-09-05T18:49:03.166Z",
+      stopReason: "met",
+      stopDetail: "it was done",
+      lastNudgeAt: "2026-09-05T18:00:00.000Z",
+      nudgeCount: 3,
+      stuckWarned: true,
+      restartCount: 2,
+      compactCount: 4,
+      pendingSince: 1757090725355,
+      clearAttempts: 1,
+      driftChecks: 5,
+    } as never);
+
+    await handleCommand(channel, message("/autopilot something new"), sessionManager);
+
+    expect(loadAutopilot(KEY)).toEqual({ state: "drafting" });
+  });
+
+  it("does not show a Started line while drafting", async () => {
+    const { handleCommand, saveAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "stopped",
+      startedAt: "2026-09-05T17:45:25.355Z",
+      stoppedAt: "2026-09-05T18:49:03.166Z",
+      stopReason: "met",
+    } as never);
+
+    await handleCommand(channel, message("/autopilot something new"), sessionManager);
+    sent.length = 0;
+    await handleCommand(channel, message("/autopilot status"), sessionManager);
+
+    expect(lastReply()).toBe("📋 **Autopilot**: drafting");
   });
 
   it("tells the chat that the record changed, before the model sees it", async () => {
@@ -142,7 +193,7 @@ describe("/autopilot <description>", () => {
 
     expect(result.handled).toBe(false); // → dispatched to the model
     expect(loadAutopilot(KEY).state).toBe("drafting");
-    expect(lastReply()).toBe("📝 Autopilot drafting.");
+    expect(lastReply()).toContain("Autopilot drafting");
   });
 
   it("takes `/ap` for the same command", async () => {

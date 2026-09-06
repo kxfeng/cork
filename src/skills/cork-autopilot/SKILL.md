@@ -1,6 +1,6 @@
 ---
 name: cork-autopilot
-description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, driven by a /goal condition. Use when the user runs /autopilot or its short form /ap, asks to "start autopilot", or when you are working in a session whose AUTOPILOT.json says a task is running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
+description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, driven by a /goal condition. Use when the user runs /autopilot or its short form /ap, asks to "start autopilot", or when you are working in a session that has an autopilot job running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
 ---
 
 # Autopilot runs
@@ -89,6 +89,28 @@ that is who reads it after the first compaction.
 
 It is not the standard — GOAL.md is. Keeping the two apart is what stops the
 job's own progress notes from quietly becoming its acceptance criteria.
+
+### `archive/` — runs that have already ended
+
+When a new goal is drafted in a session whose last run had finished, cork moves
+that run's files here before you start:
+
+```
+archive/20260906-014525/
+  GOAL.md      the goal as it was set, with how the run ended appended
+  PROJECT.md   the working document as it stood at the end
+```
+
+The folder is named for when that run **started**, `YYYYMMDD-HHMMSS` in UTC —
+as are the times inside it — so the newest is last in a sorted listing. Its `GOAL.md` has three parts: the goal
+verbatim, an `# Outcome` block saying how it ended and how long it took, and
+the goal evaluator's `## Verdict` in full.
+
+Read it when the new job continues, repeats, or reverses old work — what was
+tried, what the evaluator accepted, where the last one stopped. Two things to
+keep straight: **nothing in there is current**, and a verdict listing what was
+verified last time is a record, not a requirement for the goal you are writing
+now.
 
 ## 2. Running
 

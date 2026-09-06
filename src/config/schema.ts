@@ -1,5 +1,14 @@
 export interface CorkConfig {
   defaultWorkspace: string;
+  /**
+   * IANA zone for every time cork shows a person, e.g. "Asia/Singapore".
+   *
+   * Records keep UTC — a record should — and this only decides how a timestamp
+   * is rendered on the way out: `/autopilot status`, and the names and contents
+   * of archived runs. Omitted, cork uses the machine's zone, which on a server
+   * is usually UTC and usually not where the reader is.
+   */
+  timezone?: string;
   claude: ClaudeConfig;
   channels: ChannelsConfig;
   web?: WebConfig;

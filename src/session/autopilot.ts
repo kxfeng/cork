@@ -1,7 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { sessionDir } from "./store.js";
+import { sessionDir, ARCHIVE_DIR } from "./store.js";
 import { getLogger } from "../logger.js";
+import { readableTime, stampTime, zoneLabel } from "../time.js";
+import { formatDuration } from "./transcript-watcher.js";
 
 const logger = getLogger("autopilot");
 
@@ -267,3 +269,184 @@ function referencesOwnFiles(condition: string, key: string): boolean {
   return new RegExp(`\\b${PROJECT_FILE}\\b`).test(condition);
 }
 
+
+/**
+ * How much of the evaluator's verdict is kept.
+ *
+ * Measured across every terminal verdict on this machine: 17 of them, longest
+ * 3326 characters, median 388. So this never fires in practice — it is here so
+ * that one pathological verdict cannot turn an archived goal into something
+ * nobody will open.
+ */
+const MAX_VERDICT_CHARS = 8000;
+
+/** Where finished runs are kept, under the session's own directory. */
+export function archiveDir(key: string): string {
+  return path.join(sessionDir(key), ARCHIVE_DIR);
+}
+
+/**
+ * How a run ended, in words rather than in this file's vocabulary.
+ *
+ * The reader of an archived goal is usually a model deciding what to do next;
+ * "user-stop" and "unreachable" are precise to whoever wrote them and opaque
+ * to everyone else.
+ */
+const OUTCOMES: Record<AutopilotStopReason, string> = {
+  met: "completed — the goal was met",
+  failed: "the goal was judged unachievable",
+  "user-stop": "stopped on request",
+  "start-failed": "never started",
+  "stop-failed": "the goal could not be cleared",
+  unreachable: "the session could not be brought back",
+};
+
+/**
+ * Said before anything else in the file.
+ *
+ * A model opening this sees `# Goal` first and has every reason to read it as
+ * the current one. One line at the top costs nothing and removes the whole
+ * question.
+ */
+const ARCHIVE_HEADER =
+  "> An archived run. This goal has ended — it is a record, not the current task.";
+
+/**
+ * Everything written into the archive is in UTC, deliberately.
+ *
+ * The reader here is a model, and a model has no local zone — what it needs is
+ * an answer that does not depend on knowing cork has a timezone setting. In
+ * UTC, `startedAt` in the record (`…T17:45:25.355Z`) and the folder name
+ * (`20260905-174525`) are visibly the same instant; rendered in the display
+ * zone they were eight hours and a calendar day apart, and reconciling them
+ * meant reading cork's source. Chat messages are the other way round — those
+ * are read by a person, and stay in the display zone.
+ */
+const ARCHIVE_ZONE = "UTC";
+
+/** When the run happened, as a folder name: `20260905-174525`. */
+function archiveName(rec: AutopilotRecord): string {
+  const at = rec.startedAt ? new Date(rec.startedAt) : new Date();
+  return stampTime(Number.isNaN(at.getTime()) ? new Date() : at, ARCHIVE_ZONE);
+}
+
+/** The `# Outcome` block: three lines anyone can stop reading after. */
+function outcomeBlock(rec: AutopilotRecord): string {
+  const lines = ["# Outcome", ""];
+  lines.push(
+    `- Result: ${rec.stopReason ? (OUTCOMES[rec.stopReason] ?? rec.stopReason) : "unknown"}`
+  );
+
+  const started = rec.startedAt ? new Date(rec.startedAt) : undefined;
+  const stopped = rec.stoppedAt ? new Date(rec.stoppedAt) : undefined;
+  const valid = (d?: Date) => d && !Number.isNaN(d.getTime());
+  if (valid(started)) {
+    lines.push(
+      `- Started: ${readableTime(started!, ARCHIVE_ZONE)} (${zoneLabel(started!, ARCHIVE_ZONE)})`
+    );
+  }
+  if (valid(stopped)) {
+    const ran = valid(started)
+      ? `, ran ${formatDuration(stopped!.getTime() - started!.getTime())}`
+      : "";
+    lines.push(
+      `- Ended: ${readableTime(stopped!, ARCHIVE_ZONE)} (${zoneLabel(stopped!, ARCHIVE_ZONE)})${ran}`
+    );
+  }
+  if (rec.compactCount) lines.push(`- Compactions: ${rec.compactCount}`);
+  return lines.join("\n");
+}
+
+/**
+ * The `## Verdict` block, or nothing when the run left no reasoning.
+ *
+ * The note above it matters as much as the text below: a verdict reading "all
+ * nine conditions verified" is one line away from being read as nine
+ * conditions the NEXT goal has to satisfy.
+ */
+function verdictBlock(detail: string | undefined): string {
+  const text = (detail ?? "").trim();
+  if (!text) return "";
+  const chars = [...text];
+  const cut = chars.length > MAX_VERDICT_CHARS;
+  return [
+    "## Verdict",
+    "",
+    "What the goal evaluator said when it ended this run, verbatim — a record of",
+    "what was checked and accepted, not a requirement for anything that follows.",
+    "",
+    cut ? chars.slice(0, MAX_VERDICT_CHARS).join("") : text,
+    ...(cut
+      ? ["", `_(cut at ${MAX_VERDICT_CHARS} characters; the full text is in the session transcript)_`]
+      : []),
+  ].join("\n");
+}
+
+/**
+ * Move a finished run's files into `archive/`, and return the folder's name.
+ *
+ * Called when a new goal is being drafted over an old one that has ended. The
+ * files move rather than copy: a stale GOAL.md left in place is one a model
+ * edits instead of replacing, and two goals in a session directory is one too
+ * many. What is kept is what the next run might want — the goal as it was set,
+ * how it went, and the working document as it stood at the end.
+ *
+ * Returns null when there was nothing to archive, or when it could not be
+ * done. Drafting a new goal is the point; filing the old one is housekeeping,
+ * and housekeeping does not get to block it.
+ */
+export function archiveRun(key: string): string | null {
+  const rec = loadAutopilot(key);
+  if (rec.state !== "stopped") return null;
+
+  const goalPath = goalFilePath(key);
+  const projectPath = path.join(sessionDir(key), PROJECT_FILE);
+  const goal = readGoalFile(key);
+  const hasProject = fs.existsSync(projectPath);
+  if (goal === null && !hasProject) return null; // nothing was ever written
+
+  const drop = () => {
+    fs.rmSync(goalPath, { force: true });
+    fs.rmSync(projectPath, { force: true });
+  };
+
+  try {
+    const name = archiveName(rec);
+    const dir = path.join(archiveDir(key), name);
+
+    // Two runs starting in the same second, which takes a `/ap start` inside
+    // the second one ended. Merging them would produce a folder that is
+    // neither run, so the older files are simply dropped: the point of this
+    // call is to clear the way for a new goal.
+    if (fs.existsSync(dir)) {
+      logger.warn("archive folder already exists, dropping the old run", { key, name });
+      drop();
+      return null;
+    }
+
+    fs.mkdirSync(dir, { recursive: true });
+    const verdict = verdictBlock(rec.stopDetail);
+    fs.writeFileSync(
+      path.join(dir, GOAL_FILE),
+      [
+        ARCHIVE_HEADER,
+        "",
+        "# Goal",
+        "",
+        (goal ?? "(no GOAL.md was written)").trim(),
+        "",
+        outcomeBlock(rec),
+        ...(verdict ? ["", verdict] : []),
+        "",
+      ].join("\n")
+    );
+    fs.rmSync(goalPath, { force: true });
+    if (hasProject) fs.renameSync(projectPath, path.join(dir, PROJECT_FILE));
+
+    logger.info("archived a finished run", { key, name, reason: rec.stopReason });
+    return name;
+  } catch (err) {
+    logger.warn("could not archive the finished run", { key, err: (err as Error).message });
+    return null;
+  }
+}

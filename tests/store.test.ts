@@ -83,6 +83,31 @@ describe("session CRUD", () => {
     expect(fs.existsSync(sessionDir("id-files"))).toBe(false);
   });
 
+  it("spares finished runs when asked to", () => {
+    // `/new` restarts the conversation in a chat that carries on existing, and
+    // the record of what that chat has already finished outlives any one
+    // conversation. Forgetting the session is the other case, and takes it all.
+    saveSession("id-keep", sampleMeta);
+    const dir = sessionDir("id-keep");
+    fs.mkdirSync(path.join(dir, "archive", "20260905-174525"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "archive", "20260905-174525", "GOAL.md"), "old");
+    fs.writeFileSync(path.join(dir, "GOAL.md"), "current");
+    fs.writeFileSync(path.join(dir, "AUTOPILOT.json"), "{}");
+
+    deleteSession("id-keep", { keepArchive: true });
+
+    expect(fs.existsSync(path.join(dir, "GOAL.md"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "AUTOPILOT.json"))).toBe(false);
+    expect(loadSession("id-keep")).toBeNull(); // the meta goes too
+    expect(
+      fs.readFileSync(path.join(dir, "archive", "20260905-174525", "GOAL.md"), "utf-8")
+    ).toBe("old");
+  });
+
+  it("keeping the archive is safe when there is no directory at all", () => {
+    expect(() => deleteSession("never-existed", { keepArchive: true })).not.toThrow();
+  });
+
   it("returns null for non-existent session", () => {
     const loaded = loadSession("nonexistent");
     expect(loaded).toBeNull();
