@@ -389,6 +389,24 @@ describe("web terminal", () => {
     };
 
     /**
+     * Wait for a condition instead of for a duration.
+     *
+     * These assertions are about a side effect landing — a client attaching, a
+     * pty being reaped — and a fixed sleep asserts "has the clock run out",
+     * which is a different question. Under the full suite, with a dozen files
+     * starting tmux servers at once, several hundred milliseconds stopped being
+     * enough and this file failed roughly one run in five.
+     */
+    const settles = async (check: () => boolean, timeoutMs = 5000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (check()) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+
+    /**
      * A ghost `tmux attach` is not merely a leaked process: tmux sizes a window
      * across ALL its clients, so a browser that has gone away keeps squeezing the
      * pane for everyone still watching it. Closing the socket must reap the pty.
@@ -401,12 +419,10 @@ describe("web terminal", () => {
       expect(tmuxClients()).toBe(0);
 
       const ws = await wsConnect(SELF);
-      await new Promise((r) => setTimeout(r, 600));
-      expect(tmuxClients()).toBe(1);
+      expect(await settles(() => tmuxClients() === 1)).toBe(true);
 
       ws.close();
-      await new Promise((r) => setTimeout(r, 800));
-      expect(tmuxClients()).toBe(0);
+      expect(await settles(() => tmuxClients() === 0)).toBe(true);
     }, 15_000);
 
     /** Two tabs on one pane would be two tmux clients fighting over its width. */
@@ -415,11 +431,12 @@ describe("web terminal", () => {
       await startServer();
 
       const first = await wsConnect(SELF);
-      await new Promise((r) => setTimeout(r, 600));
-      expect(tmuxClients()).toBe(1);
+      expect(await settles(() => tmuxClients() === 1)).toBe(true);
 
       const second = await wsConnect(SELF); // a second tab
-      await new Promise((r) => setTimeout(r, 900));
+      expect(
+        await settles(() => first.readyState !== 1 && tmuxClients() === 1)
+      ).toBe(true);
       expect(tmuxClients()).toBe(1); // still one — the first was dropped
       expect(first.readyState).not.toBe(1); // ...and it was the first one
 
