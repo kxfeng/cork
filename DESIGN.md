@@ -616,6 +616,26 @@ While a task runs:
 - the Stop hook that normally forces a reply every turn **stands down**, so the
   chat is not buried; the cork-autopilot skill asks for reports at meaningful
   points instead
+- **a `PreCompact` hook steers the compaction itself.** Whatever the hook
+  prints on stdout is *appended* to claude's own summarisation prompt under
+  `Additional Instructions:` — nothing is replaced, so its own directions to
+  capture requests, decisions, code and corrections stay intact. Cork uses it
+  to state what only cork knows: where GOAL.md and PROJECT.md are, that the
+  acceptance conditions must survive verbatim along with which are met, and
+  that PROJECT.md has to be re-read before work continues. It fires on the
+  automatic path as well as on a typed `/compact`, and prints **nothing**
+  unless `AUTOPILOT.json` says the run is `starting` or `running` — so every
+  other session on the machine compacts exactly as it always did.
+
+  This replaced a heavier design: warn at a threshold, wait five minutes, then
+  type `/compact` before the automatic one could fire. That needed a timer, a
+  race against auto-compaction, a way to tell "the model has finished writing
+  PROJECT.md" from "it wrote the first of three parts", and a suspended stall
+  check for the three minutes a compaction takes. All of it to rescue the ten
+  or fifteen minutes of work that PROJECT.md typically lags by — and all of it
+  contingent on the model reading a message it may be an hour of tool calls
+  away from. The hook needs none of that and does not ask the model for
+  anything.
 
 **GOAL.md is the condition, whole.** Not a summary line with material behind
 it: the evaluator that judges the goal runs with `tools: []` and is told to

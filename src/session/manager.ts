@@ -1878,19 +1878,31 @@ export class SessionManager extends EventEmitter {
    * which merges it as an *additional* settings layer on top of the user's
    * own ~/.claude/settings.json and project settings (never replacing them).
    *
-   * It registers a single `Stop` hook: cork's stop-hook script, which
-   * detects turns where the model answered without going through the
-   * cork-channel reply tool and recovers them. The bundled script is
-   * resolved relative to this module so it works regardless of install
-   * location. Called once at daemon startup, like writeMcpConfig().
+   * Two hooks are registered:
+   *
+   * - `Stop` — detects turns where the model answered without going through
+   *   the cork-channel reply tool, and recovers them.
+   * - `PreCompact` — adds what a summariser cannot know about an autopilot
+   *   run (where GOAL.md and PROJECT.md are, and what must survive) to
+   *   claude's own summarisation prompt. Silent for every other session.
+   *
+   * Both scripts are resolved relative to this module, so they work
+   * regardless of install location. Called once at daemon startup, like
+   * writeMcpConfig().
    */
   writeClaudeSettings(): void {
-    const hookScript = path.join(__dirname, "../hooks/stop-hook.js");
+    const stopHook = path.join(__dirname, "../hooks/stop-hook.js");
+    const preCompactHook = path.join(__dirname, "../hooks/pre-compact-hook.js");
     const settings = {
       hooks: {
         Stop: [
           {
-            hooks: [{ type: "command", command: `node '${hookScript}'` }],
+            hooks: [{ type: "command", command: `node '${stopHook}'` }],
+          },
+        ],
+        PreCompact: [
+          {
+            hooks: [{ type: "command", command: `node '${preCompactHook}'` }],
           },
         ],
       },
