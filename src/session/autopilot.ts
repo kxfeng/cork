@@ -48,7 +48,7 @@ export type AutopilotStopReason =
   | "failed" // the evaluator says it cannot be met in this session
   | "user-stop" // /autopilot stop, or a /goal clear typed in the pane
   | "start-failed" // the /goal never registered
-  | "stop-failed" // /goal clear was typed twice and the goal is still live
+  | "stop-failed" // /goal clear did not take, and the goal is still live
   | "unreachable"; // the pane could not be brought back
 
 export interface AutopilotRecord {

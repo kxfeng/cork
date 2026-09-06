@@ -38,7 +38,6 @@ function makeWatcher(
   const injected: string[] = [];
   const notified: string[] = [];
   const calls = { restarts: 0, clears: 0 };
-  let clearWorks = true;
   let alive = true;
   let restartOk: boolean | undefined; // undefined ⇒ "came back iff the pane is up"
   let injectOk = true;
@@ -61,7 +60,6 @@ function makeWatcher(
     compactPercent: () => opts.compactPct ?? 75,
     clearGoal: () => {
       calls.clears++;
-      return clearWorks;
     },
   };
 
@@ -98,14 +96,17 @@ function makeWatcher(
     setInjectOk: (v: boolean) => {
       injectOk = v;
     },
-    setClearWorks: (v: boolean) => {
-      clearWorks = v;
-    },
     setRec: (patch: Partial<AutopilotRecord>) => {
       rec = { ...rec, ...patch } as AutopilotRecord;
     },
     // The tick is private; it is the whole periodic half of the rules.
-    tick: () => (w as unknown as { tick(): void }).tick(),
+    tick: async () => {
+      (w as unknown as { tick(): void }).tick();
+      // The `/goal clear` retry is the one thing a tick does asynchronously;
+      // let it settle before the assertions read the record.
+      await Promise.resolve();
+      await Promise.resolve();
+    },
   };
 }
 
@@ -513,18 +514,18 @@ describe("stopping: waiting for the goal to go away", () => {
     expect(t.notified.join()).toContain("stopped");
   });
 
-  it("types /goal clear a second time before giving up", () => {
+  it("types /goal clear a second time before giving up", async () => {
     // Unlike a failed start, a failed stop leaves something behind: a goal
     // that is still set, and a model still working toward it.
     const t = makeWatcher(stoppingRec(1_000_000));
 
     t.advance(C.PENDING_DEADLINE_MS + 1000);
-    t.tick();
+    await t.tick();
     expect(t.calls.clears).toBe(1);
     expect(t.rec.state).toBe("stopping"); // still waiting, on a fresh deadline
 
     t.advance(C.PENDING_DEADLINE_MS + 1000);
-    t.tick();
+    await t.tick();
     expect(t.calls.clears).toBe(1); // MAX_CLEAR_ATTEMPTS reached
     expect(t.rec.state).toBe("stopped");
     expect(t.rec.stopReason).toBe("stop-failed");

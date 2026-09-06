@@ -14,7 +14,10 @@ import {
   MAX_GOAL_CHARS,
   MAX_GOAL_LINE_CHARS,
   type GoalProblem,
+  type AutopilotRecord,
+  type AutopilotStopReason,
 } from "../session/autopilot.js";
+import { formatDuration } from "../session/transcript-watcher.js";
 import fs from "node:fs";
 
 export interface CommandResult {
@@ -313,6 +316,14 @@ async function handleAutopilot(
     stopReason: undefined,
     stopDetail: undefined,
   });
+
+  // Said before the model sees the message, because this branch takes anything
+  // it does not recognise — including a question that merely begins with
+  // `/ap `, which is how this session once started drafting a goal nobody had
+  // asked for. Both sides were content: cork wrote the record, the model
+  // answered the question, and the one person who could tell the two apart was
+  // the only one not told. Changing the record is worth a line.
+  await sendCmdReply(channel, message, "📝 Autopilot drafting.");
   return { handled: false };
 }
 
@@ -340,7 +351,10 @@ async function startAutopilot(
   if (problem) {
     // Refuse rather than send something truncated or mangled: a goal that is
     // wrong in a way nobody notices is worse than one that never started.
-    return `❌ ${goalProblemMessage(problem)}\n\nGOAL.md: \`${goalFilePath(key)}\``;
+    return (
+      `❌ Autopilot did not start.\n\n${goalProblemMessage(problem)}` +
+      `\n\nGOAL.md: \`${goalFilePath(key)}\``
+    );
   }
 
   // Only into an idle session. A command typed while the model is mid-turn is
@@ -357,7 +371,10 @@ async function startAutopilot(
         "than starting anything further.",
       "cork:autopilot"
     );
-    return "⏳ The model is busy right now. It has been asked to stop — try `/autopilot start` again in a moment.";
+    return (
+      "⏳ Autopilot did not start — the model is busy right now. It has been " +
+      "asked to stop; try `/autopilot start` again in a moment."
+    );
   }
 
   // The file, whole. What the evaluator reads after every turn and what the
@@ -367,7 +384,7 @@ async function startAutopilot(
   const sent = await sessionManager.sendSlashCommand(key, `/goal ${condition}`);
   if (!sent.ok) {
     stopAutopilot(key, "start-failed", sent.reason);
-    return `❌ Could not set the goal: ${sent.reason}`;
+    return `❌ Autopilot did not start — could not set the goal: ${sent.reason}`;
   }
 
   updateAutopilot(key, {
@@ -411,20 +428,23 @@ async function stopAutopilotRun(
     return "🛑 Autopilot is not running here.";
   }
 
+  // Typed, not waited on, and the record is written in the same breath.
+  //
+  // Whether it was submitted changes nothing here. A clear that never reached
+  // the input box is not the end of the stop: the reasons it does not get
+  // typed — a draft already in the box, a dialog, the history filter panel —
+  // are states the pane is in for a moment, and the watcher's retry interrupts
+  // before it types, which can be the thing that clears them. So both outcomes
+  // wait on the same confirmation, and reporting failure here only to succeed
+  // a minute later is worse than saying nothing.
+  //
+  // Waiting would also open a window there is no need to open. Typing can take
+  // a minute and a half, and the run can end inside it — the goal met, or
+  // cleared by hand — with the transcript side saying so and closing the run.
+  // Writing `stopping` after that would reopen a run that is already over.
+  // Written now, before anything can happen, there is no window at all.
   sessionManager.interruptPane(key);
-  const sent = await sessionManager.sendSlashCommand(key, "/goal clear");
-  if (!sent.ok) {
-    // Never typed, so there is nothing to wait for. The goal is still set and
-    // outlives the pane — claude restores it from the transcript on resume —
-    // so say what has to be done about it.
-    stopAutopilot(key, "stop-failed", sent.reason);
-    return (
-      `🛑 Stopped watching this run, but \`/goal clear\` could not be ` +
-      `typed: ${sent.reason}\n\nThe goal is still set — run \`/goal clear\` ` +
-      `in the pane, or try \`/autopilot stop\` again.`
-    );
-  }
-
+  void sessionManager.sendSlashCommand(key, "/goal clear").catch(() => {});
   updateAutopilot(key, {
     state: "stopping",
     pendingSince: Date.now(),
@@ -440,30 +460,36 @@ function autopilotStatus(key: string): string {
   // are the same thing to the user: nothing here. Saying "Autopilot: idle"
   // invites the question of which autopilot.
   if (rec.state === "idle") {
-    return "📋 No autopilot in this session. `/autopilot <what you want done>` starts one.";
+    return (
+      "📋 Autopilot is not running in this session. " +
+      "`/autopilot <what you want done>` starts one."
+    );
   }
 
+  // The state, the goal, and how long it has been going. Nothing else.
+  //
+  // What used to be here was cork talking about itself: nudges, compactions,
+  // goal checks, and a line under each transitional state saying what it was
+  // waiting for. None of it says how the task is doing, and the counters
+  // invite a judgement they cannot support — three nudges is a healthy paced
+  // task as often as it is a stuck one. The state already names what is
+  // happening, and the log has the rest.
   const lines = [`📋 **Autopilot**: ${rec.state}`];
 
-  if (rec.goal) lines.push(`**Goal:** ${preview(rec.goal)}`);
-  if (rec.startedAt) lines.push(`Started: ${rec.startedAt}`);
-  if (rec.state === "stopped") {
-    if (rec.stopReason) lines.push(`Ended: ${rec.stopReason}`);
+  if (rec.goal) lines.push(`Goal: ${preview(rec.goal)}`);
+  if (rec.startedAt) lines.push(`Started: ${startedLine(rec)}`);
+
+  // How it ended, for a run that has. `stopped` alone does not say whether the
+  // job got done, and that is the first thing anyone asks — the verdict was
+  // announced when it happened, but a chat scrolls and this is where someone
+  // comes to look it up. The reason is a word cork chose, so it is spelled out
+  // rather than shown as the enum it is stored as.
+  if (rec.state === "stopped" && rec.stopReason) {
+    lines.push(`Ended: ${ENDINGS[rec.stopReason] ?? rec.stopReason}`);
+    // Why, in the evaluator's own words, or the failure's. It runs to
+    // thousands of characters on a real verdict, so it is cut to a couple of
+    // lines; AUTOPILOT.json keeps all of it.
     if (rec.stopDetail) lines.push(`Why: ${preview(rec.stopDetail, 300)}`);
-  }
-  if (rec.state === "running") {
-    if (rec.nudgeCount) lines.push(`Nudges since last progress: ${rec.nudgeCount}`);
-    if (rec.compactCount) lines.push(`Compactions: ${rec.compactCount}`);
-    if (rec.driftChecks) lines.push(`Goal checks asked for: ${rec.driftChecks}`);
-  }
-  if (rec.state === "drafting") {
-    lines.push(`Waiting for GOAL.md — run \`/autopilot start\` when it is ready.`);
-  }
-  if (rec.state === "starting") {
-    lines.push("Waiting for the goal to register — cork reports as soon as it does.");
-  }
-  if (rec.state === "stopping") {
-    lines.push("Waiting for the goal to clear — cork reports as soon as it has.");
   }
   return lines.join("\n");
 }
@@ -475,6 +501,44 @@ function autopilotStatus(key: string): string {
  * the evaluator's reasoning came to 3300 characters on a real run. Quoting
  * either in full turns a status line into a wall.
  */
+/**
+ * How a run ended, in words rather than in cork's vocabulary.
+ *
+ * The stored value is an enum this file happens to define; "user-stop" and
+ * "unreachable" are precise to whoever wrote them and opaque to everyone else.
+ */
+const ENDINGS: Record<AutopilotStopReason, string> = {
+  met: "completed — the goal was met",
+  failed: "the goal was judged unachievable",
+  "user-stop": "stopped on request",
+  "start-failed": "never started",
+  "stop-failed": "the goal could not be cleared",
+  unreachable: "the session could not be brought back",
+};
+
+/** Minutes, in the zone the person reading this is in. */
+const STATUS_TZ_OFFSET_MIN = 8 * 60;
+const STATUS_TZ_LABEL = "UTC+8";
+
+/**
+ * When it started and how long that is, as one line.
+ *
+ * The record keeps UTC, which is right for a record and wrong for a person:
+ * the daemon's clock is not the one the reader is looking at. Shown in their
+ * zone and labelled, so it is never ambiguous which of the two a timestamp is.
+ * The elapsed time is usually the actual question, and for a run that has
+ * ended it is how long the whole thing took.
+ */
+function startedLine(rec: AutopilotRecord): string {
+  const started = Date.parse(rec.startedAt as string);
+  if (!Number.isFinite(started)) return rec.startedAt as string;
+  const local = new Date(started + STATUS_TZ_OFFSET_MIN * 60_000);
+  const stamp = `${local.toISOString().slice(0, 16).replace("T", " ")} (${STATUS_TZ_LABEL})`;
+  const ms = (rec.stoppedAt ? Date.parse(rec.stoppedAt) : Date.now()) - started;
+  if (!Number.isFinite(ms) || ms <= 0) return stamp;
+  return `${stamp} · ${formatDuration(ms)}${rec.stoppedAt ? "" : " ago"}`;
+}
+
 function preview(text: string, max = 200): string {
   const oneLine = text.replace(/\s*\n\s*/g, " · ");
   const chars = [...oneLine];

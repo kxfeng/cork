@@ -784,7 +784,7 @@ export class SessionManager extends EventEmitter {
         timing.startMs ?? SESSION_START_WAIT_MS
       );
       if (!started) {
-        return { ok: false, reason: "the session's pane could not be started" };
+        return { ok: false, reason: "the session's terminal could not be started" };
       }
     }
 
@@ -970,8 +970,10 @@ export class SessionManager extends EventEmitter {
         // Interrupt first, same as `/autopilot stop` does: the model is working
         // on the goal, and a command typed into a busy pane queues behind it.
         this.interruptPane(key);
-        void this.sendSlashCommand(key, "/goal clear");
-        return true;
+        // Not waited on, exactly as the command handler does not wait: the
+        // watcher records the attempt now, and the transcript is what says
+        // whether the goal actually went.
+        void this.sendSlashCommand(key, "/goal clear").catch(() => {});
       },
       contextWindow: () => this.config.claude.contextWindow ?? 0,
       compactPercent: () => this.config.claude.autoCompactPercent ?? DEFAULT_COMPACT_PERCENT,

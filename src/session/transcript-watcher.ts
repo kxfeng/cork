@@ -86,8 +86,21 @@ export const WATCHER_CONSTANTS = {
   RETRY_MESSAGE_TEXT,
 };
 
-/** How often the autopilot rules re-examine a quiet session. */
-const TICK_INTERVAL_MS = 30_000;
+/**
+ * How often the autopilot rules re-examine a quiet session.
+ *
+ * The interval is also the error on every deadline they enforce, because a
+ * deadline is only noticed at the next tick. At 30s the one-minute wait on a
+ * `/goal clear` landed anywhere between 60 and 90 seconds, and a stop that
+ * cannot be typed took up to three minutes to say so — half of that being
+ * nothing but the grain of this clock.
+ *
+ * 10s costs a `tmux ls` and a small read every ten seconds per running task,
+ * measured at 2.0ms and 1.1ms: six of each per minute, about 0.02% of one
+ * core. The waits it measures are 60s, 5/10/15min and an hour, so nothing
+ * here wants to be tighter than this either.
+ */
+const TICK_INTERVAL_MS = 10_000;
 
 /**
  * How long the transcript may go without a new row before cork pushes the model
@@ -196,13 +209,24 @@ function formatTokens(n: number): string {
   return n >= 1_000_000 ? `${Math.round(n / 100_000) / 10}M` : `${Math.round(n / 1000)}K`;
 }
 
-/** "5m19s", "2h04m" — a duration a person can read at a glance. */
-function formatDuration(ms: number): string {
+/**
+ * "45s", "5min19s", "1h3min" — a duration a person can read at a glance.
+ *
+ * No zero padding: these are read, not lined up in a column, and "1h03min"
+ * invites being read as a clock time.
+ */
+export function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+  if (m < 60) return s % 60 ? `${m}min${s % 60}s` : `${m}min`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h}h${m % 60}min` : `${h}h`;
+}
+
+/** "1 restart", "3 restarts" — a count with a noun that agrees with it. */
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
 }
 
 /**
@@ -275,10 +299,16 @@ export interface AutopilotHooks {
    */
   contextWindow(): number;
   /**
-   * Type `/goal clear` into the pane again. False if it could not be typed at
-   * all, which ends the retry rather than repeating it.
+   * Type `/goal clear` into the terminal again.
+   *
+   * Not waited on, and nothing is reported back. Typing takes up to a minute
+   * and a half — waiting for a quiet pane, then up to three attempts at the
+   * input box — and the caller records the attempt before any of it happens,
+   * so there is no window in which two retries could overlap or a finished
+   * run could be reopened. What the command did is not knowable from here
+   * anyway: it is the transcript that says whether the goal went.
    */
-  clearGoal(): boolean;
+  clearGoal(): void;
   /**
    * The percentage cork asks claude to compact at
    * (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE). The state-down warning is sent a few
@@ -759,8 +789,8 @@ export class TranscriptWatcher {
     const ms = this.now() - Date.parse(rec.startedAt);
     const parts: string[] = [];
     if (Number.isFinite(ms) && ms > 0) parts.push(formatDuration(ms));
-    if (rec.compactCount) parts.push(`${rec.compactCount} compactions`);
-    if (rec.restartCount) parts.push(`${rec.restartCount} restarts`);
+    if (rec.compactCount) parts.push(plural(rec.compactCount, "compaction"));
+    if (rec.restartCount) parts.push(plural(rec.restartCount, "restart"));
     return parts.length ? ` (${parts.join(", ")})` : "";
   }
 
@@ -820,7 +850,7 @@ export class TranscriptWatcher {
           this.say(
             wasStopping
               ? `🛑 Autopilot stopped.${this.runSummary()}`
-              : "🛑 Goal cleared in the pane — autopilot stopped."
+              : "🛑 Autopilot stopped — the goal was cleared in the terminal."
           );
           break;
         case "met":
@@ -996,16 +1026,28 @@ export class TranscriptWatcher {
     // stopping
     const attempts = rec.clearAttempts ?? 1;
     this.log.warn("goal still set after /goal clear", { attempts });
-    if (attempts < MAX_CLEAR_ATTEMPTS && hooks.clearGoal()) {
+
+    // One more try, if there is one left. The usual reason a clear does not
+    // get typed — a draft in the box, a dialog, the history filter panel — is
+    // a state the pane is IN rather than one it is stuck in, and `clearGoal`
+    // interrupts before it types, which by itself can be what unsticks it. So
+    // a first attempt that never reached the input box is not the end of it.
+    if (attempts < MAX_CLEAR_ATTEMPTS) {
+      hooks.clearGoal();
       this.updateRec({ pendingSince: this.now(), clearAttempts: attempts + 1 });
       this.log.info("retrying /goal clear", { attempt: attempts + 1 });
       return;
     }
+
+    // One message for both endings. Whether the command never reached the
+    // input box or reached it and changed nothing, what is true afterwards is
+    // the same — the goal is set and only the user can end it — and that is
+    // the whole of what they need.
     this.stopRec("stop-failed", "the goal was still set after /goal clear");
     this.say(
-      `🛑 Stopped watching this run, but the goal is still set after ` +
-        `${attempts} attempts to clear it. The model may still be working ` +
-        `toward it — run \`/goal clear\` in the pane, or \`/autopilot stop\` again.`
+      "⚠️ Autopilot gave up stopping — `/goal clear` did not go through. The " +
+        "goal is still set and the model may still be working toward it. Run " +
+        "`/goal clear` in the terminal to end it."
     );
   }
 
@@ -1120,8 +1162,8 @@ export class TranscriptWatcher {
     if (this.unansweredNudges >= STUCK_AFTER_NUDGES && !rec.stuckWarned) {
       this.updateRec({ stuckWarned: true });
       this.say(
-        `⏳ ${this.unansweredNudges} nudges with no response at all — this run ` +
-          `has written nothing since. Check the pane.`
+        `⏳ Autopilot has had no response through ${this.unansweredNudges} ` +
+          `nudges — nothing has been written since. Check the terminal.`
       );
     }
   }

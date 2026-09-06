@@ -106,7 +106,30 @@ describe("/autopilot <description>", () => {
 
     expect(result.handled).toBe(false); // → dispatched to the model
     expect(loadAutopilot(KEY).state).toBe("drafting");
-    expect(sent).toHaveLength(0);
+    // The message reaches the model unchanged; the record changing is what
+    // gets announced.
+    expect(msg.text).toBe("/autopilot refactor the session store");
+    expect(lastReply()).toBe("📝 Autopilot drafting.");
+  });
+
+  it("tells the chat that the record changed, before the model sees it", async () => {
+    // This branch takes anything it does not recognise, including a question
+    // that merely begins with `/ap ` — which is how a session once started
+    // drafting a goal nobody asked for. Cork wrote the record, the model
+    // answered the question, and the one person who could tell the two apart
+    // was the only one not told.
+    const { handleCommand, loadAutopilot } = await load();
+
+    const result = await handleCommand(
+      channel,
+      message("/ap status这种命令如果 claude 进程未启动，会拉起吗？"),
+      sessionManager
+    );
+
+    expect(result.handled).toBe(false); // still answered as a question
+    expect(loadAutopilot(KEY).state).toBe("drafting");
+    expect(sent).toHaveLength(1);
+    expect(lastReply()).toBe("📝 Autopilot drafting.");
   });
 
   it("starts the conversation when there is no description at all", async () => {
@@ -119,7 +142,7 @@ describe("/autopilot <description>", () => {
 
     expect(result.handled).toBe(false); // → dispatched to the model
     expect(loadAutopilot(KEY).state).toBe("drafting");
-    expect(sent).toHaveLength(0);
+    expect(lastReply()).toBe("📝 Autopilot drafting.");
   });
 
   it("takes `/ap` for the same command", async () => {
@@ -272,7 +295,7 @@ describe("/autopilot start", () => {
     const rec = loadAutopilot(KEY);
     expect(rec.state).toBe("stopped");
     expect(rec.stopReason).toBe("start-failed");
-    expect(lastReply()).toContain("Could not set the goal");
+    expect(lastReply()).toContain("could not set the goal");
   });
 
   it("refuses to draft a new task over a live one", async () => {
@@ -320,18 +343,22 @@ describe("/autopilot stop", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("says so when /goal clear could not even be typed", async () => {
-    // Nothing to wait for in that case, and the goal outlives the pane —
-    // claude restores it from the transcript — so it has to be dealt with.
+  it("leaves a clear that could not be typed to the watcher's retry", async () => {
+    // The reasons a clear does not reach the input box — a draft in it, a
+    // dialog, the history filter panel — are states the pane is in for a
+    // moment, and the retry interrupts before it types. Reporting failure here
+    // and succeeding a minute later is worse than saying nothing, so both
+    // outcomes wait on the same confirmation.
     const { handleCommand, saveAutopilot, loadAutopilot } = await load();
     saveAutopilot(KEY, { state: "running", goal: "do the thing" });
-    slashResult = { ok: false, reason: "the session's pane could not be started" };
+    slashResult = { ok: false, reason: "the session's terminal could not be started" };
 
     await handleCommand(channel, message("/autopilot stop"), sessionManager);
 
-    expect(loadAutopilot(KEY).state).toBe("stopped");
-    expect(lastReply()).toContain("still set");
-    expect(lastReply()).toContain("/goal clear");
+    const rec = loadAutopilot(KEY);
+    expect(rec.state).toBe("stopping");
+    expect(rec.clearAttempts).toBe(1);
+    expect(sent).toHaveLength(0); // the watcher does the talking
   });
 
   it("says nothing is running when nothing is", async () => {
@@ -352,18 +379,16 @@ describe("/autopilot status", () => {
     const { handleCommand, autopilotPath } = await load();
     await handleCommand(channel, message("/autopilot status"), sessionManager);
 
-    expect(lastReply()).toContain("No autopilot");
+    expect(lastReply()).toContain("Autopilot is not running in this session");
     expect(fs.existsSync(autopilotPath(KEY))).toBe(false);
   });
 
-  it("reports a running one with its goal and counters", async () => {
+  it("reports a running one with its goal and how long it has been going", async () => {
     const { handleCommand, saveAutopilot } = await load();
     saveAutopilot(KEY, {
       state: "running",
       goal: "ship it",
       startedAt: "2026-01-01T00:00:00.000Z",
-      nudgeCount: 2,
-      compactCount: 1,
     });
 
     await handleCommand(channel, message("/autopilot status"), sessionManager);
@@ -371,22 +396,88 @@ describe("/autopilot status", () => {
     const r = lastReply();
     expect(r).toContain("running");
     expect(r).toContain("ship it");
-    expect(r).toContain("Nudges");
-    expect(r).toContain("Compactions");
+    // The record keeps UTC; the reader is not in it.
+    expect(r).toContain("2026-01-01 08:00 (UTC+8)");
+    expect(r).toContain("ago");
   });
 
-  it("reports why a finished one ended", async () => {
+  it("keeps cork's own bookkeeping out of it", async () => {
+    // Nudges, compactions and goal checks say what the harness did, not how
+    // the task is doing, and they invite a judgement they cannot support —
+    // three nudges is a healthy paced task as often as a stuck one.
+    const { handleCommand, saveAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "running",
+      goal: "ship it",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      nudgeCount: 2,
+      compactCount: 1,
+      driftChecks: 3,
+    });
+
+    await handleCommand(channel, message("/autopilot status"), sessionManager);
+
+    const r = lastReply();
+    expect(r).not.toContain("Nudges");
+    expect(r).not.toContain("Compactions");
+    expect(r).not.toContain("checks");
+  });
+
+  it("times a finished one from end to end, not up to now", async () => {
     const { handleCommand, saveAutopilot } = await load();
     saveAutopilot(KEY, {
       state: "stopped",
+      goal: "ship it",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      stoppedAt: "2026-01-01T01:03:00.000Z",
       stopReason: "failed",
       stopDetail: "the API does not exist",
     });
 
     await handleCommand(channel, message("/autopilot status"), sessionManager);
 
-    expect(lastReply()).toContain("failed");
-    expect(lastReply()).toContain("the API does not exist");
+    const r = lastReply();
+    expect(r).toContain("1h3min");
+    expect(r).not.toContain("ago");
+  });
+
+  it("says how a finished run ended, and why", async () => {
+    // "stopped" alone does not say whether the job got done, which is the
+    // first thing anyone asks. The verdict was announced when it happened, but
+    // a chat scrolls and this is where someone comes to look it up.
+    const { handleCommand, saveAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "stopped",
+      goal: "ship it",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      stoppedAt: "2026-01-01T01:03:00.000Z",
+      stopReason: "failed",
+      stopDetail: "the API does not exist",
+    });
+
+    await handleCommand(channel, message("/autopilot status"), sessionManager);
+
+    const r = lastReply();
+    // Spelled out, not the enum it is stored as.
+    expect(r).toContain("judged unachievable");
+    expect(r).not.toMatch(/Ended: failed/);
+    expect(r).toContain("the API does not exist");
+  });
+
+  it("does not claim an ending for a run that is still going", async () => {
+    const { handleCommand, saveAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "running",
+      goal: "ship it",
+      startedAt: "2026-01-01T00:00:00.000Z",
+      // left over from a previous run that ended
+      stopReason: "met",
+      stopDetail: "done",
+    });
+
+    await handleCommand(channel, message("/autopilot status"), sessionManager);
+
+    expect(lastReply()).not.toContain("Ended:");
   });
 });
 
