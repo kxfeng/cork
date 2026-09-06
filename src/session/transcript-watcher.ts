@@ -98,6 +98,23 @@ const TICK_INTERVAL_MS = 30_000;
 const NUDGE_DELAYS_MS = [5, 10, 15].map((m) => m * 60_000);
 
 /**
+ * How long a run must go without needing a nudge before the backoff starts
+ * over at five minutes.
+ *
+ * Without it the count only ever climbs: a task that stalled three times in
+ * its first hour would still be on the fifteen-minute delay six healthy hours
+ * later, when it finally stalls for real. With it, a spell of stalling and the
+ * one that follows an hour of good work are treated as what they are — two
+ * different events.
+ *
+ * Distinct from BACKOFF_RESET_WINDOW_MS above, which does the same job for the
+ * mid-stream retry on a different scale (5 minutes against an error that
+ * repeats in seconds, half an hour against a stall measured in tens of
+ * minutes).
+ */
+const NUDGE_BACKOFF_RESET_MS = 30 * 60_000;
+
+/**
  * Same idea for bringing a dead pane back: a session that crashes on startup
  * would otherwise be restarted every tick, burning quota on a loop that cannot
  * succeed. After MAX_RESTART_ATTEMPTS the task stops and says so.
@@ -222,6 +239,7 @@ export const AUTOPILOT_CONSTANTS = {
   RESTART_DELAYS_MS,
   MAX_RESTART_ATTEMPTS,
   STUCK_AFTER_NUDGES,
+  NUDGE_BACKOFF_RESET_MS,
   DRIFT_CHECK_INTERVAL_MS,
   NUDGE_TEXT,
   DRIFT_TEXT,
@@ -354,6 +372,19 @@ export class TranscriptWatcher {
   private lastNudgeAt = 0;
   /** When the goal was last checked — by the evaluator, or by cork asking. */
   private lastGoalCheckAt = 0;
+  /**
+   * `lastRowAt` as it stood when cork last nudged, and how many nudges in a row
+   * have produced no row at all since.
+   *
+   * Separate from `nudgeCount`, which counts pushes and paces the backoff. This
+   * counts silence in answer to them, which is a different question and the
+   * only one worth telling the user about: a run that wakes, writes a line and
+   * stops again is working (a paced task does exactly that), while one that
+   * does not write anything through several nudges has probably stopped for
+   * good.
+   */
+  private lastRowAtNudge = 0;
+  private unansweredNudges = 0;
   private lastRestartAt = 0;
   /** The "compaction is coming" message is sent once per compaction cycle. */
   private contextWarned = false;
@@ -574,9 +605,6 @@ export class TranscriptWatcher {
     if (ok) {
       this.lastRetryAt = this.now();
       this.log.info("auto-retry sent");
-      // Worth saying out loud: from the chat an API error looks like the model
-      // going quiet, and without this the recovery is invisible.
-      this.say("🔁 The session was interrupted by an API error — cork asked it to continue.");
     } else {
       this.log.warn("auto-retry skipped — session not connected");
       // Reset so the next opportunity starts fresh.
@@ -694,6 +722,8 @@ export class TranscriptWatcher {
     // whether the evaluator ran while it was away, and a full hour of grace is
     // better than opening with an interruption.
     this.lastGoalCheckAt = this.now();
+    this.lastRowAtNudge = 0;
+    this.unansweredNudges = 0;
     this.lastRowAt = this.now(); // a fresh run gets a full stall window
     this.log.info("watching a new autopilot run", { startedAt: rec.startedAt });
   }
@@ -822,9 +852,12 @@ export class TranscriptWatcher {
           );
           break;
         case "progress":
-          // A turn ended without meeting the goal: the model is working.
-          this.updateRec({ nudgeCount: 0, stuckWarned: false });
-          this.lastNudgeAt = 0;
+          // A turn ended without meeting the goal: the model is working, and
+          // that is all this row says. It does not reset the nudge backoff —
+          // only time does (see checkStall). Resetting here would put the
+          // backoff back at the mercy of whether the model happens to stop
+          // where the evaluator can see it, which on a paced task is roughly
+          // never: one session showed 43 stop events and a single verdict.
           break;
       }
       return;
@@ -842,13 +875,6 @@ export class TranscriptWatcher {
           "Run `/autopilot start` again."
       );
       return;
-    }
-
-    // Anything the session wrote is progress: the model is alive and working,
-    // so the next stall starts from the shortest delay again.
-    if ((this.rec()?.nudgeCount ?? 0) > 0) {
-      this.updateRec({ nudgeCount: 0, stuckWarned: false });
-      this.lastNudgeAt = 0;
     }
 
     if (isCompactBoundary(row)) {
@@ -890,14 +916,7 @@ export class TranscriptWatcher {
       warnPct,
       model: this.lastModel,
     });
-    if (!this.inject(CONTEXT_TEXT, WATCHER_SENDER_ID)) return;
-    // Said once per window. A compaction is the one event that can lose work
-    // in an autopilot run, so the chat gets to see cork acting before it happens
-    // rather than only the summary afterwards.
-    this.say(
-      `🧠 Context is at ${usedPct}% of ${formatTokens(window)} — cork asked the ` +
-        `model to bring PROJECT.md up to date before the session is compacted.`
-    );
+    this.inject(CONTEXT_TEXT, WATCHER_SENDER_ID);
   }
 
   /**
@@ -1011,7 +1030,6 @@ export class TranscriptWatcher {
     const ok = hooks.restart();
     this.log.info("restarting dead pane", { attempt: attempts + 1, ok });
     if (ok) {
-      this.say("♻️ The session's pane had died — cork restarted it and the task continues.");
       // Give it a full stall window to come up before anyone nudges it.
       this.lastRowAt = this.now();
       this.updateRec({ restartCount: 0 });
@@ -1037,21 +1055,37 @@ export class TranscriptWatcher {
     this.lastGoalCheckAt = this.now();
     const count = (rec.driftChecks ?? 0) + 1;
     this.updateRec({ driftChecks: count });
-    this.log.info("asked the model to check itself against the goal", { check: count });
-    this.say(
-      `🧭 ${formatDuration(since)} without a goal check — cork asked the model to ` +
-        `re-read GOAL.md and compare its work against it.`
-    );
+    this.log.info("asked the model to check itself against the goal", {
+      check: count,
+      since: formatDuration(since),
+    });
   }
 
   private checkStall(rec: AutopilotRecord): void {
     const hooks = this.hooks;
     if (!hooks) return;
 
-    const nudges = rec.nudgeCount ?? 0;
+    // Two clocks decide this, and nothing else: how long the transcript has
+    // been silent, and how long ago cork last pushed. Deliberately NOT "did
+    // the model do anything worthwhile" — that judgement cannot be made from
+    // rows, and trying to make it was what broke the backoff before. A model
+    // that wakes on every nudge, writes one line and stops again is the normal
+    // shape of a paced task, not evidence that pushing is working.
+    const quiet = this.now() - this.lastRowAt;
+    const sinceNudge = this.lastNudgeAt ? this.now() - this.lastNudgeAt : Infinity;
+
+    let nudges = rec.nudgeCount ?? 0;
+    if (nudges > 0 && sinceNudge > NUDGE_BACKOFF_RESET_MS) {
+      nudges = 0;
+      this.updateRec({ nudgeCount: 0, stuckWarned: false });
+    }
+
     const wait = NUDGE_DELAYS_MS[Math.min(nudges, NUDGE_DELAYS_MS.length - 1)];
-    const since = this.now() - Math.max(this.lastRowAt, this.lastNudgeAt);
-    if (since < wait) return;
+    // Both, not either: the silence has to be long enough AND the last push has
+    // to be far enough back. The second is what makes the intervals read as
+    // 5 / 10 / 15 from the outside instead of "five minutes after it last
+    // twitched".
+    if (quiet < wait || sinceNudge < wait) return;
 
     const sent = this.inject(NUDGE_TEXT, WATCHER_SENDER_ID);
     if (!sent) {
@@ -1063,19 +1097,33 @@ export class TranscriptWatcher {
 
     this.lastNudgeAt = this.now();
     const count = nudges + 1;
-    this.updateRec({ nudgeCount: count, lastNudgeAt: new Date().toISOString() });
-    this.log.info("nudged a stalled run", { nudge: count });
 
-    // Every nudge is reported: a silent task and a task being pushed back into
-    // motion look identical from the chat, and the difference is the whole
-    // point of leaving one running unattended. They are 5 minutes apart at the
-    // closest, and slow to 15, so this does not become noise.
-    const stuck = count >= STUCK_AFTER_NUDGES;
-    if (stuck && !rec.stuckWarned) this.updateRec({ stuckWarned: true });
-    this.say(
-      `👋 Nothing written for a while — cork nudged the model to keep going (nudge ${count}).` +
-        (stuck ? " Still nothing after several nudges; check the pane if this looks wrong." : "")
-    );
+    // Did the previous nudge get anything at all? Any new row since it was
+    // sent counts — one line is enough. This is the only measure of "stuck"
+    // that survives the paced-task case, where the model reliably wakes, does
+    // a little and stops again, and where counting pushes would report a
+    // healthy run as dead.
+    if (this.lastRowAt > this.lastRowAtNudge) this.unansweredNudges = 0;
+    else this.unansweredNudges++;
+    this.lastRowAtNudge = this.lastRowAt;
+
+    this.updateRec({ nudgeCount: count, lastNudgeAt: new Date().toISOString() });
+    this.log.info("nudged a stalled run", {
+      nudge: count,
+      unanswered: this.unansweredNudges,
+    });
+
+    // Nudging is routine maintenance and stays in the log. A run that answers
+    // none of them is not routine, and it is said once — repeating it every
+    // fifteen minutes would train the user to ignore the one message here that
+    // asks for their attention.
+    if (this.unansweredNudges >= STUCK_AFTER_NUDGES && !rec.stuckWarned) {
+      this.updateRec({ stuckWarned: true });
+      this.say(
+        `⏳ ${this.unansweredNudges} nudges with no response at all — this run ` +
+          `has written nothing since. Check the pane.`
+      );
+    }
   }
 
   private cancelPendingRetry(reason: string): void {

@@ -585,7 +585,24 @@ While a task runs:
 - the transcript watcher's mid-stream retry is **off** — the stall check below
   subsumes it, and both would inject a "keep going" message
 - nothing written for 5 / 10 / 15 minutes → the model is nudged; three nudges
-  → the user is told once
+  that produce **no rows at all** → the user is told once. The backoff runs on two clocks and nothing else:
+  how long the transcript has been silent, and how long ago cork last pushed.
+  Both have to clear the current delay, which is what makes the intervals read
+  as 5 / 10 / 15 from the chat rather than "five minutes after it last
+  twitched". It deliberately does not ask whether the model did anything
+  worthwhile in between — a task that paces itself wakes on every nudge,
+  writes one line and stops again, and judging that as progress reset the
+  count every time: a live session showed four nudges, all of them "nudge 1",
+  six minutes apart, for hours. The count returns to zero only after 30
+  minutes with no nudge needed, so two stalls an hour apart are two events
+  rather than one that kept getting worse. Nudging itself is silent — routine
+  maintenance belongs in the log, not in the chat several times an hour — and
+  so is everything else cork does to keep a run alive: the mid-stream retry, a
+  restarted pane, the context warning, the hourly goal check. The one thing
+  said out loud is a run that answers **none** of its nudges, measured by
+  whether any row appeared since the last one rather than by how many have been
+  sent. A paced task wakes on every nudge, writes a line and stops again — that
+  is working, and counting pushes would have reported it as dead on the third
 - an hour with the goal unchecked → the model is asked to re-read GOAL.md and
   compare its own work against it, writing the check into PROJECT.md. This is
   the only rule that looks at **direction** rather than liveness: the evaluator

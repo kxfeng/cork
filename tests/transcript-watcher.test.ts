@@ -263,20 +263,19 @@ describe("TranscriptWatcher retry scheduling", () => {
     expect(injectCalls[0].senderId).toBe(WATCHER_SENDER_ID);
   });
 
-  it("tells the chat when it has restarted an interrupted answer", () => {
-    // From the chat an API error looks like the model going quiet. Cork
-    // recovering from it is worth a line — that is the harness working.
+  it("restarts an interrupted answer without telling the chat", () => {
+    // The recovery is in the log. From the chat this is indistinguishable from
+    // the model taking a moment, and saying so every time is noise.
     const w = makeWatcher();
     w.ingest(
       `${larkUserRow("ou_user", "do something")}\n` +
         `${midStreamErrorRow()}\n` +
         `${turnDurationRow()}\n`
     );
-    expect(notices).toHaveLength(0);
 
     advance(BACKOFF_START_MS);
-    expect(notices).toHaveLength(1);
-    expect(notices[0]).toContain("API error");
+    expect(injectCalls).toHaveLength(1);
+    expect(notices).toHaveLength(0);
   });
 
   it("says nothing when the retry could not be delivered", () => {

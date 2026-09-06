@@ -297,12 +297,16 @@ describe("goal lifecycle", () => {
     expect(t.rec.stuckWarned).toBe(false);
   });
 
-  it("treats a not-yet verdict as progress", () => {
+  it("keeps running on a not-yet verdict, and leaves the nudge backoff alone", () => {
+    // The verdict says the model is working; it says nothing about whether
+    // pushing it has been helping. The backoff is on a clock of its own —
+    // and on a paced task the evaluator almost never runs anyway (43 stop
+    // events, one verdict, in a real session).
     const t = makeWatcher({ state: "running", nudgeCount: 2 });
     t.w.ingest(goalRow({ met: false, reason: "still going" }));
 
     expect(t.rec.state).toBe("running");
-    expect(t.rec.nudgeCount).toBe(0);
+    expect(t.rec.nudgeCount).toBe(2);
   });
 });
 
@@ -334,19 +338,16 @@ describe("compaction", () => {
     expect(t.injected).toEqual([C.CONTEXT_TEXT, C.COMPACT_TEXT, C.CONTEXT_TEXT]);
   });
 
-  it("tells the chat each time it asks for PROJECT.md to be brought up to date", () => {
-    // A compaction is the one event that can lose work in an autopilot run, so the
-    // user sees cork acting before it rather than only the summary after.
+  it("asks for PROJECT.md without telling the chat about it", () => {
+    // Routine maintenance: the user can do nothing with "cork reminded the
+    // model to save its notes", and on a long run it would arrive every window.
     const t = makeWatcher();
     const usage = (n: number) =>
       row({ type: "assistant", message: { usage: { input_tokens: n } } });
 
     t.w.ingest(usage(145_000)); // past 70% of 200K
-    expect(t.notified).toHaveLength(1);
-    expect(t.notified[0]).toContain("73% of 200K");
-
-    t.w.ingest(usage(150_000)); // already said
-    expect(t.notified).toHaveLength(1);
+    expect(t.injected).toEqual([C.CONTEXT_TEXT]);
+    expect(t.notified).toHaveLength(0);
   });
 
   it("measures against the window of the model actually in use", () => {
@@ -563,18 +564,67 @@ describe("stalls", () => {
     expect(t.injected).toHaveLength(2);
   });
 
-  it("resets to the first delay as soon as the model writes something", () => {
+  it("does not restart the backoff just because the nudge woke it up", () => {
+    // The failure this replaces, seen in a live session: four nudges, all of
+    // them "nudge 1", five to six minutes apart, for hours. Each one woke the
+    // model, it wrote a line and stopped again, and that line reset the count.
+    // A model that answers every nudge with one line is exactly the case the
+    // backoff exists for.
     const t = makeWatcher();
     t.advance(C.NUDGE_DELAYS_MS[0] + 1000);
     t.tick();
     expect(t.rec.nudgeCount).toBe(1);
 
+    // Woken, writes something, stops again.
     t.w.ingest(row({ type: "assistant", message: { content: [] } }));
-    expect(t.rec.nudgeCount).toBe(0);
+    expect(t.rec.nudgeCount).toBe(1);
 
+    // Silent for another five minutes — but the second delay is ten.
     t.advance(C.NUDGE_DELAYS_MS[0] + 1000);
     t.tick();
-    expect(t.injected).toHaveLength(2); // nudged again on the short delay
+    expect(t.injected).toHaveLength(1);
+
+    // Ten minutes since the last nudge, and ten minutes of silence.
+    t.advance(C.NUDGE_DELAYS_MS[1] - C.NUDGE_DELAYS_MS[0]);
+    t.tick();
+    expect(t.injected).toHaveLength(2);
+    expect(t.rec.nudgeCount).toBe(2);
+  });
+
+  it("holds the intervals at 5 / 10 / 15 through a run of stalls", () => {
+    // What the intervals look like from the chat, which is where the old
+    // behaviour was noticed: four "nudge 1" messages six minutes apart.
+    const t = makeWatcher();
+    const at: number[] = [];
+    let clock = 0;
+
+    // Step half a minute at a time, the way the real tick does, for an hour.
+    for (let i = 0; i < 120; i++) {
+      t.advance(30_000);
+      clock += 30_000;
+      const before = t.injected.length;
+      t.tick();
+      if (t.injected.length > before) at.push(clock);
+    }
+
+    const gaps = at.map((v, i) => (i === 0 ? v : v - at[i - 1]));
+    expect(gaps[0]).toBe(C.NUDGE_DELAYS_MS[0]);
+    expect(gaps[1]).toBe(C.NUDGE_DELAYS_MS[1]);
+    expect(gaps[2]).toBe(C.NUDGE_DELAYS_MS[2]);
+    expect(gaps[3]).toBe(C.NUDGE_DELAYS_MS[2]); // and stays there
+  });
+
+  it("starts over after a long spell of needing no nudge at all", () => {
+    // Two stalls an hour apart are two events, not one that got worse. Without
+    // this, a task that stalled three times early would still be on the
+    // fifteen-minute delay when it finally stalls for real hours later.
+    const t = makeWatcher({ state: "running", nudgeCount: 3 });
+
+    t.advance(C.NUDGE_BACKOFF_RESET_MS + 60_000);
+    t.tick();
+
+    expect(t.rec.nudgeCount).toBe(1); // reset to 0, then this nudge
+    expect(t.rec.stuckWarned).toBe(false);
   });
 
   it("asks the model to check itself against the goal every hour", () => {
@@ -592,7 +642,7 @@ describe("stalls", () => {
     t.tick();
     expect(t.injected.filter((x) => x === C.DRIFT_TEXT)).toHaveLength(1);
     expect(t.rec.driftChecks).toBe(1);
-    expect(t.notified.join()).toContain("goal check");
+    expect(t.notified).toHaveLength(0); // logged, not announced
 
     // Not again until another hour has passed.
     t.advance(C.DRIFT_CHECK_INTERVAL_MS - 1000);
@@ -635,24 +685,41 @@ describe("stalls", () => {
     expect(t.rec.driftChecks).toBe(1);
   });
 
-  it("reports every nudge, and says so plainly once it looks stuck", () => {
-    // A silent task and a task cork is pushing back into motion look identical
-    // from the chat. Telling the user each time is the point of leaving one
-    // running unattended — and they are 5 to 15 minutes apart, not a stream.
+  it("says nothing about a run that answers every nudge, however many there are", () => {
+    // The case that made the old wording wrong: woken, writes a line, stops
+    // again — over and over. That is a paced task working, not a dead one, and
+    // counting pushes would have reported it as stuck on the third.
     const t = makeWatcher();
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 6; i++) {
+      t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
+      t.tick();
+      t.w.ingest(row({ type: "assistant", message: { content: [] } })); // it answers
+    }
+
+    expect(t.injected.filter((x) => x === C.NUDGE_TEXT).length).toBeGreaterThan(
+      C.STUCK_AFTER_NUDGES
+    );
+    expect(t.notified.filter((x) => x.includes("nudges"))).toHaveLength(0);
+    expect(t.rec.stuckWarned).toBeFalsy(); // never set
+  });
+
+  it("nudges quietly, and speaks up once only when it looks stuck", () => {
+    // Nothing answers any of these nudges — no rows at all between them —
+    // which is the one shape that means the run has probably stopped for good.
+    // Said exactly once.
+    const t = makeWatcher();
+    for (let i = 0; i < 6; i++) {
       t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
       t.tick();
     }
-    // Filtered rather than indexed: 80 minutes of stall also crosses the
-    // hourly goal check, which speaks for itself in the same chat.
+
+    // Filtered: 96 minutes of stalling also crosses the hourly goal check,
+    // which speaks for itself.
     const nudges = t.injected.filter((x) => x === C.NUDGE_TEXT);
-    const said = t.notified.filter((x) => x.includes("nudged"));
-    expect(nudges.length).toBeGreaterThanOrEqual(C.STUCK_AFTER_NUDGES);
-    expect(said).toHaveLength(nudges.length);
-    expect(said[0]).toContain("nudge 1");
-    expect(said[0]).not.toContain("check the pane");
-    expect(said[C.STUCK_AFTER_NUDGES - 1]).toContain("check the pane");
+    const said = t.notified.filter((x) => x.includes("nudges"));
+    expect(nudges.length).toBeGreaterThan(C.STUCK_AFTER_NUDGES);
+    expect(said).toHaveLength(1);
+    expect(t.rec.stuckWarned).toBe(true);
   });
 
   it("does not burn a nudge when the session is not reachable yet", () => {
@@ -704,15 +771,15 @@ describe("a pane that went away", () => {
     expect(t.calls.restarts).toBe(3);
   });
 
-  it("tells the chat when it has brought a dead pane back", () => {
-    // The same reason the nudges are reported: from the chat, a pane that
-    // died and one that is quiet look the same.
+  it("brings a dead pane back without announcing it", () => {
+    // Only the ending is worth the user's attention: if cork runs out of
+    // attempts the run stops and says so. A restart that worked is bookkeeping.
     const t = makeWatcher();
     t.setAlive(false);
     t.setRestartOk(true);
     t.tick();
     expect(t.calls.restarts).toBe(1);
-    expect(t.notified.join()).toContain("restarted it");
+    expect(t.notified).toHaveLength(0);
   });
 
   it("gives a restarted session a full window before nudging it", () => {
