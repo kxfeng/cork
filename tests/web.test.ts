@@ -22,7 +22,17 @@ import WebSocket from "ws";
 // An opaque session id, the way the store names one. The chat it serves is
 // stated in the meta below, not in the id.
 const KEY = "web-test-session";
-const LABEL = "corktest-web";
+/**
+ * A fresh tmux server per test, for the same reason each gets a fresh port.
+ *
+ * `kill-server` in afterEach returns before the server is gone, so the next
+ * test's `new-session` could reach a server on its way out and fail with
+ * "server exited unexpectedly" — which surfaced as whichever test happened to
+ * run next, and read as a bug in the code under test. A label nothing else has
+ * used has no such server to race with.
+ */
+let labelSeq = 0;
+let LABEL = "corktest-web-0";
 
 /**
  * A fresh port per server, rather than one port rebound by every test.
@@ -127,6 +137,7 @@ describe("web terminal", () => {
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-web-test-"));
     process.env.CORK_DIR = dir;
+    LABEL = `corktest-web-${++labelSeq}`;
     process.env.CORK_TMUX_LABEL = LABEL;
     fs.mkdirSync(path.join(dir, "sessions", KEY), { recursive: true });
     fs.writeFileSync(
@@ -397,6 +408,32 @@ describe("web terminal", () => {
      * starting tmux servers at once, several hundred milliseconds stopped being
      * enough and this file failed roughly one run in five.
      */
+    /**
+     * Read from a socket until the text being looked for turns up.
+     *
+     * Same reason as `settles`: a fixed listen window asserts that the clock
+     * ran out, which under the full suite stopped being the same thing as
+     * "the pane had time to render and stream".
+     */
+    const streamUntil = (ws: WebSocket, needle: string, timeoutMs = 8000) =>
+      new Promise<string>((resolve) => {
+        let buf = "";
+        const finish = () => {
+          clearTimeout(timer);
+          clearInterval(poll);
+          ws.close();
+          resolve(buf);
+        };
+        const timer = setTimeout(finish, timeoutMs);
+        const poll = setInterval(() => {
+          if (buf.includes(needle)) finish();
+        }, 50);
+        ws.on("message", (d) => {
+          buf += d.toString();
+          if (buf.includes(needle)) finish();
+        });
+      });
+
     const settles = async (check: () => boolean, timeoutMs = 5000) => {
       const deadline = Date.now() + timeoutMs;
       for (;;) {
@@ -447,14 +484,7 @@ describe("web terminal", () => {
       execSync(`tmux -L ${LABEL} new-session -d -s cork_${KEY} 'echo CORK_WEB_OK; sleep 30'`);
       await startServer();
       const ws = await wsConnect(SELF);
-      const out = await new Promise<string>((resolve) => {
-        let buf = "";
-        ws.on("message", (d) => (buf += d.toString()));
-        setTimeout(() => {
-          ws.close();
-          resolve(buf);
-        }, 1500);
-      });
+      const out = await streamUntil(ws, "CORK_WEB_OK");
       expect(out).toContain("CORK_WEB_OK");
     }, 15_000);
 
@@ -492,14 +522,7 @@ describe("web terminal", () => {
       execSync(`tmux -L ${LABEL} new-session -d -s cork_${KEY} 'printf "中文测试\\n"; sleep 30'`);
       await startServer();
       const ws = await wsConnect(SELF);
-      const out = await new Promise<string>((resolve) => {
-        let buf = "";
-        ws.on("message", (d) => (buf += d.toString()));
-        setTimeout(() => {
-          ws.close();
-          resolve(buf);
-        }, 1500);
-      });
+      const out = await streamUntil(ws, "中文测试");
       expect(out).toContain("中文测试");
       expect(out).not.toMatch(/_{4,}/); // the mangled form
     }, 15_000);
