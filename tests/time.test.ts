@@ -78,6 +78,32 @@ describe("formats", () => {
     }
   });
 
+  it("says UTC for zero offset however the platform renders it", async () => {
+    // The label used to fall out of the regex NOT matching, which held only
+    // because ICU 77 rendered zero offset as a bare "GMT". ICU 78 renders it
+    // "GMT+00:00", the regex matched, and the label became "UTC+0" — a form
+    // nobody writes, since UTC is the zero point. Neither rendering can be
+    // reproduced on one machine, so the platform is stubbed for both.
+    const t = await load({});
+    const real = Intl.DateTimeFormat;
+    try {
+      for (const rendered of ["GMT", "GMT+00:00"]) {
+        vi.stubGlobal("Intl", {
+          ...Intl,
+          DateTimeFormat: function () {
+            return {
+              formatToParts: () => [{ type: "timeZoneName", value: rendered }],
+            };
+          },
+        });
+        expect(t.zoneLabel(AT, "UTC")).toBe("UTC");
+      }
+    } finally {
+      vi.stubGlobal("Intl", { ...Intl, DateTimeFormat: real });
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("gives a stamp that sorts as time", async () => {
     const t = await load({ timezone: "UTC" });
     const stamps = [

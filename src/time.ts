@@ -80,8 +80,16 @@ export function zoneLabel(at: Date, zone = displayZone()): string {
   } catch {
     return "UTC";
   }
-  // "GMT+08:00" → "UTC+8", "GMT+05:30" → "UTC+5:30", "GMT" → "UTC"
+  // "GMT+08:00" → "UTC+8", "GMT+05:30" → "UTC+5:30"
   const m = /GMT([+-])(\d{2}):(\d{2})/.exec(name ?? "");
-  if (!m) return "UTC";
-  return `UTC${m[1]}${Number(m[2])}${m[3] === "00" ? "" : `:${m[3]}`}`;
+  if (!m) return "UTC"; // a bare "GMT", which is how ICU 77 and older render it
+
+  // Zero offset is UTC itself, so it carries no offset: "UTC+0" is not a form
+  // anyone writes. It needs saying because ICU 78 renders zero as "GMT+00:00"
+  // where 77 rendered a bare "GMT" — leaning on the match failing above meant
+  // the label was right on one node version and wrong on the next.
+  const hours = Number(m[2]);
+  if (hours === 0 && m[3] === "00") return "UTC";
+
+  return `UTC${m[1]}${hours}${m[3] === "00" ? "" : `:${m[3]}`}`;
 }
