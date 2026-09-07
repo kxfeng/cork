@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { paths } from "../config/paths.js";
+import { loadCorkEnv } from "../config/env-file.js";
 import { getLogger } from "../logger.js";
 
 const logger = getLogger("tmux");
@@ -71,16 +72,27 @@ export function ensureCorkTmuxServer(): void {
   try {
     execSync(`tmux -L ${tmuxLabel()} -f '${confPath()}' start-server`, {
       stdio: "pipe",
-      // Everything in every pane inherits the server's environment, and launchd
-      // gives the daemon no locale to pass on. Without one, macOS tools fall
-      // back to the C encoding and read UTF-8 a byte at a time — see the note
-      // in manager.ts where the pane's own LANG is set. Only takes effect on
-      // the call that actually forks the server; the pane sets its own too, so
-      // an already-running server does not leave the gap open.
+      // Everything in every pane inherits the server's environment — a pane is
+      // forked by the server, not by the `new-session` client, so the client's
+      // env reaches it only through tmux's `update-environment` whitelist
+      // (DISPLAY, KRB5CCNAME, SSH_*). This is therefore the one place a
+      // variable can be handed to every claude cork starts.
+      //
+      // Only the call that actually forks the server sets any of this; on an
+      // already-running server start-server is a no-op. Since shutdown() ends
+      // in kill-server, "restart cork" is what re-reads ~/.cork/env — which is
+      // the same rule config.jsonc follows.
+      //
+      // The locale is here because launchd gives the daemon none to pass on,
+      // and without one macOS tools fall back to the C encoding and read UTF-8
+      // a byte at a time (the pane sets its own too — see manager.ts — so an
+      // already-running server does not leave that gap open). ~/.cork/env goes
+      // last so a user who sets LANG there wins.
       env: {
         ...process.env,
         LANG: process.env.LANG || "en_US.UTF-8",
         LC_CTYPE: process.env.LC_CTYPE || process.env.LANG || "en_US.UTF-8",
+        ...loadCorkEnv(),
       },
     });
   } catch (err) {

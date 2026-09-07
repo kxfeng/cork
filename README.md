@@ -148,7 +148,9 @@ All state lives under `~/.cork/`:
 └── logs/               # cork.log (+ launchd stdout/stderr on macOS; journald on Linux)
 ```
 
-`~/.cork/env` is the easy way to pass things like `ANTHROPIC_MODEL` or proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise.
+`~/.cork/env` is the easy way to pass things like proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise. The file is read when cork brings up its tmux server, which every pane is forked from, so **changes take effect on `cork restart`** — the same rule `config.jsonc` follows.
+
+Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the session is created and keeps it across `--resume`; an env override is applied on every launch instead, so changing it silently rewrites the model of every existing session the next time cork restarts them — permanently, since removing the variable later does not put them back. Set a default model in `~/.claude/settings.json` instead, which is read only when a session is created.
 
 `config.jsonc` (excerpt):
 
