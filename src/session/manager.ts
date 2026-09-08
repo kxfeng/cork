@@ -17,7 +17,18 @@ import {
   type SessionMeta,
 } from "./store.js";
 import { resolveWorkspacePath } from "../config/loader.js";
-import { transcriptPath } from "./transcript.js";
+import {
+  transcriptPath,
+  lastTranscriptModel,
+  formatModelName,
+} from "./transcript.js";
+import { readDialog, type Dialog } from "./dialog.js";
+import {
+  parseModelPicker,
+  chooseModelRow,
+  switchConfirmYes,
+  lastModelNotice,
+} from "./model-picker.js";
 import type { CorkConfig } from "../config/schema.js";
 import type { IncomingMessage } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
@@ -118,6 +129,15 @@ const TYPE_ATTEMPTS = 3;
  * on a task that never goes quiet still gets sent — the transcript check is
  * what decides whether it worked, not this.
  */
+/**
+ * How long the model picker gets to draw, and how long the switch that follows
+ * gets to land. The second is the generous one: pressing `s` can raise a
+ * confirmation, and answering it starts a fresh wait.
+ */
+const PICKER_DRAW_MS = 15_000;
+const MODEL_SETTLE_MS = 30_000;
+const PICKER_POLL_MS = 300;
+
 const QUIET_WAIT_MS = 45_000;
 const QUIET_POLL_MS = 500;
 
@@ -221,6 +241,40 @@ export function looksLikeDialog(pane: string): boolean {
     .some((l) => /^(?:❯\s*)?\d+\.\s+\S/.test(l.trimStart()));
 }
 
+const SGR = /\x1b\[([0-9;]*)m/g;
+
+/** The line's characters, with every escape sequence removed. */
+export function stripSgr(line: string): string {
+  return line.replace(SGR, "");
+}
+
+/**
+ * The line's characters minus anything drawn dim.
+ *
+ * An empty input box is not empty on screen: claude fills it with a greyed
+ * suggestion, sometimes written from the message before it, which reads
+ * exactly like something a person typed. SGR 2 is what separates them, and it
+ * survives only in a `-e` capture. Plain text with no escapes comes back
+ * unchanged, so this is safe on a capture taken without `-e`.
+ */
+export function litText(line: string): string {
+  let out = "";
+  let dim = false;
+  let last = 0;
+  SGR.lastIndex = 0;
+  for (let m = SGR.exec(line); m !== null; m = SGR.exec(line)) {
+    if (!dim) out += line.slice(last, m.index);
+    for (const code of (m[1] === "" ? "0" : m[1]).split(";")) {
+      const c = Number(code);
+      if (c === 0 || c === 22) dim = false;
+      else if (c === 2) dim = true;
+    }
+    last = SGR.lastIndex;
+  }
+  if (!dim) out += line.slice(last);
+  return out;
+}
+
 /**
  * Whether the pane's input line begins with the command cork just typed.
  *
@@ -235,11 +289,10 @@ export function commandIsAtPrompt(pane: string, command: string): boolean {
   const lines = pane.split("\n");
   let input: string | null = null;
   for (const line of lines) {
-    const t = line.trimEnd();
-    if (t.startsWith("❯")) input = t;
+    if (stripSgr(line).trimEnd().startsWith("❯")) input = line;
   }
   if (input === null) return false;
-  const typed = input.slice(1).trim();
+  const typed = litText(input).trimEnd().slice(1).trim();
   // A multi-line command only ever shows its first line on the prompt row;
   // the rest are continuation rows carrying no marker.
   const head = command.split("\n")[0].slice(0, 24);
@@ -284,7 +337,12 @@ export function claudeSessionStatus(sessionId: string): string | null {
  * continuation lines and the command was never submitted.
  */
 function capturePane(tmuxName: string): string {
-  return execSync(corkTmux(`capture-pane -t "${tmuxName}" -p -S -${CAPTURE_SCROLLBACK}`), {
+  // `-e` keeps the escape sequences, which is the only way to tell claude's
+  // grey placeholder ("Try \"fix typecheck errors\"", or a suggested next
+  // prompt it wrote from your last message) apart from text someone typed:
+  // stripped of colour the two are identical, and cork has read a suggestion
+  // as a leftover draft before.
+  return execSync(corkTmux(`capture-pane -t "${tmuxName}" -p -e -S -${CAPTURE_SCROLLBACK}`), {
     encoding: "utf8",
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -359,6 +417,15 @@ interface ActiveSession {
  */
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, ActiveSession>();
+  /**
+   * Sessions whose dialog cork is working right now — the background check
+   * stays quiet for these, or cork reports its own keystrokes to the chat.
+   *
+   * Counted rather than flagged: switchModel holds it across the whole picker
+   * walk and calls answerDialog inside that, so a plain set would be cleared
+   * by the inner call while the outer one was still driving.
+   */
+  private dialogDrivers = new Map<string, number>();
   private udsServer: UdsServer | null = null;
 
   /**
@@ -787,6 +854,22 @@ export class SessionManager extends EventEmitter {
       }
     }
 
+    // Refuse outright while a dialog owns the screen. This is the one path in
+    // cork that puts characters into the pane — messages and the watcher's
+    // nudges go over UDS to the channel MCP and never touch it — and with a
+    // dialog up those characters become keypresses: `s` in the model picker
+    // means "this session only", a digit in a permission prompt picks an
+    // answer. Worse, the check that guards typing looks for the last line
+    // starting with the prompt marker, and a dialog's selected option starts
+    // with the same marker, so it would report a clean prompt that is not one.
+    const blocking = this.currentDialog(key);
+    if (blocking) {
+      return {
+        ok: false,
+        reason: `claude is showing a dialog (${blocking.title || "no title"}) — answer it first`,
+      };
+    }
+
     // Wait for claude to come out of the middle of a turn before typing.
     //
     // A slash command typed while the model is streaming does not reliably run
@@ -919,6 +1002,405 @@ export class SessionManager extends EventEmitter {
     // notion of the task is `starting` / `stopping` until then, and every
     // message the user gets about it comes from that reading.
     return { ok: true };
+  }
+
+  /**
+   * The pane's width in columns.
+   *
+   * Not the 200 cork asks for at `new-session`: tmux's `window-size latest`
+   * resizes the window to whatever client attached last, and keeps that size
+   * after the client leaves — the web terminal has left panes at 155 for days.
+   * Every frame claude draws spans exactly this many columns, so reading a
+   * dialog starts here.
+   */
+  private paneWidth(tmuxName: string): number | null {
+    try {
+      const out = execSync(
+        corkTmux(`display-message -p -t "${tmuxName}" '#{pane_width}'`),
+        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+      const n = Number(out);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * When someone attached to this pane last typed into it, or null when nobody
+   * is attached.
+   *
+   * Both ways in are ordinary tmux clients: `tmux -L cork attach` from a
+   * terminal, and the web terminal, which runs `tmux attach` under a pty of
+   * its own (see web/server.ts). So one question answers both — and
+   * `client_activity` answers the second half, which is whether the person is
+   * still there.
+   */
+  private clientActivity(tmuxName: string): number | null {
+    let out: string;
+    try {
+      out = execSync(
+        corkTmux(`list-clients -t "${tmuxName}" -F '#{client_activity}'`),
+        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+    } catch {
+      return null; // no such session; nothing is attached to it either
+    }
+    if (!out) return null; // the session exists, with nobody looking at it
+    const times = out
+      .split("\n")
+      .map((l) => Number(l.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (times.length === 0) return null;
+    return Math.max(...times) * 1000; // tmux reports seconds
+  }
+
+  /** The dialog this session is showing, or null. */
+  currentDialog(key: string): Dialog | null {
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    const width = this.paneWidth(tmuxName);
+    if (width === null) return null;
+    return readDialog(capturePaneSafe(tmuxName), width);
+  }
+
+  /**
+   * Whether cork is the one working a dialog right now.
+   *
+   * The background check must stay quiet while `switchModel` has the picker
+   * open, or cork reports its own keystrokes to the chat as something needing
+   * attention.
+   */
+  isDrivingDialog(key: string): boolean {
+    return (this.dialogDrivers.get(key) ?? 0) > 0;
+  }
+
+  private beginDriving(key: string): void {
+    this.dialogDrivers.set(key, (this.dialogDrivers.get(key) ?? 0) + 1);
+  }
+
+  private endDriving(key: string): void {
+    const n = (this.dialogDrivers.get(key) ?? 0) - 1;
+    if (n > 0) this.dialogDrivers.set(key, n);
+    else this.dialogDrivers.delete(key);
+  }
+
+  /**
+   * Answer the dialog on screen: walk the cursor onto `target` and press
+   * Enter, or press Escape for "esc".
+   *
+   * Always by arrow keys, never by typing the option's number. Some of the
+   * dialogs claude draws do not number their options at all (the trust screen
+   * offers a bare "Yes, I trust this folder"), so a digit is not something
+   * every dialog has — and pressing one into a dialog that reads digits
+   * differently would answer a question nobody asked.
+   *
+   * The cursor is re-read after the arrows and before Enter. Moving it is
+   * fire-and-forget, and an Enter on the wrong row is the one mistake here
+   * that cannot be taken back.
+   */
+  async answerDialog(
+    key: string,
+    target: number | "esc",
+    timing: { pollMs?: number } = {}
+  ): Promise<{ ok: boolean; chosen?: string; title?: string; reason?: string }> {
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    const pollMs = timing.pollMs ?? PICKER_POLL_MS;
+    const press = (keys: string) =>
+      execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
+
+    this.beginDriving(key);
+    try {
+      const before = this.currentDialog(key);
+      if (!before) return { ok: false, reason: "there is no dialog on screen" };
+
+      if (target === "esc") {
+        press("Escape");
+        await new Promise((r) => setTimeout(r, pollMs));
+        this.dialogHandled(key);
+        return { ok: true, title: before.title };
+      }
+
+      if (!before.answerable) {
+        // Either there is nothing on screen to choose, or the list runs past
+        // the bottom of it. Both mean the same thing here: a count walked from
+        // what cork can see would land somewhere nobody chose.
+        return { ok: false, reason: "no options to choose here" };
+      }
+      const want = before.options[target];
+      if (!want) {
+        return {
+          ok: false,
+          reason: `no option ${target + 1}, this one has ${before.options.length}`,
+        };
+      }
+      if (before.selected === null) {
+        return { ok: false, reason: "nothing is selected" };
+      }
+
+      const delta = target - before.selected;
+      if (delta !== 0) {
+        press(`-N ${Math.abs(delta)} ${delta > 0 ? "Down" : "Up"}`);
+        await new Promise((r) => setTimeout(r, pollMs));
+      }
+
+      const after = this.currentDialog(key);
+      if (!after || after.selected === null || after.options[after.selected]?.text !== want.text) {
+        return { ok: false, reason: `could not select "${want.text}"` };
+      }
+
+      press("Enter");
+      await new Promise((r) => setTimeout(r, pollMs));
+      this.dialogHandled(key);
+      return { ok: true, chosen: want.text, title: before.title };
+    } catch (err) {
+      return { ok: false, reason: (err as Error).message };
+    } finally {
+      this.endDriving(key);
+    }
+  }
+
+  /**
+   * Cork answered the dialog, so the watcher must not announce it closing.
+   *
+   * Otherwise every `/pick` is reported twice: once by the reply, and again by
+   * the next dialog check, which sees an empty screen and says so.
+   */
+  private dialogHandled(key: string): void {
+    this.sessions.get(key)?.transcriptWatcher?.dialogHandled();
+  }
+
+  /**
+   * What this session is on, or null when neither source can say.
+   *
+   * claude's own `/model` result line first — it is the name the picker
+   * shows, and it says what this session was actually set to. Falling back to
+   * the transcript when there is none: a session where nobody has run
+   * `/model` is on whatever served its last turn. That second answer is
+   * coarser — an id with no long-context variant, rendered by the same rule
+   * the context readout uses — but it is right about the family and version.
+   *
+   * The status line is deliberately not read. It is the user's to customise,
+   * and an earlier version keyed on "<model> | Context:" — a shape that holds
+   * only for the status line this machine happens to have.
+   */
+  currentModel(key: string): string | null {
+    const notice = lastModelNotice(capturePaneSafe(`${TMUX_PREFIX}${key}`));
+    if (notice) return notice.model;
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return null;
+    const id = lastTranscriptModel(meta.workspace, meta.sessionId);
+    return id ? formatModelName(id) : null;
+  }
+
+  /**
+   * Put this session on `requested` without moving the machine-wide default.
+   *
+   * `/model <name>` would be one step, and is the wrong one: it "behaves like
+   * Enter" and writes the `model` field into user settings, which is the
+   * default every NEW claude on this machine then starts with — cork would be
+   * reaching outside the session it was asked about. The picker's `s` key is
+   * the session-scoped path, and it leaves the settings file byte-identical.
+   *
+   * The walk is: type `/model`, read the rows, step the cursor onto the one the
+   * user named, CONFIRM the cursor arrived, press `s`, then watch for either
+   * the status line changing or the "Switch model?" cost confirmation. The
+   * confirmation is not always raised — claude suppresses it once the cost has
+   * been acknowledged — so it is watched for, never waited on.
+   *
+   * Two things are deliberately not done. The cursor is never moved on faith:
+   * a re-read stands between the arrow keys and `s`, because pressing `s` on
+   * the wrong row would quietly put the session on a model nobody asked for.
+   * And an unrecognised dialog is never answered — it comes back to the caller
+   * with its text, for a person to read.
+   */
+  async switchModel(
+    key: string,
+    requested: string,
+    // Test seam, as on sendSlashCommand: the real waits are tens of seconds.
+    timing: { drawMs?: number; settleMs?: number; pollMs?: number } = {}
+  ): Promise<{
+    ok: boolean;
+    model?: string;
+    already?: boolean;
+    reason?: string;
+    options?: string[];
+    screen?: string;
+  }> {
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    const pollMs = timing.pollMs ?? PICKER_POLL_MS;
+    const press = (keys: string) =>
+      execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
+    const closePicker = () => {
+      try {
+        press("Escape");
+      } catch {
+        // Already gone, or the pane is. Nothing here can help either way.
+      }
+    };
+
+    const width = this.paneWidth(tmuxName);
+    if (width === null) return { ok: false, reason: "the session's terminal is not up" };
+
+    this.beginDriving(key);
+    try {
+      return await this.walkModelPicker(key, tmuxName, width, requested, timing);
+    } finally {
+      this.endDriving(key);
+    }
+  }
+
+  /** The picker walk itself. Split out so the caller owns the driving flag. */
+  private async walkModelPicker(
+    key: string,
+    tmuxName: string,
+    width: number,
+    requested: string,
+    timing: { drawMs?: number; settleMs?: number; pollMs?: number }
+  ): Promise<{
+    ok: boolean;
+    model?: string;
+    already?: boolean;
+    reason?: string;
+    options?: string[];
+    screen?: string;
+  }> {
+    const pollMs = timing.pollMs ?? PICKER_POLL_MS;
+    const press = (keys: string) =>
+      execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
+    const closePicker = () => {
+      try {
+        press("Escape");
+      } catch {
+        // Already gone, or the pane is. Nothing here can help either way.
+      }
+    };
+
+    // What claude last said about a model, before cork asks for anything. A
+    // switch is confirmed by a notice that was NOT already there: the pane
+    // carries scrollback, and an old "Set model to Fable 5.1" would otherwise
+    // read as this switch having worked.
+    const noticeBefore = lastModelNotice(capturePaneSafe(tmuxName))?.line ?? null;
+
+    const opened = await this.sendSlashCommand(key, "/model");
+    if (!opened.ok) return { ok: false, reason: opened.reason };
+
+    // The picker replaces the screen; until it has, there is nothing to read.
+    const drawDeadline = Date.now() + (timing.drawMs ?? PICKER_DRAW_MS);
+    let view = null as ReturnType<typeof parseModelPicker>;
+    for (;;) {
+      view = parseModelPicker(capturePaneSafe(tmuxName), width);
+      if (view) break;
+      if (Date.now() >= drawDeadline) {
+        return { ok: false, reason: "the model picker did not open" };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    const choice = chooseModelRow(view.rows, requested);
+    if (!choice.ok) {
+      closePicker();
+      return { ok: false, reason: choice.reason, options: choice.options };
+    }
+
+    // Already there: close the picker rather than switch to the model the
+    // session is on. A no-op switch is not free — it invalidates the prompt
+    // cache, so the next message re-reads the whole conversation.
+    if (choice.row.current) {
+      closePicker();
+      return { ok: true, already: true, model: choice.row.modelName || choice.row.label };
+    }
+
+    const delta = choice.index - view.cursor;
+    if (delta !== 0) {
+      try {
+        press(`-N ${Math.abs(delta)} ${delta > 0 ? "Down" : "Up"}`);
+      } catch (err) {
+        closePicker();
+        return { ok: false, reason: (err as Error).message };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+
+    // Read it back. The arrow keys are fire-and-forget, the row order is
+    // claude's to change, and `s` acts on wherever the cursor actually is.
+    const after = parseModelPicker(capturePaneSafe(tmuxName), width);
+    if (!after || after.rows[after.cursor]?.label !== choice.row.label) {
+      closePicker();
+      return {
+        ok: false,
+        reason: `could not put the cursor on ${choice.row.label}`,
+      };
+    }
+
+    try {
+      press("s");
+    } catch (err) {
+      closePicker();
+      return { ok: false, reason: (err as Error).message };
+    }
+
+    const want = choice.row;
+    const settleDeadline = Date.now() + (timing.settleMs ?? MODEL_SETTLE_MS);
+    let answeredConfirm = false;
+    for (;;) {
+      const pane = capturePaneSafe(tmuxName);
+
+      const yes = switchConfirmYes(pane, width);
+      if (yes !== null) {
+        // Answer it once. Twice would mean cork is in a loop it cannot see.
+        if (answeredConfirm) {
+          return {
+            ok: false,
+            reason: "the switch confirmation came back after being answered",
+            screen: pane,
+          };
+        }
+        answeredConfirm = true;
+        const answered = await this.answerDialog(key, yes, { pollMs });
+        if (!answered.ok) return { ok: false, reason: answered.reason, screen: pane };
+        continue;
+      }
+
+      if (!parseModelPicker(pane, width)) {
+        const notice = lastModelNotice(pane);
+        if (notice && notice.line !== noticeBefore) {
+          if (notice.kind === "set") return { ok: true, model: notice.model };
+          // "Kept model as X" — the picker closed without switching. The row
+          // already in use is answered further up, so this is not that.
+          return {
+            ok: false,
+            reason: `claude kept the model as ${notice.model}`,
+            screen: pane,
+          };
+        }
+        // The picker is gone and claude has said nothing: something else is
+        // on screen — a consent prompt, a PreModelSwitch hook asking. Cork
+        // does not press keys into a dialog it cannot name; the caller shows
+        // it to a person instead.
+        const other = readDialog(pane, width);
+        if (other) {
+          return {
+            ok: false,
+            reason: `claude is asking something cork does not recognise: ${other.title}`,
+            screen: pane,
+          };
+        }
+      }
+
+      if (Date.now() >= settleDeadline) {
+        // The picker is gone, nothing else is on screen, and no notice could
+        // be read — claude's wording moved. The switch went through; only the
+        // name for it is missing, so the reply uses the word that was asked
+        // for rather than refusing a switch that happened.
+        if (!parseModelPicker(pane, width)) return { ok: true, model: requested };
+        return {
+          ok: false,
+          reason: `the model did not change to ${want.label}`,
+          screen: pane,
+        };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
   }
 
   /**
@@ -1631,6 +2113,17 @@ export class SessionManager extends EventEmitter {
       sessionKey: key,
       inject: (text, senderId) =>
         this.dispatchSystemMessage(key, meta.chatId, text, senderId),
+      dialog: {
+        // Null while the session is still starting: cork answers claude's own
+        // startup dialogs itself (trust, dev-channel, resume), and reporting
+        // those would be telling the user about something already handled.
+        read: () =>
+          this.sessions.get(key)?.state === "connected"
+            ? this.currentDialog(key)
+            : null,
+        driving: () => this.isDrivingDialog(key),
+        clientActivity: () => this.clientActivity(`${TMUX_PREFIX}${key}`),
+      },
       notify: (text: string) => this.emit("notify", key, text),
       autopilot: this.autopilotHooks(key),
     });

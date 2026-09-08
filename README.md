@@ -81,6 +81,8 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/status`              | Show this chat's session state (workspace, last activity, …)  |
 | `/new`                 | Throw away the current Claude session and start a fresh one   |
 | `/workspace <path>`    | Re‑point this chat at a different working directory           |
+| `/model [name]`        | Show, or change, the model THIS session runs on — the default for new sessions is left alone |
+| `/pick <n>` / `/pick esc` | Answer a dialog Claude is showing (cork tells you when one appears) |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
 
 ### Your own slash commands

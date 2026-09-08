@@ -7,6 +7,7 @@ import {
   formatModelName,
   formatModelContext,
   readLatestUsage,
+  lastTranscriptModel,
 } from "../src/session/transcript.js";
 
 /**
@@ -88,6 +89,56 @@ describe("formatModelContext", () => {
 
   it("has a placeholder for a session with no transcript yet", () => {
     expect(formatModelContext(null)).toBe("(no claude session yet)");
+  });
+});
+
+describe("lastTranscriptModel", () => {
+  // The fallback for "what is this session on" when the pane holds no /model
+  // result: whatever served the last turn.
+  let dir: string;
+  const sessionId = "sid-2";
+  const workspace = "/tmp/cork-transcript-model-ws";
+
+  function writeTranscript(lines: unknown[]): void {
+    const slug = workspace.replace(/\//g, "-");
+    const projectDir = path.join(dir, ".claude", "projects", slug);
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, `${sessionId}.jsonl`),
+      lines.map((l) => JSON.stringify(l)).join("\n")
+    );
+  }
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-transcript-model-"));
+    process.env.HOME = dir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("takes the model off the newest assistant row", () => {
+    // Measured on a real session: switching mid-conversation shows up here
+    // from the next turn onward, and only from then.
+    writeTranscript([
+      { type: "assistant", message: { model: "claude-opus-5" } },
+      { type: "user", message: { content: "switch" } },
+      { type: "assistant", message: { model: "claude-fable-5-1" } },
+    ]);
+    expect(lastTranscriptModel(workspace, sessionId)).toBe("claude-fable-5-1");
+  });
+
+  it("ignores the synthetic rows claude writes for API errors", () => {
+    writeTranscript([
+      { type: "assistant", message: { model: "claude-opus-5" } },
+      { type: "assistant", message: { model: "<synthetic>" } },
+    ]);
+    expect(lastTranscriptModel(workspace, sessionId)).toBe("claude-opus-5");
+  });
+
+  it("has no answer for a session that has not been written to", () => {
+    expect(lastTranscriptModel(workspace, "no-such-session")).toBeNull();
   });
 });
 

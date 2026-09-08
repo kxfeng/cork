@@ -73,6 +73,14 @@ export async function handleCommand(
     return handleMentionOn(channel, message, sessionManager);
   }
 
+  if (text === "/pick" || text.startsWith("/pick ")) {
+    return handlePick(channel, message, sessionManager, text.slice(5).trim());
+  }
+
+  if (text === "/model" || text.startsWith("/model ")) {
+    return handleModel(channel, message, sessionManager, text.slice(6).trim());
+  }
+
   if (isAutopilotCommand(text)) {
     return handleAutopilot(channel, message, sessionManager, text);
   }
@@ -193,6 +201,131 @@ async function handleWorkspace(
   const workspace = session?.meta.workspace || "(no session)";
   await sendCmdReply(channel, message, `📂 Current workspace: \`${workspace}\``);
   return { handled: true };
+}
+
+/**
+ * `/pick <n|esc>` — answer the dialog claude is showing.
+ *
+ * Every dialog is answered the same way, by walking the cursor and pressing
+ * Enter, so this works on the ones that number their options and the ones that
+ * do not. The numbers here are cork's, in the order the options were drawn and
+ * the order they were listed in the message.
+ */
+async function handlePick(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  arg: string
+): Promise<CommandResult> {
+  const session = sessionManager.getSession(
+    message.channel,
+    message.chatId,
+    message.threadId
+  );
+  if (!session) {
+    await sendCmdReply(channel, message, "ℹ️ No session here yet — say something first.");
+    return { handled: true };
+  }
+
+  const dialog = sessionManager.currentDialog(session.key);
+  if (!dialog) {
+    await sendCmdReply(channel, message, "ℹ️ Dialog not on screen");
+    return { handled: true };
+  }
+
+  // Nothing is pressed for an argument cork cannot read, so this is a failure
+  // to answer like any other rather than a category of its own.
+  const wantsEsc = /^esc(ape)?$/i.test(arg);
+  if (!arg || (!wantsEsc && !/^\d+$/.test(arg))) {
+    await sendCmdReply(channel, message, "⚠️ Dialog not answered — invalid option");
+    return { handled: true };
+  }
+
+  const target = wantsEsc ? ("esc" as const) : Number(arg) - 1;
+  const r = await sessionManager.answerDialog(session.key, target);
+
+  if (!r.ok) {
+    await sendCmdReply(channel, message, `⚠️ Dialog not answered — ${r.reason}`);
+    return { handled: true };
+  }
+  // "closed" for Esc, the same word the watcher uses when someone closes one
+  // at the terminal: it is the same event, and two names for it read as two
+  // different things having happened.
+  const done = r.title ? ` — ${r.title}` : "";
+  await sendCmdReply(
+    channel,
+    message,
+    wantsEsc ? `✅ Dialog closed${done}` : `✅ Dialog answered — ${r.chosen}`
+  );
+  return { handled: true };
+}
+
+/**
+ * `/model <name>` — put THIS session on another model, and only this one.
+ *
+ * Typing `/model <name>` into claude itself would also write the machine-wide
+ * default, so cork drives the picker instead and presses `s`. See
+ * SessionManager.switchModel for the walk and why each step is there.
+ *
+ * With no argument this reports what the session is on. Cork does not offer a
+ * list of its own: the models a session can reach depend on entitlements and
+ * change with every release, so the only honest list is the one claude just
+ * drew, which is what a failed match hands back.
+ */
+async function handleModel(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  requested: string
+): Promise<CommandResult> {
+  const session = sessionManager.getSession(
+    message.channel,
+    message.chatId,
+    message.threadId
+  );
+  if (!session) {
+    await sendCmdReply(channel, message, "ℹ️ No session here yet — say something first.");
+    return { handled: true };
+  }
+
+  if (!requested) {
+    const current = sessionManager.currentModel(session.key);
+    await sendCmdReply(
+      channel,
+      message,
+      current
+        ? `🧠 This session is on ${current}`
+        : "🧠 Could not read the model off the terminal — `/model <name>` to set one"
+    );
+    return { handled: true };
+  }
+
+  const r = await sessionManager.switchModel(session.key, requested);
+
+  if (r.ok && r.already) {
+    await sendCmdReply(channel, message, `🧠 Already on ${r.model}`);
+    return { handled: true };
+  }
+  if (r.ok) {
+    await sendCmdReply(channel, message, `🧠 Switched to ${r.model}`);
+    return { handled: true };
+  }
+
+  let reply = `⚠️ Model not switched — ${r.reason}`;
+  if (r.options?.length) {
+    reply += `\n\nOn offer in this session:\n${r.options.map((o) => `- ${o}`).join("\n")}`;
+  }
+  if (r.screen) {
+    reply += `\n\nThe terminal is showing this — it may need you:\n\`\`\`\n${dialogExcerpt(r.screen)}\n\`\`\``;
+  }
+  await sendCmdReply(channel, message, reply);
+  return { handled: true };
+}
+
+/** The part of a captured pane worth putting in a chat message. */
+function dialogExcerpt(pane: string): string {
+  const lines = pane.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim() !== "");
+  return lines.slice(-20).join("\n").slice(-1200);
 }
 
 async function handleMentionOff(

@@ -95,6 +95,32 @@ export function readTranscriptTail(
 }
 
 /**
+ * The model that served this session's most recent turn, as claude wrote it.
+ *
+ * An API id — "claude-opus-5", "claude-fable-5-1" — not the name the picker
+ * shows, and it does not carry the long-context variant: a session on
+ * "Opus 5 (1M context)" records plain "claude-opus-5" (measured). So this is
+ * the fallback, used when the pane has no `/model` result to read; putting an
+ * id in front of a person is worse than claude's own label but better than
+ * "could not tell", and translating one to the other would mean a table of
+ * model names that goes stale with every release.
+ *
+ * `<synthetic>` rows are claude's own filler, not a turn any model served.
+ */
+export function lastTranscriptModel(
+  workspace: string,
+  sessionId: string
+): string | null {
+  return findLastTranscriptRow<string>(workspace, sessionId, (row) => {
+    const r = row as { type?: string; message?: { model?: unknown } };
+    if (r?.type !== "assistant") return null;
+    const model = r.message?.model;
+    if (typeof model !== "string" || !model || model.startsWith("<")) return null;
+    return model;
+  });
+}
+
+/**
  * Stream the transcript and return the LAST assistant message that carried a
  * `message.usage` block. That row reflects the tokens actually loaded into
  * context for the most recent model turn — which is what Claude Code's

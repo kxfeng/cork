@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { transcriptPath, findLastTranscriptRow } from "./transcript.js";
 import { getLogger, type Logger } from "../logger.js";
 import { isRunning, type AutopilotRecord, type AutopilotStopReason } from "./autopilot.js";
+import { dialogSignature, type Dialog } from "./dialog.js";
 import { contextWindowFor } from "./context-window.js";
 
 /**
@@ -101,6 +102,39 @@ export const WATCHER_CONSTANTS = {
  * here wants to be tighter than this either.
  */
 const TICK_INTERVAL_MS = 10_000;
+
+/**
+ * How often the pane is checked for a dialog.
+ *
+ * A dialog stops claude acting on anything — a message sent from Lark sits
+ * there unanswered — and nothing in the transcript says one is up: dialogs
+ * write no rows at all (measured: 32 lines before, 32 after). Screen-reading
+ * on a timer is the only way to find out, and 30s is chosen against how long
+ * someone is willing to wait wondering why there is no reply, not against
+ * cost: a capture is a few milliseconds.
+ */
+const DIALOG_POLL_MS = 30_000;
+
+/**
+ * How far a dialog has to outlast the last keystroke before the chat hears
+ * about it, while someone is attached to the pane.
+ *
+ * Nobody attached ⇒ nobody can see the screen ⇒ say so at once. Someone
+ * attached and typing ⇒ the dialog is almost certainly theirs, and telling
+ * them what is on the screen in front of them is noise: opening `/help` in the
+ * terminal put three of these in a real chat.
+ *
+ * Two poll intervals, because detection lags by up to one: a dialog the person
+ * opened themselves is found within a poll of their keystroke, so the gap has
+ * to be wider than that to mean anything.
+ *
+ * The gap is measured once, when the dialog is first seen, and does not grow
+ * with it sitting there — so a dialog somebody opened themselves stays unsaid
+ * for as long as they remain attached, however long they then leave it. What
+ * they get instead: it is said the moment they detach, and any dialog that
+ * appears well after their last keystroke is said straight away.
+ */
+const DIALOG_GRACE_MS = 2 * DIALOG_POLL_MS;
 
 /**
  * How long the transcript may go without a new row before cork pushes the model
@@ -215,6 +249,69 @@ function formatTokens(n: number): string {
  * No zero padding: these are read, not lined up in a column, and "1h03min"
  * invites being read as a clock time.
  */
+/**
+ * How much of a dialog's own prose is worth putting in a chat message.
+ *
+ * Prose only. Options are never dropped: a list cut short still gets numbers
+ * from `/pick`, so someone could choose an option they were never shown —
+ * which is worse than a long message by a distance.
+ */
+const DIALOG_PROSE_LINES = 8;
+
+/**
+ * A dialog, as a message someone reads on their phone.
+ *
+ * The dialog goes in a code block, unchanged: the model picker lines its two
+ * columns up on spaces, the cursor and the tick are claude's own, and every
+ * one of those is lost the moment cork re-flows it into prose. The block is
+ * also the boundary — inside it is the screen, outside it is cork — which the
+ * first version did not have, and a reader could not tell which was which.
+ *
+ * One line of instructions follows, the same shape whatever the dialog is:
+ * `Esc` always cancels, and the second half says what else can be done here.
+ */
+export function formatDialog(d: Dialog): string {
+  const head = d.answerable
+    ? "🔔 Dialog waiting for an answer"
+    : "🔔 Dialog needs you at the terminal";
+
+  const options = new Set(d.optionRows);
+  const shown: string[] = [];
+  let prose = 0;
+  let cut = false;
+  for (const [i, line] of d.screen.entries()) {
+    if (options.has(i) || !line.trim()) {
+      shown.push(line);
+      continue;
+    }
+    if (prose < DIALOG_PROSE_LINES) {
+      shown.push(line);
+      prose++;
+    } else if (!cut) {
+      shown.push("…");
+      cut = true;
+    }
+  }
+  // Trailing blanks survive the walk above (a blank is never prose), and a cut
+  // leaves the ones that followed what was dropped.
+  while (shown.length && !shown[shown.length - 1].trim()) shown.pop();
+
+  // Drop claude's own key hints. Everything that line says — Enter, `s`, Tab —
+  // is about pressing keys at the terminal, which is exactly where the reader
+  // of this message is not. Keeping it would hand them a manual for a keyboard
+  // they are not sitting at.
+  if (shown.length && shown[shown.length - 1].includes("Esc")) shown.pop();
+  while (shown.length && !shown[shown.length - 1].trim()) shown.pop();
+
+  // "cancel" rather than a word of cork's own: it is what claude's own footer
+  // calls the same key, and there is no reason for two names.
+  const hint = d.answerable
+    ? "`/pick <n>` to choose · `/pick esc` to cancel"
+    : "`/pick esc` to cancel · or answer it in the terminal";
+
+  return [head, "", "```", ...shown, "```", hint].join("\n");
+}
+
 export function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -389,6 +486,24 @@ export interface TranscriptWatcherOptions {
    * absent so tests that only build hooks keep working.
    */
   notify?: (text: string) => void;
+  /**
+   * How to see whether claude is showing a dialog, and whether cork is the one
+   * working it.
+   *
+   * Absent ⇒ this watcher does not look. Kept as a pair of functions rather
+   * than a manager reference so the check can be tested without a terminal.
+   */
+  dialog?: {
+    /** The dialog on screen, or null. Null while the session is still starting. */
+    read(): Dialog | null;
+    /** Whether cork itself has the dialog open right now. */
+    driving(): boolean;
+    /**
+     * When whoever is attached to the pane last typed into it, in ms, or null
+     * when nobody is attached.
+     */
+    clientActivity(): number | null;
+  };
   /** Test seam: override the wall clock. */
   now?: () => number;
   /**
@@ -423,6 +538,14 @@ export class TranscriptWatcher {
   // --- autopilot state ---
   private readonly hooks?: AutopilotHooks;
   private tickTimer?: ReturnType<typeof setInterval>;
+  private dialogHooks?: TranscriptWatcherOptions["dialog"];
+  private lastDialogCheckAt = 0;
+  /** Signature of the dialog the chat has already been told about, or null. */
+  private dialogTold: string | null = null;
+  private dialogToldTitle = "";
+  /** The dialog currently on screen, and when it was first seen there. */
+  private dialogSeen: string | null = null;
+  private dialogSeenAt = 0;
   /** When the transcript last grew. Seeded at start, so a daemon restart gives
    *  the session a full stall window before anyone pushes it. */
   private lastRowAt = 0;
@@ -476,6 +599,7 @@ export class TranscriptWatcher {
     this.inject = opts.inject;
     this.notifyFn = opts.notify;
     this.hooks = opts.autopilot;
+    this.dialogHooks = opts.dialog;
     this.now = opts.now ?? Date.now;
     this.goalOnDisk = opts.goalOnDisk ?? readGoalFromTranscript;
     this.log = getLogger("transcript-watcher").child({
@@ -991,7 +1115,89 @@ export class TranscriptWatcher {
    * restart does NOT re-send /goal: claude restores the goal from its own
    * transcript on resume and carries on by itself.
    */
+  /**
+   * Tell the chat when claude is waiting on a person, and when it stops.
+   *
+   * Deliberately touches nothing about an autopilot run: not the nudge clock,
+   * not the stall check, not the record. A dialog is something the session is
+   * showing, not a state the task is in, and a run that is mid-dialog is still
+   * the run it was.
+   *
+   * Quiet while cork is the one working the dialog — `/model` opens a picker
+   * on purpose, and reporting cork's own keystrokes back to the chat as
+   * something needing attention would be pure noise.
+   */
+  private checkDialog(): void {
+    const hooks = this.dialogHooks;
+    if (!hooks) return;
+    const now = this.now();
+    if (now - this.lastDialogCheckAt < DIALOG_POLL_MS) return;
+    this.lastDialogCheckAt = now;
+
+    if (hooks.driving()) return;
+
+    let dialog: Dialog | null;
+    try {
+      dialog = hooks.read();
+    } catch (err) {
+      this.log.warn("dialog check failed", { err: (err as Error).message });
+      return;
+    }
+
+    if (!dialog) {
+      this.dialogSeen = null;
+      // Only worth saying when someone was told to go and look.
+      if (this.dialogTold !== null) {
+        const title = this.dialogToldTitle;
+        this.dialogTold = null;
+        this.dialogToldTitle = "";
+        this.say(`✅ Dialog closed${title ? ` — ${title}` : ""}`);
+      }
+      return;
+    }
+
+    const signature = dialogSignature(dialog);
+    if (signature !== this.dialogSeen) {
+      this.dialogSeen = signature;
+      this.dialogSeenAt = now;
+    }
+    if (signature === this.dialogTold) return; // same dialog, already said
+
+    // Somebody at the terminal, still typing, is looking at this already.
+    // Deliberately does NOT mark it told: when they detach, or when they have
+    // been away long enough, the next check says it then.
+    const activity = hooks.clientActivity();
+    if (activity !== null && this.dialogSeenAt - activity <= DIALOG_GRACE_MS) {
+      this.log.debug("dialog on screen, but someone is at the terminal", {
+        title: dialog.title,
+      });
+      return;
+    }
+
+    this.dialogTold = signature;
+    this.dialogToldTitle = dialog.title;
+    this.log.info("dialog on screen", { title: dialog.title, kind: dialog.kind });
+    this.say(formatDialog(dialog));
+  }
+
+  /**
+   * Cork just answered the dialog itself, so forget it was ever announced.
+   *
+   * Without this the chat gets the same event twice: `/pick` replies with what
+   * it did, and the next check — finding nothing on screen — follows it with
+   * "Dialog closed" about the dialog that reply just closed.
+   */
+  dialogHandled(): void {
+    this.dialogTold = null;
+    this.dialogToldTitle = "";
+    this.dialogSeen = null;
+  }
+
   private tick(): void {
+    // Before anything autopilot: a dialog blocks every session, and most
+    // sessions are not running a task.
+    this.checkDialog();
+
     const hooks = this.hooks;
     if (!hooks) return;
     this.recCache = undefined; // a tick is its own batch

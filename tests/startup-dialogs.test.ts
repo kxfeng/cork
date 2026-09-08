@@ -187,3 +187,28 @@ describe("commandIsAtPrompt", () => {
     expect(commandIsAtPrompt("", "/goal x")).toBe(false);
   });
 });
+
+describe("grey placeholder text", () => {
+  it("does not read a suggestion as something someone typed", () => {
+    // An empty box shows a greyed suggestion, which claude sometimes writes
+    // from the previous message — captured verbatim off a real pane, where a
+    // request to print one character produced a suggestion to print another.
+    const pane = '\x1b[39m❯ \x1b[2mnow do the same with chr(0x2581)';
+    expect(commandIsAtPrompt(pane, "now do the same")).toBe(false);
+  });
+
+  it("still sees text that is actually typed", () => {
+    const pane = "\x1b[39m❯ /goal clear";
+    expect(commandIsAtPrompt(pane, "/goal clear")).toBe(true);
+  });
+
+  it("reads a capture taken without -e unchanged", () => {
+    expect(commandIsAtPrompt("❯ /goal clear", "/goal clear")).toBe(true);
+  });
+
+  it("takes the lit part when a line is partly dim", () => {
+    // The prompt marker itself is coloured, the draft is not.
+    const pane = "\x1b[39m❯ \x1b[0m/model\x1b[2m suggestion tail";
+    expect(commandIsAtPrompt(pane, "/model")).toBe(true);
+  });
+});
