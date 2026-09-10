@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveMentions,
-  otherMentionNames,
   mentionsSelf,
   type LarkMention,
 } from "../src/channels/lark/mentions.js";
@@ -114,33 +113,6 @@ describe("resolveMentions", () => {
       pushMention("@_user_1", SELF_OPEN, "XiaoK"),
     ]);
     expect(out).toBe("@XiaoK first line\nsecond line");
-  });
-});
-
-describe("otherMentionNames", () => {
-  it("lists everyone but us, in order, without duplicates", () => {
-    const names = otherMentionNames(
-      [
-        pushMention("@_user_1", SELF_OPEN, "XiaoK"),
-        pushMention("@_user_2", "ou_coko", "CoKo"),
-        pushMention("@_user_3", "ou_ann", "Ann"),
-        pushMention("@_user_4", "ou_coko", "CoKo"),
-      ],
-      SELF
-    );
-    expect(names).toEqual(["CoKo", "Ann"]);
-  });
-
-  it("falls back to an id when Lark sent no name", () => {
-    expect(
-      otherMentionNames([{ key: "@_user_1", id: { open_id: "ou_x" } }], SELF)
-    ).toEqual(["ou_x"]);
-  });
-
-  it("is empty when only we were mentioned", () => {
-    expect(
-      otherMentionNames([pushMention("@_user_1", SELF_OPEN, "XiaoK")], SELF)
-    ).toEqual([]);
   });
 });
 

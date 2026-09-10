@@ -14,13 +14,33 @@ export interface IncomingMessage {
    * ordinary whole-chat messages. */
   threadId?: string;
   /**
-   * Display names this message addressed BESIDES the bot itself, in the order
-   * they appear. Surfaced to the model as a `mentions` attribute on the
-   * channel tag: in a group holding several bots, "this was addressed to me
-   * and to CoKo" is the difference between answering and staying quiet, and
-   * it cannot be recovered from the message text alone.
+   * Display name of the sender, when it could be resolved. Surfaced to the
+   * model as a `sender` attribute on the channel tag — `senderId` alone is an
+   * opaque `ou_…` that names nobody, while a forwarded sub-message has carried
+   * a readable `sender=` all along.
    */
-  mentionsOthers?: string[];
+  senderName?: string;
+  /**
+   * Whether this message @mentioned the bot itself, surfaced as the
+   * `mentionYou` attribute. The channel already computes this to decide
+   * whether to wake at all — passing the answer on costs one boolean, whereas
+   * passing the raw mention ids would make the model redo the same matching
+   * against an id whose form varies by transport.
+   *
+   * Group chats only: a DM addresses the bot by existing, so the question
+   * never arises and a blanket `false` there would read as a denial.
+   *
+   * A companion "was a mention required" flag would add nothing: a group that
+   * requires one never delivers a message without it, so alongside a visible
+   * `false` that flag could only ever read `false` too.
+   *
+   * It describes THIS message, not quoted or forwarded history — otherwise
+   * forwarding any transcript that names the bot would read as summoning it.
+   * It is also not a verdict on whether to answer: a thread the bot itself
+   * started, or a mention-off group, delivers messages that mention nobody
+   * and still expect a reply.
+   */
+  mentionsYou?: boolean;
 }
 
 export interface ReplyResult {

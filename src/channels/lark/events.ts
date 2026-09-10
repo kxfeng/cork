@@ -4,7 +4,7 @@ import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
-import { mentionsSelf, otherMentionNames } from "./mentions.js";
+import { mentionsSelf } from "./mentions.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
@@ -502,7 +502,11 @@ async function handleMessageEvent(
     text: text.trim(),
     chatName: chatName || undefined,
     threadId: threadId || undefined,
-    mentionsOthers: otherMentionNames(mentions, selfIds),
+    // Best-effort and cached; an unresolved name simply omits the attribute
+    // rather than echoing the raw id back as if it were one.
+    senderName: (await resolveName(senderId)) || undefined,
+    // Only for groups — see IncomingMessage.mentionsYou.
+    mentionsYou: chatType === "group" ? mentioned : undefined,
   };
 
   logger.info(

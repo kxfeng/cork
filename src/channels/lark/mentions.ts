@@ -81,28 +81,6 @@ export function resolveMentions(
   return out.trim();
 }
 
-/**
- * Who a message addressed, excluding the bot itself — the structured companion
- * to `resolveMentions`, surfaced to the model as a `mentions` attribute on the
- * channel tag so "who else was addressed" is readable without parsing prose.
- *
- * Returns display names (falling back to an id when Lark sent no name), in the
- * order they appear in the message.
- */
-export function otherMentionNames(
-  mentions: LarkMention[] | undefined,
-  selfIds: string[]
-): string[] {
-  if (!mentions || mentions.length === 0) return [];
-  const out: string[] = [];
-  for (const m of mentions) {
-    if (isSelf(m, selfIds)) continue;
-    const label = m.name || mentionIds(m)[0];
-    if (label && !out.includes(label)) out.push(label);
-  }
-  return out;
-}
-
 /** Whether any mention in the list points at this bot. */
 export function mentionsSelf(
   mentions: LarkMention[] | undefined,

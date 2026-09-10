@@ -726,11 +726,12 @@ export class SessionManager extends EventEmitter {
         chatId: message.chatId,
         senderId: message.senderId,
         messageId: message.messageId,
-        // Only when non-empty: an always-present empty attribute is noise on
-        // every message in every single-bot chat, which is nearly all of them.
-        ...(message.mentionsOthers && message.mentionsOthers.length > 0
-          ? { mentions: message.mentionsOthers.join(", ") }
-          : {}),
+        // Omitted rather than blank when unresolved — an empty attribute would
+        // read as "this message has no sender".
+        ...(message.senderName ? { sender: message.senderName } : {}),
+        ...(message.mentionsYou === undefined
+          ? {}
+          : { mentionYou: String(message.mentionsYou) }),
       },
     };
 
