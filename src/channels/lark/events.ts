@@ -184,10 +184,40 @@ function formatCreateTime(ms: number): string {
 }
 
 /**
- * Check if the sender is an owner.
+ * Whether the sender may use this bot.
+ *
+ * An empty list means nobody, not everybody. The reverse reading used to be
+ * the rule here, and it turned a failed owner lookup during setup into a bot
+ * that answered the entire tenant — running Claude in bypassPermissions mode,
+ * with no second gate behind this one. Telegram has always read it this way
+ * ("Empty = nobody paired yet"); Lark was the outlier.
+ *
+ * Callers must distinguish the two rejections: an empty list is a setup that
+ * never finished, while a non-empty one that excludes the sender is a plain
+ * no. They are told apart by `owners.length`, and answered differently.
  */
 function isOwner(senderId: string, owners: string[]): boolean {
-  return owners.length === 0 || owners.includes(senderId);
+  return owners.includes(senderId);
+}
+
+/**
+ * What to tell someone the bot will not serve.
+ *
+ * The two rejections are different situations and get different text. With an
+ * allowlist configured, the sender simply is not on it — nothing they can act
+ * on, so say only that. With none configured, setup never finished, and the
+ * person reading this is most likely the operator: hand them their own id and
+ * the command that uses it, so the message is the fix rather than a dead end.
+ */
+function rejectionNotice(owners: string[], senderId: string): string {
+  if (owners.length > 0) {
+    return "⚠️ This bot only responds to authorized users.";
+  }
+  return (
+    "⚠️ No authorized users are configured, so this bot cannot verify anyone.\n" +
+    `Your ID: ${senderId}\n` +
+    `If you are the owner, run:  cork lark allow ${senderId}`
+  );
 }
 
 // Cache of "is this thread rooted by the bot" per thread_id, so the @-gate
@@ -287,7 +317,32 @@ async function handleMessageEvent(
   // must agree on what "mentions me" means across both of Lark's id shapes.
   const mentioned = mentionsSelf(mentions, selfIds);
 
-  // --- Group chat access control ---
+  // --- Access control ---
+  // Identity first, addressing second. They answer different questions — "may
+  // you use this bot" and "was this meant for me" — and keeping them in that
+  // order means the thread lookup below is only paid for on behalf of someone
+  // entitled to it.
+  if (!ownerCheck) {
+    // A DM is addressed to the bot by existing, so it always deserves an
+    // answer. In a group, only a message that named the bot does: replying to
+    // every passing remark would make the bot a nuisance in a chat it was
+    // merely invited to.
+    if (chatType === "p2p" || mentioned) {
+      try {
+        await ctx.channel.sendReply(chatId, rejectionNotice(ctx.config.owners, senderId));
+      } catch {}
+    }
+    logger.debug("ignoring message from non-owner", {
+      messageId,
+      chatId,
+      chatType,
+      senderId,
+      ownersConfigured: ctx.config.owners.length,
+    });
+    return;
+  }
+
+  // --- Group addressing ---
   if (chatType === "group") {
     let mentionRequired = ctx.dispatcher.getMentionRequired?.("lark", chatId) ?? true;
     // A thread the bot itself started needs no @mention — the user replying in
@@ -301,31 +356,12 @@ async function handleMessageEvent(
     }
     const inListenMode = !mentionRequired;
 
-    if (!ownerCheck) {
-      // Non-owner in group
-      if (mentioned) {
-        // Non-owner @bot: reply with rejection
-        try {
-          await ctx.channel.sendReply(chatId, "⚠️ This bot only responds to authorized users.");
-        } catch {}
-      }
-      // Either way, don't process
-      logger.debug("ignoring group message from non-owner", { messageId, chatId, senderId });
-      return;
-    }
-
     // Owner in group: check @bot or listen mode
     if (!mentioned && !inListenMode) {
       // Owner didn't @bot and listen mode is off — ignore silently
       logger.debug("ignoring group message without @bot", { messageId, chatId });
       return;
     }
-  }
-
-  // --- P2P access control ---
-  if (chatType === "p2p" && !ownerCheck) {
-    logger.debug("ignoring p2p message from non-owner", { messageId, chatId, senderId });
-    return;
   }
 
   // Running-state stale check: the message passed access control but its

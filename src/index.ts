@@ -120,6 +120,26 @@ program
     });
   });
 
+const lark = program
+  .command("lark")
+  .description("Manage the Lark channel allowlist");
+
+lark
+  .command("allow <openId>")
+  .description("Add a Lark open id (ou_…) to the allowlist")
+  .action(async (openId: string) => {
+    const { larkAllow } = await import("./commands/lark.js");
+    await larkAllow(openId);
+  });
+
+lark
+  .command("deny <openId>")
+  .description("Remove a Lark open id from the allowlist")
+  .action(async (openId: string) => {
+    const { larkDeny } = await import("./commands/lark.js");
+    await larkDeny(openId);
+  });
+
 const telegram = program
   .command("telegram")
   .description("Manage the Telegram channel allowlist");

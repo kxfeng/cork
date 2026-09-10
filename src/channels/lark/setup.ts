@@ -1,6 +1,6 @@
 import { select, input, password } from "@inquirer/prompts";
 import qrcode from "qrcode-terminal";
-import { getDomainBaseUrl } from "./client.js";
+import { detectOwner, getDomainBaseUrl } from "./client.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 
@@ -156,29 +156,29 @@ async function manualFlow(): Promise<AppRegistrationResult> {
 
   console.log(`✓ 凭证校验成功 Credentials verified (${domain})`);
 
-  // Auto-detect owner from app info
+  // The owner is the whole allowlist, and an empty allowlist now means the bot
+  // serves nobody — so a silent miss here would leave setup looking successful
+  // and the bot unusable. Say what went wrong, and let a retryable failure end
+  // setup so the user can simply run it again.
+  const owner = await detectOwner(domain, appId.trim(), appSecret.trim());
   let ownerOpenId = "";
-  try {
-    const baseUrl = getDomainBaseUrl(domain);
-    const tokenRes = await httpPostJson(
-      `${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`,
-      { app_id: appId.trim(), app_secret: appSecret.trim() }
-    );
-    if (tokenRes.code === 0 && tokenRes.tenant_access_token) {
-      const appRes = await fetch(
-        `${baseUrl}/open-apis/application/v6/applications/${appId.trim()}?lang=zh_cn`,
-        { headers: { Authorization: `Bearer ${tokenRes.tenant_access_token}` } }
-      );
-      const appData = await appRes.json() as any;
-      if (appData.code === 0) {
-        ownerOpenId = appData.data?.app?.owner?.owner_id || appData.data?.app?.creator_id || "";
-        if (ownerOpenId) {
-          console.log(`✓ 已自动获取 Owner: ${ownerOpenId}`);
-        }
-      }
-    }
-  } catch {
-    logger.warn("failed to auto-detect owner, skipping");
+  if (owner.openId) {
+    ownerOpenId = owner.openId;
+    console.log(`✓ 已自动获取 Owner: ${ownerOpenId}`);
+  } else if (owner.retryable) {
+    console.error(`✗ 获取 Owner 失败 Could not fetch owner: ${owner.reason}`);
+    console.error("  这通常是网络或凭证问题，请重新运行 cork setup 重试。");
+    console.error("  This is usually transient — re-run cork setup.");
+    process.exit(1);
+  } else {
+    // Not retryable: running setup again would fail the same way. Carry on
+    // without an owner — the first inbound message hands the user their id and
+    // the command to allowlist it.
+    console.warn(`⚠️ 无法自动获取 Owner Could not detect owner: ${owner.reason}`);
+    console.warn("  重试也无济于事，setup 继续。启动后给 bot 发一条消息，");
+    console.warn("  它会回复你的 ID 和授权命令。");
+    console.warn("  Retrying will not help. Message the bot after startup —");
+    console.warn("  it replies with your ID and the command to allowlist it.");
   }
 
   return {

@@ -71,6 +71,89 @@ export async function getBotInfo(
   return { openId: "", name: "bot" };
 }
 
+/** Outcome of an owner lookup: the id, or why not and whether to try again. */
+interface OwnerLookup {
+  openId: string;
+  reason: string;
+  /** Whether running the same call again could plausibly succeed. */
+  retryable: boolean;
+}
+
+/**
+ * Look up an app's owner, reporting failures instead of swallowing them.
+ *
+ * The distinction that matters is retryable vs not. A missing permission
+ * arrives as HTTP 200 with a non-zero `code` — no exception, nothing thrown —
+ * and no amount of retrying will change it; the caller has to route around it.
+ * A network blip or a bad token is worth another run of setup. The old code
+ * caught only thrown errors, so the permission case slipped through as a
+ * silent empty string.
+ */
+export async function detectOwner(
+  domain: "feishu" | "lark",
+  appId: string,
+  appSecret: string
+): Promise<OwnerLookup> {
+  const baseUrl = getDomainBaseUrl(domain);
+  let token: string;
+  try {
+    const tokenRes = (await (
+      await fetch(`${baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+      })
+    ).json()) as any;
+    if (tokenRes.code !== 0 || !tokenRes.tenant_access_token) {
+      return {
+        openId: "",
+        reason: `token request failed (code ${tokenRes.code}: ${tokenRes.msg})`,
+        retryable: true,
+      };
+    }
+    token = tokenRes.tenant_access_token;
+  } catch (err) {
+    return {
+      openId: "",
+      reason: `token request error (${(err as Error)?.message})`,
+      retryable: true,
+    };
+  }
+
+  try {
+    const appRes = await fetch(
+      `${baseUrl}/open-apis/application/v6/applications/${appId}?lang=zh_cn`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+    const appData = (await appRes.json()) as any;
+    if (appData.code !== 0) {
+      return {
+        openId: "",
+        reason: `app info denied (code ${appData.code}: ${appData.msg})`,
+        // A non-zero code here is the app lacking a permission or being
+        // refused by tenant policy. Both outlive a retry.
+        retryable: false,
+      };
+    }
+    const openId =
+      appData.data?.app?.owner?.owner_id || appData.data?.app?.creator_id || "";
+    if (!openId) {
+      return {
+        openId: "",
+        reason: "app info carried neither owner nor creator id",
+        retryable: false,
+      };
+    }
+    return { openId, reason: "", retryable: false };
+  } catch (err) {
+    return {
+      openId: "",
+      reason: `app info error (${(err as Error)?.message})`,
+      retryable: true,
+    };
+  }
+}
+
 export function getDomainBaseUrl(domain: "feishu" | "lark"): string {
   return domain === "lark"
     ? "https://open.larksuite.com"

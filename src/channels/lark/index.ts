@@ -1,6 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Resolver } from "node:dns/promises";
 import { getLogger } from "../../logger.js";
+import { loadConfig, saveConfig } from "../../config/loader.js";
 import type {
   Channel,
   Dispatcher,
@@ -9,6 +10,7 @@ import type {
 } from "../types.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import {
+  detectOwner,
   createLarkClient,
   createSdkLogger,
   sendMessage,
@@ -102,6 +104,52 @@ export class LarkChannel implements Channel {
     return this.botOpenId;
   }
 
+  /**
+   * Fill in the owner allowlist if it is empty, and persist what it finds.
+   *
+   * An empty list means the bot serves nobody, so this is the difference
+   * between a working install and a mute one. Setup normally fills it; this
+   * covers the installs that predate the stricter setup, and the ones where
+   * the lookup failed then but works now.
+   *
+   * The result is written back to the config file rather than kept in memory:
+   * otherwise every start would re-derive it, and the file would keep claiming
+   * the bot has no owner. Doing so edits the user's config, so it says plainly
+   * what it added.
+   */
+  private async backfillOwner(): Promise<void> {
+    if (this.config.owners.length > 0) return;
+    logger.warn("no owners configured — attempting to detect the app owner");
+    const found = await detectOwner(
+      this.config.domain,
+      this.config.appId,
+      this.config.appSecret
+    );
+    if (!found.openId) {
+      logger.warn("could not detect an owner; the bot will refuse everyone", {
+        reason: found.reason,
+      });
+      return;
+    }
+    // Mutating the live config object too, so this run honours it without a
+    // restart — `this.config` is the same object the event handler reads.
+    this.config.owners.push(found.openId);
+    try {
+      const stored = loadConfig();
+      const lark = stored.channels.lark;
+      if (lark && lark.owners.length === 0) {
+        lark.owners.push(found.openId);
+        saveConfig(stored);
+      }
+      logger.info("added app owner to the allowlist", { owner: found.openId });
+      console.log(`✓ Added app owner to the allowlist: ${found.openId}`);
+    } catch (err) {
+      // Kept in memory even if the write failed — better a working session
+      // than a mute one.
+      logger.warn("could not persist the detected owner", { err });
+    }
+  }
+
   async start(dispatcher: Dispatcher): Promise<void> {
     // Fetch bot's own info for @bot detection and name display. Three tries:
     // the open id gates every @mention check, and losing it costs far more
@@ -115,6 +163,8 @@ export class LarkChannel implements Channel {
     } else {
       logger.warn("could not resolve bot open_id, @bot detection in groups may not work");
     }
+
+    await this.backfillOwner();
 
     this.eventDispatcher = createEventDispatcher({
       config: this.config,
