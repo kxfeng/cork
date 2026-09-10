@@ -273,10 +273,14 @@ async function handleMessageEvent(
     return;
   }
 
-  const botOpenId = ctx.channel.botOpenId;
   // Both ids: a receive-event mention carries the bot's open id, a mention
   // read back over REST carries its app id (`cli_…`). Matching only one made
   // the @-gate miss half the cases.
+  //
+  // The open id is awaited rather than read: if startup failed to resolve it,
+  // the app id alone cannot match a receive-event mention, and the @-gate would
+  // quietly reject every message in every group that requires one.
+  const botOpenId = await ctx.channel.ensureBotOpenId();
   const selfIds = [botOpenId, ctx.channel.botAppId].filter((v): v is string => !!v);
   const ownerCheck = isOwner(senderId, ctx.config.owners);
   // mentionsSelf, not a local matcher: the @-gate and the text rendering

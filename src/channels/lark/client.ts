@@ -37,20 +37,38 @@ export interface BotInfo {
   name: string;
 }
 
-export async function getBotInfo(client: lark.Client): Promise<BotInfo> {
-  try {
-    const res = await (client as any).request({
-      method: "GET",
-      url: "/open-apis/bot/v3/info",
-    });
-    return {
-      openId: res?.bot?.open_id || "",
-      name: res?.bot?.app_name || "bot",
-    };
-  } catch (err) {
-    logger.warn("failed to get bot info", { err });
-    return { openId: "", name: "bot" };
+/**
+ * The bot's own identity. Worth retrying for: an empty `openId` silently
+ * disables @mention detection everywhere, so one flaky call at startup would
+ * otherwise leave every mention-requiring group unable to recognise being
+ * addressed until someone restarts the daemon.
+ *
+ * A call that succeeds but carries no open id counts as a failure — the value
+ * is what we came for, and a well-formed empty answer breaks just as much as
+ * a thrown one.
+ */
+export async function getBotInfo(
+  client: lark.Client,
+  attempts = 1
+): Promise<BotInfo> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await (client as any).request({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+      });
+      const openId = res?.bot?.open_id || "";
+      if (openId) return { openId, name: res?.bot?.app_name || "bot" };
+      logger.warn("bot info returned no open_id", { attempt: i + 1, attempts });
+    } catch (err) {
+      logger.warn("failed to get bot info", { err, attempt: i + 1, attempts });
+    }
+    // Back off between tries; nothing is waiting on this but startup.
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+    }
   }
+  return { openId: "", name: "bot" };
 }
 
 export function getDomainBaseUrl(domain: "feishu" | "lark"): string {

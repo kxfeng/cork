@@ -51,6 +51,8 @@ export class LarkChannel implements Channel {
   private config: LarkChannelConfig;
   botOpenId = "";
   botName = "bot";
+  /** In-flight late identity lookup, shared by concurrent callers. */
+  private botIdentityRefresh: Promise<void> | null = null;
   botAppId = "";
 
   // Watchdog state
@@ -68,9 +70,43 @@ export class LarkChannel implements Channel {
     this.client = createLarkClient(config);
   }
 
+  /**
+   * The bot's own open id, fetched now if startup could not get it.
+   *
+   * Every @mention check compares against this, so an id missing since startup
+   * makes the bot deaf to being named — for as long as the daemon runs. Rather
+   * than carry that until someone notices and restarts, retry when the value
+   * is actually needed: the next message repairs the session.
+   *
+   * Concurrent callers share one request. Messages arrive in bursts, and a
+   * still-failing lookup would otherwise fire once per message in the burst.
+   */
+  async ensureBotOpenId(): Promise<string> {
+    if (this.botOpenId) return this.botOpenId;
+    if (!this.botIdentityRefresh) {
+      this.botIdentityRefresh = getBotInfo(this.client)
+        .then((info) => {
+          if (!info.openId) return;
+          this.botOpenId = info.openId;
+          this.botName = info.name;
+          logger.info("bot identity resolved late", {
+            botOpenId: this.botOpenId,
+            botName: this.botName,
+          });
+        })
+        .finally(() => {
+          this.botIdentityRefresh = null;
+        });
+    }
+    await this.botIdentityRefresh;
+    return this.botOpenId;
+  }
+
   async start(dispatcher: Dispatcher): Promise<void> {
-    // Fetch bot's own info for @bot detection and name display
-    const botInfo = await getBotInfo(this.client);
+    // Fetch bot's own info for @bot detection and name display. Three tries:
+    // the open id gates every @mention check, and losing it costs far more
+    // than a couple of seconds at startup.
+    const botInfo = await getBotInfo(this.client, 3);
     this.botOpenId = botInfo.openId;
     this.botName = botInfo.name;
     this.botAppId = this.config.appId;

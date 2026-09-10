@@ -41,6 +41,7 @@ function makeCtx(fetchName: (chatId: string) => Promise<string>, sender = "ou_me
       ],
       botOpenId: "ou_bot",
       botAppId: "cli_bot",
+      ensureBotOpenId: async () => "ou_bot",
       botName: "Cork",
       addReaction: async () => "",
       sendReply: async () => {},
