@@ -32,7 +32,11 @@ const sessionManager = {
   defaultWorkspace: () => os.tmpdir(),
 } as never;
 
-const message = (text: string, threadId?: string): IncomingMessage => ({
+const message = (
+  text: string,
+  threadId?: string,
+  commandText?: string
+): IncomingMessage => ({
   channel: "lark",
   chatId: "oc_x",
   chatType: "group",
@@ -40,6 +44,7 @@ const message = (text: string, threadId?: string): IncomingMessage => ({
   messageId: "om_1",
   text,
   ...(threadId ? { threadId } : {}),
+  ...(commandText !== undefined ? { commandText } : {}),
 });
 
 function write(name: string, body: string, mode = 0o755): void {
@@ -140,5 +145,54 @@ describe("handleCommand → user commands", () => {
     await handleCommand(channel, message("/demo", "omt_1"), sessionManager);
 
     expect(sent[0].opts).toMatchObject({ replyInThread: true });
+  });
+});
+
+describe("a command behind an @mention", () => {
+  /**
+   * In a group the bot can only be reached by naming it, so every command
+   * arrives as "@bot /status" and matches nothing on its own. The channel
+   * supplies `commandText` — the same message with the bot's own leading
+   * mention removed — and the matcher prefers it, while `text` keeps the
+   * mention for the model to see.
+   */
+
+  it("matches on commandText, not on the text the model sees", async () => {
+    const { handleCommand } = await load();
+
+    const res = await handleCommand(
+      channel,
+      message("@XiaoK /status", undefined, "/status"),
+      sessionManager
+    );
+
+    expect(res.handled).toBe(true);
+    expect(sent[0].content).toContain("Session Status");
+  });
+
+  it("does not fire when the mention belongs to another bot", async () => {
+    // "@CoKo /status" reaches us too in a mention-off group. Its commandText
+    // still carries the other bot's mention, so it must not match — otherwise
+    // we would run a command addressed to someone else.
+    const { handleCommand } = await load();
+
+    const res = await handleCommand(
+      channel,
+      message("@CoKo /status", undefined, "@CoKo /status"),
+      sessionManager
+    );
+
+    expect(res.handled).toBe(false);
+    expect(sent).toEqual([]);
+  });
+
+  it("falls back to text when the channel supplies no commandText", async () => {
+    // Telegram and cork's own injected messages have nothing to strip.
+    const { handleCommand } = await load();
+
+    const res = await handleCommand(channel, message("/status"), sessionManager);
+
+    expect(res.handled).toBe(true);
+    expect(sent[0].content).toContain("Session Status");
   });
 });

@@ -81,6 +81,41 @@ export function resolveMentions(
   return out.trim();
 }
 
+/**
+ * The text with a leading mention of THIS bot removed, for command matching.
+ *
+ * Chat commands are matched exactly (`/status`), and in a group the only way
+ * to reach the bot is to name it first — so every command arrives as
+ * "@bot /status" and matches nothing. The fix belongs here rather than in the
+ * matcher: this runs on the raw body, where a mention is still the fixed-width
+ * placeholder `@_user_N`, so no name has to be parsed out of prose. Names may
+ * contain spaces; keys never do.
+ *
+ * Only OUR mention is stripped, and only from the front. Stripping any leading
+ * `@name` would make "@CoKo /status" — a command aimed at the other bot in the
+ * group — read as a command for us, and in a mention-off chat we receive that
+ * message too. The old implementation had exactly this bug, because it removed
+ * every mention regardless of who it pointed at.
+ */
+export function stripLeadingSelfMention(
+  text: string,
+  mentions: LarkMention[] | undefined,
+  selfIds: string[]
+): string {
+  if (!mentions || mentions.length === 0) return text;
+  let out = text.trimStart();
+  // A message may name the bot more than once before the command ("@bot @bot
+  // /status"); peel while the front still belongs to us.
+  for (;;) {
+    const hit = mentions.find(
+      (m) => m.key && isSelf(m, selfIds) && out.startsWith(m.key)
+    );
+    if (!hit) break;
+    out = out.slice((hit.key as string).length).trimStart();
+  }
+  return out;
+}
+
 /** Whether any mention in the list points at this bot. */
 export function mentionsSelf(
   mentions: LarkMention[] | undefined,

@@ -41,6 +41,15 @@ export interface IncomingMessage {
    * and still expect a reply.
    */
   mentionsYou?: boolean;
+  /**
+   * The text as a chat command would be typed, with a leading mention of the
+   * bot removed. Only the command matcher reads this; `text` — what the model
+   * sees — keeps every mention it arrived with.
+   *
+   * Absent when the channel has nothing to strip, in which case the matcher
+   * falls back to `text`.
+   */
+  commandText?: string;
 }
 
 export interface ReplyResult {

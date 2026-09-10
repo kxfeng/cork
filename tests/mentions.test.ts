@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   resolveMentions,
   mentionsSelf,
+  stripLeadingSelfMention,
   type LarkMention,
 } from "../src/channels/lark/mentions.js";
 
@@ -138,5 +139,71 @@ describe("mentionsSelf", () => {
     expect(
       mentionsSelf([pushMention("@_user_1", SELF_OPEN, "XiaoK")], [])
     ).toBe(false);
+  });
+});
+
+describe("stripLeadingSelfMention", () => {
+  // Chat commands are matched exactly, and in a group the bot can only be
+  // reached by naming it — so "@bot /status" has to become "/status" or no
+  // command ever fires. Done on the raw body, where mentions are still keys.
+
+  it("removes our own leading mention", () => {
+    const out = stripLeadingSelfMention(
+      "@_user_1 /status",
+      [pushMention("@_user_1", SELF_OPEN, "XiaoK")],
+      SELF
+    );
+    expect(out).toBe("/status");
+  });
+
+  it("leaves another bot's mention alone", () => {
+    // "@CoKo /status" is a command for the other bot. In a mention-off group
+    // we receive it too, and stripping any leading @name would make us run it.
+    // The old implementation removed every mention and had exactly this bug.
+    const out = stripLeadingSelfMention(
+      "@_user_1 /status",
+      [pushMention("@_user_1", "ou_coko", "CoKo")],
+      SELF
+    );
+    expect(out).toBe("@_user_1 /status");
+  });
+
+  it("strips ours but not one that follows it", () => {
+    const out = stripLeadingSelfMention(
+      "@_user_1 @_user_2 /status",
+      [
+        pushMention("@_user_1", SELF_OPEN, "XiaoK"),
+        pushMention("@_user_2", "ou_coko", "CoKo"),
+      ],
+      SELF
+    );
+    expect(out).toBe("@_user_2 /status");
+  });
+
+  it("peels repeated leading mentions of us", () => {
+    const out = stripLeadingSelfMention(
+      "@_user_1 @_user_2 /new",
+      [
+        pushMention("@_user_1", SELF_OPEN, "XiaoK"),
+        restMention("@_user_2", SELF_APP, "XiaoK"),
+      ],
+      SELF
+    );
+    expect(out).toBe("/new");
+  });
+
+  it("only touches the front", () => {
+    // A mention inside the sentence is content, not addressing.
+    const out = stripLeadingSelfMention(
+      "tell @_user_1 about it",
+      [pushMention("@_user_1", SELF_OPEN, "XiaoK")],
+      SELF
+    );
+    expect(out).toBe("tell @_user_1 about it");
+  });
+
+  it("passes ordinary text through", () => {
+    expect(stripLeadingSelfMention("/status", [], SELF)).toBe("/status");
+    expect(stripLeadingSelfMention("hello", undefined, SELF)).toBe("hello");
   });
 });

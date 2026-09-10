@@ -4,7 +4,7 @@ import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
-import { mentionsSelf } from "./mentions.js";
+import { mentionsSelf, stripLeadingSelfMention } from "./mentions.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
@@ -547,6 +547,17 @@ async function handleMessageEvent(
     senderName: (await resolveName(senderId)) || undefined,
     // Only for groups — see IncomingMessage.mentionsYou.
     mentionsYou: chatType === "group" ? mentioned : undefined,
+    // Computed from the raw body, not from `text`: both derive from the same
+    // source and neither consumes the other, so what the model sees keeps its
+    // mentions intact. Only simple text carries commands.
+    commandText:
+      msgType === "text"
+        ? stripLeadingSelfMention(
+            parseMessageContent(msgType, effectiveContent),
+            mentions,
+            selfIds
+          ).trim()
+        : undefined,
   };
 
   logger.info(

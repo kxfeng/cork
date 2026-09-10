@@ -51,7 +51,12 @@ export async function handleCommand(
   message: IncomingMessage,
   sessionManager: SessionManager
 ): Promise<CommandResult> {
-  const text = message.text.trim();
+  // `commandText` where the channel provides one: in a group the bot must be
+  // named to be reached at all, so a command arrives as "@bot /status" and
+  // would match nothing. That field is the same message with our own leading
+  // mention removed; `message.text` keeps it, since the model should see what
+  // was actually said.
+  const text = (message.commandText ?? message.text).trim();
 
   if (text === "/status") {
     return handleStatus(channel, message, sessionManager);
