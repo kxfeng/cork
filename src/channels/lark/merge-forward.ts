@@ -84,10 +84,14 @@ export async function formatThreadSeed(
 
   const parts: string[] = [];
   for (const m of ordered) {
+    // No selfIds: inside a forward/thread every mention is rendered as a
+    // name, this bot's own included. These are historical addresses — "who
+    // did that message address" is the point, even when the answer is "me".
     const content = await formatLeafContent(channel, {
       messageId: m.messageId,
       msgType: m.msgType,
       content: m.content || "{}",
+      mentions: m.mentions,
     });
     parts.push(
       wrapAsMessage(
@@ -204,6 +208,7 @@ async function formatQuote(
     messageId: parentId,
     msgType: parent.msgType,
     content: parent.content,
+    mentions: parent.mentions,
   });
   let senderName = "unknown";
   if (parent.senderId) {
@@ -295,6 +300,7 @@ async function formatSubTree(
           messageId: item.message_id || "",
           msgType,
           content: item.body?.content || "{}",
+          mentions: item.mentions,
         },
         entryMessageId
       );

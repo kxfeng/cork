@@ -4,6 +4,7 @@ import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
+import { mentionsSelf, otherMentionNames } from "./mentions.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
@@ -183,35 +184,10 @@ function formatCreateTime(ms: number): string {
 }
 
 /**
- * Check if the bot is mentioned in the message.
- */
-function isBotMentioned(mentions: any[], botOpenId: string): boolean {
-  if (!mentions || mentions.length === 0) return false;
-  if (!botOpenId) {
-    // Fallback: can't detect, assume not mentioned
-    return false;
-  }
-  return mentions.some((m: any) => m.id?.open_id === botOpenId);
-}
-
-/**
  * Check if the sender is an owner.
  */
 function isOwner(senderId: string, owners: string[]): boolean {
   return owners.length === 0 || owners.includes(senderId);
-}
-
-/**
- * Strip @bot mention text from message content.
- */
-function stripMentions(text: string, mentions: any[]): string {
-  if (!mentions) return text;
-  for (const mention of mentions) {
-    if (mention.key) {
-      text = text.replace(mention.key, "").trim();
-    }
-  }
-  return text;
 }
 
 // Cache of "is this thread rooted by the bot" per thread_id, so the @-gate
@@ -298,8 +274,14 @@ async function handleMessageEvent(
   }
 
   const botOpenId = ctx.channel.botOpenId;
+  // Both ids: a receive-event mention carries the bot's open id, a mention
+  // read back over REST carries its app id (`cli_…`). Matching only one made
+  // the @-gate miss half the cases.
+  const selfIds = [botOpenId, ctx.channel.botAppId].filter((v): v is string => !!v);
   const ownerCheck = isOwner(senderId, ctx.config.owners);
-  const mentioned = isBotMentioned(mentions, botOpenId);
+  // mentionsSelf, not a local matcher: the @-gate and the text rendering
+  // must agree on what "mentions me" means across both of Lark's id shapes.
+  const mentioned = mentionsSelf(mentions, selfIds);
 
   // --- Group chat access control ---
   if (chatType === "group") {
@@ -412,12 +394,8 @@ async function handleMessageEvent(
       messageId,
       msgType,
       content: effectiveContent,
+      mentions,
     });
-  }
-
-  // Strip @bot mentions from text in group chats
-  if (chatType === "group" && mentions.length > 0) {
-    text = stripMentions(text, mentions);
   }
 
   // Lark thread handling. A threaded message routes to its own per-thread
@@ -524,6 +502,7 @@ async function handleMessageEvent(
     text: text.trim(),
     chatName: chatName || undefined,
     threadId: threadId || undefined,
+    mentionsOthers: otherMentionNames(mentions, selfIds),
   };
 
   logger.info(

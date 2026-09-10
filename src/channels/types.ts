@@ -13,6 +13,14 @@ export interface IncomingMessage {
    * message to a per-thread session (`lark_<chatId>_<threadId>`). Absent for
    * ordinary whole-chat messages. */
   threadId?: string;
+  /**
+   * Display names this message addressed BESIDES the bot itself, in the order
+   * they appear. Surfaced to the model as a `mentions` attribute on the
+   * channel tag: in a group holding several bots, "this was addressed to me
+   * and to CoKo" is the difference between answering and staying quiet, and
+   * it cannot be recovered from the message text alone.
+   */
+  mentionsOthers?: string[];
 }
 
 export interface ReplyResult {

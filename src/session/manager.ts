@@ -726,6 +726,11 @@ export class SessionManager extends EventEmitter {
         chatId: message.chatId,
         senderId: message.senderId,
         messageId: message.messageId,
+        // Only when non-empty: an always-present empty attribute is noise on
+        // every message in every single-bot chat, which is nearly all of them.
+        ...(message.mentionsOthers && message.mentionsOthers.length > 0
+          ? { mentions: message.mentionsOthers.join(", ") }
+          : {}),
       },
     };
 

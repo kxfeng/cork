@@ -22,6 +22,7 @@ import {
   type ResourceKey,
 } from "./content.js";
 import { convertCard, extractCardImageKeys } from "./card-converter.js";
+import { resolveMentions, type LarkMention } from "./mentions.js";
 
 const logger = getLogger("lark-format");
 
@@ -46,6 +47,7 @@ export interface FormatChannel {
     senderId?: string;
     senderType?: string;
     createTime?: number;
+    mentions?: LarkMention[];
   } | null>;
 }
 
@@ -55,6 +57,11 @@ export interface MessageLike {
   msgType: string;
   /** Raw body content; for `interactive` this must be the raw_card_content envelope. */
   content: string;
+  /**
+   * Lark's mention table for this message. Without it the body's `@_user_N`
+   * placeholders name nobody — see mentions.ts.
+   */
+  mentions?: LarkMention[];
 }
 
 interface DownloadedMedia {
@@ -255,7 +262,7 @@ export async function formatLeafContent(
         card = card.split(`[image: ${k}]`).join(repl);
       }
     }
-    return card;
+    return resolveMentions(card, msg.mentions);
   }
 
   // text / post / sticker / share_* / location / unknown — synchronous parse.
@@ -276,5 +283,6 @@ export async function formatLeafContent(
     }
   }
 
-  return text;
+  // Last, so a placeholder that survived media substitution is still named.
+  return resolveMentions(text, msg.mentions);
 }

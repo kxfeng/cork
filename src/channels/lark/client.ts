@@ -2,6 +2,7 @@ import * as lark from "@larksuiteoapi/node-sdk";
 import fs from "node:fs";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
+import type { LarkMention } from "./mentions.js";
 
 const logger = getLogger("lark-client");
 const sdkLogger = getLogger("lark-sdk");
@@ -268,6 +269,8 @@ export interface FetchedMessage {
   senderId?: string;
   senderType?: string;
   createTime?: number;
+  /** Mention placeholders → names. Needed to render `@_user_N` as an address. */
+  mentions?: LarkMention[];
 }
 
 export interface ThreadMessageItem {
@@ -279,6 +282,7 @@ export interface ThreadMessageItem {
   createTime?: number;
   /** Position within the thread: -1 = root, 0,1,2… = replies. */
   position?: number;
+  mentions?: LarkMention[];
 }
 
 /**
@@ -311,6 +315,7 @@ export async function fetchThreadMessages(
       senderId: it.sender?.id,
       senderType: it.sender?.sender_type,
       createTime: parseInt(it.create_time || "0", 10),
+      mentions: it.mentions,
       position:
         it.thread_message_position != null
           ? parseInt(it.thread_message_position, 10)
@@ -349,6 +354,7 @@ export async function fetchMessage(
       senderId: item.sender?.id,
       senderType: item.sender?.sender_type,
       createTime: parseInt(item.create_time || "0", 10) || undefined,
+      mentions: item.mentions,
     };
   } catch (err) {
     logger.debug("failed to fetch message", { err, messageId });
@@ -398,6 +404,8 @@ export interface SubMessageItem {
   parent_id?: string;
   body?: { content?: string };
   sender?: { id?: string; sender_type?: string };
+  /** Present on the REST shape; `id` inside is a bare string (app id for bots). */
+  mentions?: LarkMention[];
 }
 
 export async function fetchSubMessages(
