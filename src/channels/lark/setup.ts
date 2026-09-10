@@ -164,21 +164,20 @@ async function manualFlow(): Promise<AppRegistrationResult> {
   let ownerOpenId = "";
   if (owner.openId) {
     ownerOpenId = owner.openId;
-    console.log(`✓ 已自动获取 Owner: ${ownerOpenId}`);
-  } else if (owner.retryable) {
-    console.error(`✗ 获取 Owner 失败 Could not fetch owner: ${owner.reason}`);
-    console.error("  这通常是网络或凭证问题，请重新运行 cork setup 重试。");
-    console.error("  This is usually transient — re-run cork setup.");
-    process.exit(1);
+    console.log(`✓ Owner detected: ${ownerOpenId}`);
   } else {
-    // Not retryable: running setup again would fail the same way. Carry on
-    // without an owner — the first inbound message hands the user their id and
-    // the command to allowlist it.
-    console.warn(`⚠️ 无法自动获取 Owner Could not detect owner: ${owner.reason}`);
-    console.warn("  重试也无济于事，setup 继续。启动后给 bot 发一条消息，");
-    console.warn("  它会回复你的 ID 和授权命令。");
-    console.warn("  Retrying will not help. Message the bot after startup —");
-    console.warn("  it replies with your ID and the command to allowlist it.");
+    // Never fatal. Credentials are already verified by this point, so the bot
+    // will run and receive messages — it just has nobody on its allowlist yet,
+    // and the first message it gets hands the user their id and the command to
+    // fix that. Ending setup here would instead discard a working app id and
+    // secret the user just typed, for a step that has its own way out.
+    console.warn(`⚠️ Could not detect the app owner: ${owner.reason}`);
+    if (owner.retryable) {
+      console.warn("  This looks temporary — re-running cork setup may fix it.");
+    }
+    console.warn("  Setup continues with an empty allowlist. Send the bot a");
+    console.warn("  message after startup: it replies with your ID and the");
+    console.warn("  command to authorize yourself.");
   }
 
   return {

@@ -58,6 +58,19 @@ export async function showStatus(): Promise<void> {
     );
   }
 
+  // Owners, because an empty allowlist means the bot answers nobody — a state
+  // this command is the only easy place to notice. Startup tries to repair it
+  // and logs either way, but the daemon's output goes to the journal, which is
+  // not where anyone looks to ask "is my bot working".
+  const lark = config.channels?.lark;
+  if (lark) {
+    console.log(
+      lark.owners.length > 0
+        ? `Owners: ${lark.owners.length}`
+        : "Owners: none — the bot refuses everyone (cork lark allow <ou_…>)"
+    );
+  }
+
   // Just the count. The per-session detail is 8 lines each, so listing it
   // here scrolls the daemon header — the reason you ran `status` — off the
   // top of the screen as soon as a few chats are live. `cork session list`
