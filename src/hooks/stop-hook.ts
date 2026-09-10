@@ -11,6 +11,14 @@
  * needs to resend it through the tool. A misfire is harmless: if the model
  * actually did reply, it simply stops again.
  *
+ * The wording of that nudge is deliberately unspecific about WHAT to send: it
+ * reports that nothing reached the user and leaves the model to decide what
+ * that should be, since a turn may owe the chat several things rather than
+ * just its closing remark. It also names staying quiet as one of the outs —
+ * without that, a model that chose silence on purpose has no option matching
+ * its intent and will invent something to say rather than contradict the
+ * prompt. That case arrives with the second bot in a group.
+ *
  * It blocks at most once per turn: `stop_hook_active` (set by Claude Code
  * when the model is already continuing because a Stop hook blocked) gates
  * a second block, so a model that ignores the prompt cannot loop forever.
@@ -50,10 +58,10 @@ const REPLY_WAIT_MS = 4000;
 const POLL_MS = 150;
 
 const BLOCK_REASON =
-  "You did not call the mcp__cork-channel__reply tool this turn, so your " +
-  "response has not reached the user. If your last message was meant for " +
-  "the user, send it now via mcp__cork-channel__reply; if you already " +
-  "replied through the tool, you may stop.";
+  "Nothing reached the user through cork-channel this turn. Check whether " +
+  "anything is owed to the chat and send it via mcp__cork-channel__reply. " +
+  "If you already replied through the tool, or nothing is needed because " +
+  "you were only looking on, stop — do not manufacture a reply.";
 
 interface HookInput {
   transcript_path?: string;
