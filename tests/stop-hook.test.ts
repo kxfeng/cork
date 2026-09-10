@@ -38,7 +38,8 @@ const TEXT_ROW = JSON.stringify({
 /** Run the hook against a transcript; resolves with its stdout. */
 function runHook(
   transcriptPath: string,
-  env: Record<string, string> = {}
+  env: Record<string, string> = {},
+  extraInput: Record<string, unknown> = {}
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const p = spawn("node", [HOOK], {
@@ -49,7 +50,9 @@ function runHook(
     p.stdout.on("data", (c) => (out += c));
     p.on("error", reject);
     p.on("close", () => resolve(out));
-    p.stdin.write(JSON.stringify({ transcript_path: transcriptPath }));
+    p.stdin.write(
+      JSON.stringify({ transcript_path: transcriptPath, ...extraInput })
+    );
     p.stdin.end();
   });
 }
@@ -162,5 +165,90 @@ describe("stop-hook during an autopilot run", () => {
     noReply();
     writeAutopilot("running");
     expect(blocked(await runHook(transcript, { CORK_DIR: dir }))).toBe(true);
+  });
+});
+
+/**
+ * A turn that ends without a reply leaves cork's ack emoji on the message that
+ * started it: the daemon sees replies, not turn boundaries, so it cannot tell
+ * "said nothing" from "still working". This hook runs exactly at that boundary,
+ * and reports the silence through the command spool so the emoji comes off.
+ *
+ * Only on the second pass — the first one nudges, and a model that answers the
+ * nudge has not been silent after all.
+ */
+describe("stop-hook reporting a silent turn", () => {
+  let dir: string;
+  let transcript: string;
+
+  const env = () => ({ CORK_DIR: dir, CORK_SESSION_KEY: "sess-1" });
+
+  /** Spool commands the hook wrote, parsed. */
+  const spooled = (): Array<{ cmd: string; args: Record<string, unknown> }> => {
+    const spool = path.join(dir, "spool");
+    if (!fs.existsSync(spool)) return [];
+    return fs
+      .readdirSync(spool)
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => JSON.parse(fs.readFileSync(path.join(spool, f), "utf8")));
+  };
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-hook-silent-"));
+    transcript = path.join(dir, "transcript.jsonl");
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("asks the daemon to clear the acks", async () => {
+    fs.writeFileSync(transcript, [CHANNEL_ROW("for the other bot"), TEXT_ROW].join("\n") + "\n");
+
+    const out = await runHook(transcript, env(), { stop_hook_active: true });
+
+    // Second pass never blocks — it only reports.
+    expect(blocked(out)).toBe(false);
+    expect(spooled()).toEqual([
+      { cmd: "clear_acks", args: { sessionKey: "sess-1" } },
+    ]);
+  });
+
+  it("says nothing when the model answered the nudge", async () => {
+    // Blocked once, then replied: the ack comes off through the reply path,
+    // and reporting silence here would clear acks for a turn that spoke.
+    fs.writeFileSync(transcript, [CHANNEL_ROW("hi"), REPLY_ROW].join("\n") + "\n");
+
+    await runHook(transcript, env(), { stop_hook_active: true });
+
+    expect(spooled()).toEqual([]);
+  });
+
+  it("does not report on the first pass", async () => {
+    // The first pass nudges instead; the model may still be about to reply.
+    fs.writeFileSync(transcript, [CHANNEL_ROW("hi"), TEXT_ROW].join("\n") + "\n");
+
+    const out = await runHook(transcript, env());
+
+    expect(blocked(out)).toBe(true);
+    expect(spooled()).toEqual([]);
+  });
+
+  it("stays quiet when it does not know which session it is", async () => {
+    // Without CORK_SESSION_KEY there is nothing to name in the command, and a
+    // malformed one would only be dropped by the daemon.
+    //
+    // Blanked rather than omitted: the hook inherits this process's
+    // environment, and these tests are themselves run from a cork session, so
+    // leaving the key out would let the real one through.
+    fs.writeFileSync(transcript, [CHANNEL_ROW("hi"), TEXT_ROW].join("\n") + "\n");
+
+    await runHook(
+      transcript,
+      { CORK_DIR: dir, CORK_SESSION_KEY: "" },
+      { stop_hook_active: true }
+    );
+
+    expect(spooled()).toEqual([]);
   });
 });

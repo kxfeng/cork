@@ -154,6 +154,9 @@ export class CorkDaemon {
       case "send_message":
         this.handleSendMessage(command.args);
         break;
+      case "clear_acks":
+        this.handleClearAcks(command.args);
+        break;
       default:
         logger.warn("unknown spool command", { cmd: command.cmd });
     }
@@ -232,6 +235,46 @@ export class CorkDaemon {
       );
   }
 
+  /**
+   * Take the acks off after a turn that said nothing.
+   *
+   * Sent by the Stop hook, which runs at the turn boundary the daemon cannot
+   * see: the socket carries replies, so a turn that produces none is
+   * indistinguishable from one still in progress. Without this the ack would
+   * stay on a message nobody is working on until the next reply happened to
+   * clear it — or forever, if the conversation ended there.
+   */
+  private handleClearAcks(args: Record<string, unknown>): void {
+    const sessionKey =
+      typeof args.sessionKey === "string" ? args.sessionKey : undefined;
+    if (!sessionKey) {
+      logger.warn("clear_acks missing sessionKey", { args });
+      return;
+    }
+    const session = this.router.sessionManager.getSessionByKey(sessionKey);
+    if (!session) return;
+    const channel = this.findChannel(session.meta);
+    if (!channel) return;
+    this.clearAcks(sessionKey, session.meta.chatId, channel);
+  }
+
+  /**
+   * Take the acks a session is holding off the messages that carry them.
+   * Best-effort: a reaction that cannot be removed is already gone from the
+   * queue, so a failure costs one stale emoji, never a retry loop.
+   */
+  private clearAcks(sessionKey: string, chatId: string, channel: Channel): void {
+    for (const pending of this.router.sessionManager.takePendingReactions(
+      sessionKey
+    )) {
+      channel
+        .removeReaction(chatId, pending.messageId, pending.reactionId)
+        .catch((err) => {
+          logger.debug("failed to remove ack reaction", { err });
+        });
+    }
+  }
+
   private handleReply(msg: ReplyMessage): void {
     const sessionKey = msg.corkSessionKey;
     const session = this.router.sessionManager.getSessionByKey(sessionKey);
@@ -243,15 +286,20 @@ export class CorkDaemon {
     const chatId = session.meta.chatId;
     const content = msg.content;
 
-    if (!content?.trim()) {
-      logger.debug("empty reply, skipping", { sessionKey });
-      return;
-    }
-
     // Find the channel to send through
     const channel = this.findChannel(session.meta);
     if (!channel) {
+      // Nothing can be unacked without a channel to call — the acks stay
+      // queued for the timeout sweep.
       logger.error("no channel found for reply", { sessionKey });
+      return;
+    }
+
+    if (!content?.trim()) {
+      // The model did call the reply tool, it just had nothing to send. That
+      // still counts as answering, so the acks come off.
+      logger.debug("empty reply, skipping", { sessionKey });
+      this.clearAcks(sessionKey, chatId, channel);
       return;
     }
 
@@ -272,15 +320,10 @@ export class CorkDaemon {
     channel
       .sendReply(chatId, content, { ...replyOpts, files: msg.files })
       .then(() => {
-        // Remove the ack emoji for the oldest pending message in this session
-        const pending = this.router.sessionManager.popPendingReaction(sessionKey);
-        if (pending) {
-          channel
-            .removeReaction(chatId, pending.messageId, pending.reactionId)
-            .catch((err) => {
-              logger.debug("failed to remove ack reaction", { err });
-            });
-        }
+        // Everything acked so far, not just the oldest one: see
+        // takePendingReactions for why a reply cannot name the message it
+        // answers, and why speaking at all settles the whole backlog.
+        this.clearAcks(sessionKey, chatId, channel);
       })
       .catch((err) => {
         logger.error("failed to send reply", { sessionKey, channel: channel.name, err });

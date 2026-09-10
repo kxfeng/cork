@@ -685,10 +685,26 @@ export class SessionManager extends EventEmitter {
     session.pendingReactions.push({ messageId, reactionId });
   }
 
-  popPendingReaction(key: string): PendingReaction | undefined {
+  /**
+   * Take every ack this session is still holding, emptying the queue.
+   *
+   * Called when the model speaks. It clears the lot rather than one per reply
+   * because a reply cannot say which message it answers — nothing in the reply
+   * carries a message id, and the newest inbound id is only a guess that goes
+   * wrong the moment a second message arrives mid-turn. What a reply does prove
+   * is that everything queued before it has been dealt with, whether answered
+   * or deliberately passed over.
+   *
+   * The old code popped exactly one, which assumed every message draws exactly
+   * one reply. A turn that stays silent broke that assumption permanently: the
+   * queue kept an entry forever, and every later reply cleared someone else's
+   * ack, leaving the acknowledged message wearing one and an ignored message
+   * clean.
+   */
+  takePendingReactions(key: string): PendingReaction[] {
     const session = this.sessions.get(key);
-    if (!session) return undefined;
-    return session.pendingReactions.shift();
+    if (!session) return [];
+    return session.pendingReactions.splice(0);
   }
 
   /**

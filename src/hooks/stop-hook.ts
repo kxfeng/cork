@@ -29,6 +29,13 @@
  * asks the model to report at meaningful points instead. Cork's own watcher is
  * what keeps an autopilot run moving, so nothing is left unwatched by this.
  *
+ * It also tells the daemon when a turn ends in silence. cork acks each inbound
+ * message with an emoji and removes it when a reply goes out; a turn that
+ * answers nothing would leave that ack sitting there, because the daemon has no
+ * way to learn the turn is over — the socket carries replies, not turn
+ * boundaries. This hook is the one thing that runs at that boundary, so it says
+ * so, and the daemon takes the emoji off.
+ *
  * The hook always exits 0 (the block is signalled via stdout JSON, not an
  * exit code). Any internal failure is swallowed — a broken hook must never
  * break Claude Code.
@@ -36,6 +43,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 
 const REPLY_TOOL = "mcp__cork-channel__reply";
 // Claude Code wraps every inbound Lark message as `<channel source="cork-channel" …>`
@@ -79,13 +87,46 @@ interface HookInput {
  * reply; being wrong the other way silences the chat for a session that is not
  * running a task at all.
  */
+function corkDir(): string {
+  return process.env.CORK_DIR || path.join(os.homedir(), ".cork");
+}
+
+/**
+ * Tell the daemon this turn said nothing, so it can take the ack emoji off the
+ * message that prompted it.
+ *
+ * Writes a spool command straight rather than importing cork's own helper: this
+ * process is spawned once per turn, and pulling in the spool module would drag
+ * uuid, the logger and the path config along with it for a ten-line file write.
+ * Same format the daemon already watches for — `.tmp` then rename, so it never
+ * sees a partial file.
+ *
+ * Best-effort throughout. A dropped notification costs one lingering emoji; it
+ * must never fail a turn.
+ */
+function notifySilentTurn(): void {
+  const key = process.env.CORK_SESSION_KEY;
+  if (!key) return;
+  try {
+    const dir = path.join(corkDir(), "spool");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${randomUUID()}.json`);
+    fs.writeFileSync(
+      `${file}.tmp`,
+      JSON.stringify({ cmd: "clear_acks", args: { sessionKey: key } })
+    );
+    fs.renameSync(`${file}.tmp`, file);
+  } catch {
+    /* best-effort */
+  }
+}
+
 function autopilotRunning(): boolean {
   const key = process.env.CORK_SESSION_KEY;
   if (!key) return false;
-  const corkDir = process.env.CORK_DIR || path.join(os.homedir(), ".cork");
   try {
     const raw = fs.readFileSync(
-      path.join(corkDir, "sessions", key, "AUTOPILOT.json"),
+      path.join(corkDir(), "sessions", key, "AUTOPILOT.json"),
       "utf-8"
     );
     // Every live state, not just "running": a task waiting for its `/goal` to
@@ -204,8 +245,11 @@ const sleep = (ms: number): Promise<void> =>
  * row may simply not have been flushed yet. Returns as soon as the reply shows
  * up, so a well-behaved turn is not delayed.
  */
-async function replyLanded(transcriptPath: string): Promise<boolean> {
-  const deadline = Date.now() + REPLY_WAIT_MS;
+async function replyLanded(
+  transcriptPath: string,
+  waitMs = REPLY_WAIT_MS
+): Promise<boolean> {
+  const deadline = Date.now() + waitMs;
   for (;;) {
     const rows = parseRows(readTail(transcriptPath, TAIL_BYTES));
     if (rows.length > 0 && turnHasReply(rows, turnStartIndex(rows))) return true;
@@ -223,14 +267,26 @@ async function main(): Promise<void> {
     return; // no usable input — nothing to do
   }
 
-  // Already prompted once this turn — don't block again, just let it stop.
-  if (input.stop_hook_active) return;
-
-  // Autopilot reports on its own schedule; see the note at the top.
-  if (autopilotRunning()) return;
-
   const transcriptPath = input.transcript_path;
   if (!transcriptPath || !fs.existsSync(transcriptPath)) return;
+
+  // Already prompted once this turn, so don't block again. But a turn that is
+  // still empty after being asked is a deliberate silence, not an oversight —
+  // the model read the nudge and chose not to speak. Nothing else will tell the
+  // daemon that, so say it here and let the ack come off.
+  //
+  // No wait budget on this read: the first pass already allowed for the
+  // transcript lag, and a model that meant to reply had its chance. Waiting
+  // again would only delay the turn ending.
+  if (input.stop_hook_active) {
+    if (!(await replyLanded(transcriptPath, 0))) notifySilentTurn();
+    return;
+  }
+
+  // Autopilot reports on its own schedule; see the note at the top. It never
+  // blocks, so it never reaches the branch above either — its acks come off
+  // with its next report.
+  if (autopilotRunning()) return;
 
   if (!(await replyLanded(transcriptPath))) {
     // No reply this turn — prompt the model to self-correct.
