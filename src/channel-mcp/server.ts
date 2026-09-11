@@ -122,6 +122,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "which already has a thread pulls the reply into that thread, " +
               "out of the main chat.",
           },
+          at: {
+            type: "string",
+            description:
+              "The `senderId` of someone to @mention at the head of the reply, " +
+              "copied from the `<channel>` tag of a message they sent. A quote " +
+              "alone is easy to miss in a busy group; an @ notifies them and " +
+              "names them in plain sight, so it is worth adding when answering " +
+              "one person among several. Skip it in a direct message, where " +
+              "there is nobody to distinguish from, and skip it when nothing " +
+              "is being addressed to anyone in particular — an @ on every " +
+              "message stops meaning anything. Only a `senderId` that appeared " +
+              "on a channel tag works; a name on its own cannot be turned into " +
+              "one.",
+          },
         },
         required: ["text"],
       },
@@ -131,14 +145,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "reply") {
-    const { text, files, replyToMessageId } = req.params.arguments as {
+    const { text, files, replyToMessageId, at } = req.params.arguments as {
       text: string;
       files?: string[];
       replyToMessageId?: string;
+      at?: string;
     };
     log("reply_tool_called", {
       contentLen: text.length,
       files: files?.length ?? 0,
+      // Logged as a flag, not a value: enough to tell a dropped parameter from
+      // one the model never sent, without putting a member's id in the log.
+      at: !!at,
       udsConnected: udsClient.connected,
     });
     try {
@@ -148,6 +166,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         content: text,
         ...(files?.length ? { files } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}),
+        ...(at ? { at } : {}),
       });
       log("reply_sent_to_uds");
       return { content: [{ type: "text" as const, text: "sent" }] };

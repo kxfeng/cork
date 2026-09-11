@@ -26,6 +26,8 @@ export interface ReplyMessage extends UdsMessage {
   files?: string[];
   /** Message to quote, chosen by the model. Ignored in a thread session. */
   replyToMessageId?: string;
+  /** Open id to @mention at the head of the reply, chosen by the model. */
+  at?: string;
 }
 
 export interface PermissionRequestMessage extends UdsMessage {

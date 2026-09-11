@@ -313,10 +313,18 @@ export class CorkDaemon {
       inThread: !!replyOpts,
       contentLen: content.length,
       files: msg.files?.length ?? 0,
+      at: !!msg.at,
     });
 
     channel
-      .sendReply(chatId, content, { ...replyOpts, files: msg.files })
+      .sendReply(chatId, content, {
+        ...replyOpts,
+        files: msg.files,
+        // Passed on as given. Whether an id can actually carry a mention is a
+        // per-channel question — Lark accepts only its open ids — so the
+        // channel decides, not the daemon.
+        ...(msg.at ? { atUserIds: [msg.at] } : {}),
+      })
       .then(() => {
         // Everything acked so far, not just the oldest one: see
         // takePendingReactions for why a reply cannot name the message it

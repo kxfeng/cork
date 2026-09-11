@@ -26,9 +26,19 @@
  * A mention as Lark reports it. The `id` field has two shapes and the API
  * gives no flag telling them apart:
  *   - receive-event push → an object (`{open_id, user_id, union_id}`)
- *   - `messages`/`mget` REST → a bare string, and for a *bot* that string is
- *     the app id (`cli_…`), not an open id.
+ *   - `messages`/`mget` REST → a bare string.
  * Both shapes reach this module, so both are accepted.
+ *
+ * The bare string has been an open id in every sample measured — eleven
+ * messages covering human→bot, bot→human and bot→bot, read back from both the
+ * list and the single-message endpoint. An app id (`cli_…`) is still matched
+ * against, because it is the id a bot is identified by elsewhere and costs
+ * nothing to accept; a message that was *sent* with one carries no mentions at
+ * all, since Lark renders an app id as literal text rather than an address.
+ *
+ * `name` is empty exactly when a bot mentions a bot. Humans always come back
+ * named, and a human naming a bot reports the bot's name; only the bot→bot
+ * direction loses it. Such a mention keeps its raw key here, by the rule above.
  */
 export interface LarkMention {
   key?: string;
@@ -123,4 +133,37 @@ export function mentionsSelf(
 ): boolean {
   if (!mentions || mentions.length === 0) return false;
   return mentions.some((m) => isSelf(m, selfIds));
+}
+
+/**
+ * The subset of `ids` that can actually become a working `@mention`.
+ *
+ * Lark only turns an `<at>` into a real mention — blue, clickable, and
+ * delivering a notification — when the id is an open id. An app id renders as
+ * the literal text `<at id=cli_…></at>`, which is worse than no mention at all:
+ * the reader sees markup where a name should be. Measured directly: the same
+ * message sent both ways came back with `mentions: null` and `tag: "text"` for
+ * the app id, `tag: "at"` for the open id.
+ *
+ * A bot is mentionable like anyone else — its open id works, and was measured
+ * doing so. Only the app id is unusable, and a bot has both, so which id the
+ * caller happens to be holding decides whether the mention lands. Dropping the
+ * app id rather than passing it through keeps that failure quiet instead of
+ * printing markup into the chat.
+ *
+ * The bot's own id is not special-cased. Mentioning yourself notifies nobody,
+ * but it is not an error either, and the rule that would forbid it has to live
+ * somewhere: a caller that means something by it (a visible marker, a bot
+ * addressing its own earlier message) is not worth overruling from here.
+ */
+export function usableAtTargets(ids: (string | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const id of ids) {
+    if (!id || !id.startsWith("ou_")) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
 }

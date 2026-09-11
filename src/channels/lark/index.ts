@@ -35,6 +35,7 @@ import {
   buildPostContentFromSegments,
   mentionPrefix,
 } from "./card.js";
+import { usableAtTargets } from "./mentions.js";
 import { scanImages, escapeSkipped, buildSegments } from "./markdown.js";
 import { createEventDispatcher, clearStaleBuffers } from "./events.js";
 
@@ -380,12 +381,16 @@ export class LarkChannel implements Channel {
     // where they appeared. Uploading is best-effort by design: any failure
     // leaves that reference as literal text, and a total failure falls back to
     // the plain-text post — sending the words always beats sending nothing.
-    // Only a cork-initiated message (`cork send --at`) carries mentions; a model
-    // reply never does. The prefix goes on before the post is built, so the
-    // mention is part of the markdown rather than something spliced into the
-    // structure afterwards.
+    // Mentions come either from cork itself (`cork send --at`) or from a model
+    // reply that filled in `at`. The prefix goes on before the post is built,
+    // so the mention is part of the markdown rather than something spliced into
+    // the structure afterwards.
+    // An id that cannot render as a mention is dropped rather than passed
+    // through: `<at id=cli_…>` reaches the chat as literal markup, which reads
+    // as a bug to everyone who sees it. See usableAtTargets.
+    const atTargets = usableAtTargets(opts?.atUserIds ?? []);
     const postContent = await this.buildPost(
-      mentionPrefix(opts?.atUserIds ?? []) + content
+      mentionPrefix(atTargets) + content
     );
     const messageId = await sendMessage(this.client, chatId, "post", postContent, {
       replyToMessageId: opts?.replyToMessageId,
