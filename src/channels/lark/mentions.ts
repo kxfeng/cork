@@ -31,10 +31,15 @@
  *
  * The bare string has been an open id in every sample measured — eleven
  * messages covering human→bot, bot→human and bot→bot, read back from both the
- * list and the single-message endpoint. An app id (`cli_…`) is still matched
- * against, because it is the id a bot is identified by elsewhere and costs
- * nothing to accept; a message that was *sent* with one carries no mentions at
- * all, since Lark renders an app id as literal text rather than an address.
+ * list and the single-message endpoint. This holds for mentions specifically,
+ * and not for the sibling `sender` field, which is where the app id does turn
+ * up: the REST list reports a bot sender as `{id: "cli_…", id_type: "app_id",
+ * sender_type: "app"}` while the receive-event push reports the same bot as an
+ * open id with `sender_type: "bot"`. Two views of one identity, no flag saying
+ * which you hold — so an observation of one field says nothing about the
+ * other. An app id is still matched against here because accepting it costs
+ * nothing; a message that was *sent* with one carries no mentions at all,
+ * since Lark renders an app id as literal text rather than an address.
  *
  * `name` is empty exactly when a bot mentions a bot. Humans always come back
  * named, and a human naming a bot reports the bot's name; only the bot→bot
