@@ -181,6 +181,31 @@ const PENDING_DEADLINE_MS = 60_000;
 /** How many times `/goal clear` is typed before cork gives up on it. */
 const MAX_CLEAR_ATTEMPTS = 2;
 
+/**
+ * How many times cork will type the goal back in before giving up.
+ *
+ * Same budget as clearing, for the same reason: the way a long `/goal` fails
+ * to register is that claude folds it into `[Pasted text]` and stops treating
+ * it as a command, which is deterministic. A third identical attempt would
+ * fail identically. Only attempts that actually reached the input box count —
+ * one blocked by a dialog was never tried.
+ */
+const MAX_REARM_ATTEMPTS = 2;
+
+/** How long a re-arm may go blocked before the chat is told. Said once. */
+const REARM_BLOCKED_NOTICE_MS = 10 * 60_000;
+
+/**
+ * One ending for every way re-arming can fail.
+ *
+ * Whether the command was never typed, was typed and folded into a paste, or
+ * cork never had the goal's text — what is true afterwards is the same: this
+ * session has no goal and cork cannot give it one. Continuing to call the run
+ * live would be the exact fault this whole path exists to prevent.
+ */
+const REARM_LOST_TEXT =
+  "❌ Autopilot stopped — could not re-arm the goal. Run `/autopilot start` again.";
+
 /** Nudges before cork tells the user this task looks stuck. Warned once. */
 const STUCK_AFTER_NUDGES = 3;
 
@@ -353,13 +378,22 @@ export function lastGoalStatus(rows: unknown[]): GoalKind | null {
  */
 function readGoalFromTranscript(
   workspace: string,
-  sessionId: string
+  sessionId: string,
+  since: number
 ): GoalKind | null {
-  return findLastTranscriptRow(
-    workspace,
-    sessionId,
-    (row) => readGoalStatus(row as TranscriptRow)?.kind ?? null
-  );
+  return findLastTranscriptRow(workspace, sessionId, (row) => {
+    const r = row as TranscriptRow & { timestamp?: string };
+    if (!readGoalStatus(r)) return null;
+    // Rows from an earlier run in the same session are not evidence about
+    // this one. A session accumulates them: one transcript here holds three
+    // runs' worth. Without this, a run whose `/goal` never registered — which
+    // has written nothing of its own by definition — is judged on the ending
+    // of the run before it, and cork announces the previous verdict for work
+    // that never started.
+    const at = r.timestamp ? Date.parse(r.timestamp) : NaN;
+    if (!Number.isFinite(at) || at < since) return null;
+    return readGoalStatus(r)?.kind ?? null;
+  });
 }
 
 /** The goal in a code block, or nothing when cork does not have its text. */
@@ -377,6 +411,8 @@ export const AUTOPILOT_CONSTANTS = {
   TICK_INTERVAL_MS,
   PENDING_DEADLINE_MS,
   MAX_CLEAR_ATTEMPTS,
+  MAX_REARM_ATTEMPTS,
+  REARM_BLOCKED_NOTICE_MS,
   CONTEXT_WARN_MARGIN_PCT,
   NUDGE_DELAYS_MS,
   RESTART_DELAYS_MS,
@@ -428,6 +464,21 @@ export interface AutopilotHooks {
    * anyway: it is the transcript that says whether the goal went.
    */
   clearGoal(): void;
+  /**
+   * Type `/goal <condition>` into the terminal, to put a goal back that went
+   * with the pane. Not waited on, exactly like `clearGoal`: the transcript is
+   * what says whether it took.
+   */
+  rearmGoal(condition: string): void;
+  /**
+   * Whether claude is showing a live goal, or null when there is no screen to
+   * ask — a session that is not connected yet has not drawn one.
+   *
+   * Null is not "no goal", but it is not acted on as "goal" either: only a
+   * clear yes skips the re-arm. See checkRearm for why that asymmetry is the
+   * safe one.
+   */
+  goalArmed(): boolean | null;
   /**
    * The percentage cork asks claude to compact at
    * (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE). The state-down warning is sent a few
@@ -510,7 +561,11 @@ export interface TranscriptWatcherOptions {
    * Test seam: what the transcript file says about the goal, read from the
    * end. Null means the file does not say — never "there is no goal".
    */
-  goalOnDisk?: (workspace: string, sessionId: string) => GoalKind | null;
+  goalOnDisk?: (
+    workspace: string,
+    sessionId: string,
+    since: number
+  ) => GoalKind | null;
 }
 
 export class TranscriptWatcher {
@@ -551,7 +606,6 @@ export class TranscriptWatcher {
   private lastRowAt = 0;
   private lastNudgeAt = 0;
   /** When the goal was last checked — by the evaluator, or by cork asking. */
-  private lastGoalCheckAt = 0;
   /**
    * `lastRowAt` as it stood when cork last nudged, and how many nudges in a row
    * have produced no row at all since.
@@ -577,7 +631,8 @@ export class TranscriptWatcher {
   private readonly sessionId: string;
   private readonly goalOnDisk: (
     workspace: string,
-    sessionId: string
+    sessionId: string,
+    since: number
   ) => GoalKind | null;
   /** Whether the pane was up at the previous tick — see the transition in tick. */
   private lastAliveSeen = true;
@@ -606,7 +661,6 @@ export class TranscriptWatcher {
       sessionKey: opts.sessionKey,
     });
     this.lastRowAt = this.now();
-    this.lastGoalCheckAt = this.now();
   }
 
   start(): void {
@@ -630,7 +684,6 @@ export class TranscriptWatcher {
     );
 
     this.lastRowAt = this.now();
-    this.lastGoalCheckAt = this.now();
     this.reconcile();
     // The stall/liveness rules need a clock of their own: a session that has
     // stopped writing produces no file events to react to. Unref'd for the same
@@ -817,9 +870,16 @@ export class TranscriptWatcher {
    * would sit there until its deadline and be called a failure, and one that
    * finished while the daemon was down would be nudged for ever.
    *
-   * The last `goal_status` row in the tail is the answer: claude writes one for
-   * every change and every verdict, so the most recent one is the goal's state
-   * as of now.
+   * What the last `goal_status` row answers is whether the goal ENDED, not
+   * whether it is still live. An ending — met, judged unachievable, cleared by
+   * hand — is written once and stays written, so finding one is conclusive.
+   * Finding none is not the other way round: a goal is held in claude's
+   * memory and rebuilt on resume from a conversation a compaction can cut
+   * short, so it can be gone with the newest row still saying `progress`. An
+   * earlier version of this comment claimed the row was "the goal's state as
+   * of now", and a run spent a day being reported as live on the strength of
+   * it. Whether there is a goal right now is settled elsewhere, by typing one
+   * back in after every resume — see checkRearm.
    */
   private reconcile(): void {
     const hooks = this.hooks;
@@ -827,9 +887,17 @@ export class TranscriptWatcher {
     const rec = this.rec();
     if (!rec || !isRunning(rec)) return;
 
-    const status = this.goalOnDisk(this.workspace, this.sessionId);
+    // Only rows this run wrote. `startedAt` is stamped when `/autopilot start`
+    // types the goal, so it is earlier than any row the run can have.
+    const since = rec.startedAt ? Date.parse(rec.startedAt) : 0;
+    const status = this.goalOnDisk(
+      this.workspace,
+      this.sessionId,
+      Number.isFinite(since) ? since : 0
+    );
 
-    // A live goal, whatever cork thought: the task is running.
+    // No ending on record. That does not make the goal live — only that
+    // nothing happened during the outage which would end the run.
     if (status === "set" || status === "progress") {
       if (rec.state === "starting") {
         this.updateRec({ state: "running", pendingSince: undefined });
@@ -839,18 +907,17 @@ export class TranscriptWatcher {
         // fresh minute from here rather than from before the outage.
         this.updateRec({ pendingSince: this.now() });
       }
-      this.log.info("reconciled: goal is live", { state: rec.state });
+      this.log.info("reconciled: the goal did not end while cork was away", {
+        state: rec.state,
+      });
       return;
     }
 
-    // Nothing found is not the same as nothing there. The read is the last
-    // 256KB, and measured across the real transcripts on this machine a
-    // `goal_status` row is routinely nowhere near it: gaps between two of them
-    // run to 5.6MB, one session had 641KB of output after its last one, and a
-    // single row can be 780KB by itself — one large tool result puts the answer
-    // out of reach. Ending a run on that would mean every daemon restart during
-    // a long tool result silently hands a working task back to nobody. Leave
-    // the record alone:
+    // Nothing found is not the same as nothing there. The scan walks the whole
+    // file, so a `goal_status` row is only missing when none was ever written
+    // — but it also returns null for a file that could not be opened or read,
+    // and those answer nothing. Ending a run on that would hand a working task
+    // back to nobody over a transient IO error. Leave the record alone:
     // `starting` and `stopping` have deadlines that will settle them, and a
     // `running` task carries on with the tail live again.
     if (status === null) {
@@ -903,11 +970,12 @@ export class TranscriptWatcher {
     this.runStartedAt = rec.startedAt;
     this.contextWarned = false;
     this.lastNudgeAt = 0;
-    // The drift clock starts here rather than at rec.startedAt: a watcher that
-    // has just taken over a running task (a daemon restart) cannot know
-    // whether the evaluator ran while it was away, and a full hour of grace is
-    // better than opening with an interruption.
-    this.lastGoalCheckAt = this.now();
+    // The drift clock is NOT reset here. It used to be, on the reasoning that
+    // a watcher taking over cannot know whether the evaluator ran while it
+    // was away and an hour of grace beats opening with an interruption. What
+    // that actually bought was a timer that never fired: every daemon start
+    // makes a new watcher, and on a machine being worked on those come more
+    // often than once an hour. It lives on the record now and survives them.
     this.lastRowAtNudge = 0;
     this.unansweredNudges = 0;
     this.lastRowAt = this.now(); // a fresh run gets a full stall window
@@ -970,7 +1038,7 @@ export class TranscriptWatcher {
       // whom does not matter, so a verdict restarts it. `set` and `cleared`
       // are state changes rather than verdicts, but both begin or end a run,
       // and either way there is nothing to have drifted from yet.
-      this.lastGoalCheckAt = this.now();
+      this.updateRec({ lastGoalCheckAt: new Date(this.now()).toISOString() });
       // Read before anything writes: stopRec below turns the state to
       // "stopped", and how a goal ending should be worded depends on whether
       // the user asked for it.
@@ -982,6 +1050,13 @@ export class TranscriptWatcher {
           // the first evidence anywhere that the command took effect, and the
           // only thing the user is told a task started on.
           const wasStarting = this.rec()?.state === "starting";
+          // A goal cork typed back in after a resume lands here too, and it is
+          // the only evidence anywhere that it took. Nothing is said about it:
+          // the run never stopped, and a line in the chat on every daemon
+          // restart would be noise about something that worked. `wasStarting`
+          // is false in that case — the state stayed `running` throughout —
+          // so the start message below already stays quiet.
+          const wasRearming = this.rec()?.needsRearm === true;
           this.updateRec({
             state: "running",
             goal: status.condition,
@@ -989,9 +1064,14 @@ export class TranscriptWatcher {
             nudgeCount: 0,
             stuckWarned: false,
             restartCount: 0,
+            needsRearm: false,
+            rearmAttempts: 0,
+            rearmPendingSince: undefined,
+            blockedSince: undefined,
+            rearmNotified: false,
           });
           this.lastNudgeAt = 0;
-          this.log.info("goal set", { wasStarting });
+          this.log.info("goal set", { wasStarting, wasRearming });
           if (wasStarting) {
             this.say(
               `▶️ Autopilot started.\n\n\`\`\`\n${status.condition ?? ""}\n\`\`\``
@@ -1228,6 +1308,14 @@ export class TranscriptWatcher {
     // The pane is up: forget earlier failures.
     if (rec.restartCount) this.updateRec({ restartCount: 0 });
 
+    // Before anything that pushes the model: a run with no goal has nothing
+    // pushing it from claude's side either, so it will look stalled within
+    // minutes and get nudged toward a destination it no longer has.
+    if (rec.needsRearm) {
+      this.checkRearm(rec);
+      return;
+    }
+
     this.checkDrift(rec);
     this.checkStall(rec);
   }
@@ -1254,15 +1342,32 @@ export class TranscriptWatcher {
     // Nothing is read from the file here, deliberately. What a deadline is
     // waiting on is a `goal_status` row, and the tail does not miss those: it
     // reads from its own byte offset to the new end of an append-only file.
-    // Re-reading the last 256KB would confirm what the tail already knows, in
-    // the cases where it can answer at all — measured, a `goal_status` row is
-    // usually not in that window. `reconcile` reads the file because it has a
-    // real gap to cover: the rows written while the daemon was down.
+    // Re-reading the file would confirm what the tail already knows.
+    // `reconcile` reads it because it has a real gap to cover: the rows
+    // written while the daemon was down.
     if (rec.state === "starting") {
+      // Type it again before giving up. `starting` and a goal lost with the
+      // pane are the same failure — cork put a `/goal` in and claude did not
+      // take it as one — and the `running` side has had two attempts at that
+      // since the re-arm went in. One attempt here and two there was not a
+      // decision, just two paths written at different times.
+      //
+      // No screen read: `starting` means this run has written no row of its
+      // own, so there is nothing for the screen to disambiguate. It is only
+      // needed where the transcript says a goal exists and might be wrong.
+      const attempts = rec.rearmAttempts ?? 0;
+      if (rec.goal && attempts < MAX_REARM_ATTEMPTS) {
+        hooks.rearmGoal(rec.goal);
+        this.updateRec({ rearmAttempts: attempts + 1, pendingSince: this.now() });
+        this.log.info("typing the goal again after it did not register", {
+          attempt: attempts + 1,
+        });
+        return;
+      }
       this.log.warn("no goal within the deadline", { pendingSince: rec.pendingSince });
       this.stopRec("start-failed", "the goal never registered");
       this.say(
-        "❌ Autopilot did not start — no goal showed up within a minute. " +
+        "❌ Autopilot did not start — no goal showed up. " +
           "Run `/autopilot start` again."
       );
       return;
@@ -1284,16 +1389,16 @@ export class TranscriptWatcher {
       return;
     }
 
-    // One message for both endings. Whether the command never reached the
-    // input box or reached it and changed nothing, what is true afterwards is
-    // the same — the goal is set and only the user can end it — and that is
-    // the whole of what they need.
-    this.stopRec("stop-failed", "the goal was still set after /goal clear");
-    this.say(
-      "⚠️ Autopilot gave up stopping — `/goal clear` did not go through. The " +
-        "goal is still set and the model may still be working toward it. Run " +
-        "`/goal clear` in the terminal to end it."
-    );
+    // The run is over. The user asked for it to stop, cork typed the clear as
+    // many times as it is going to, and whether the goal is still set is not
+    // something cork can find out from here — `/goal clear` writes nothing at
+    // all when there is no goal to clear, so silence means both "it worked"
+    // and "there was nothing there". The old ending asserted the unhappy one:
+    // "the goal is still set and the model may still be working toward it",
+    // which is plainly false in the case this whole commit is about, and
+    // sends the user to the terminal to clear a goal that is not there.
+    this.stopRec("user-stop", "/goal clear was typed and nothing came back");
+    this.say(`🛑 Autopilot stopped.${this.runSummary()}`);
   }
 
   private tryRestart(rec: AutopilotRecord): void {
@@ -1333,18 +1438,131 @@ export class TranscriptWatcher {
    * answer arrives as ordinary conversation, and without this line the user
    * would not know it was asked for rather than volunteered.
    */
+  /**
+   * Put the goal back after the pane was replaced.
+   *
+   * Claude holds a goal in memory and rebuilds it on `-r` from the newest
+   * `goal_status` row in its own conversation — which, after a compaction,
+   * begins at the compact boundary. A goal set before that boundary is
+   * therefore invisible to the rebuild and simply does not come back, while
+   * the row stays in the transcript file where cork can still read it. So
+   * cork cannot tell the two cases apart from the file, and does not try:
+   * it types the goal in again after every resume. When the goal was fine,
+   * the new one supersedes an identical condition and nothing else changes.
+   *
+   * A dialog is the one thing that can stop the command being typed, and it
+   * is waited out rather than dismissed — Escape through an unknown dialog
+   * would answer a question that was being asked of the user. Blocked time
+   * is not an attempt: a dialog left up for an hour must not spend a budget
+   * meant for commands that were actually sent.
+   */
+  private checkRearm(rec: AutopilotRecord): void {
+    const hooks = this.hooks;
+    if (!hooks) return;
+
+    // A goal cork does not have the text of cannot be typed back in. Nothing
+    // useful is left to do, and pretending the run is live is what this whole
+    // mechanism exists to stop.
+    if (!rec.goal) {
+      this.finishRearm();
+      this.stopRec("rearm-failed", "cork has no copy of the goal to type back in");
+      this.say(REARM_LOST_TEXT);
+      return;
+    }
+
+    // An attempt that was typed and produced no `goal_status` row within the
+    // deadline did not take. The row arriving is handled where every other
+    // goal row is; this is only the timeout half.
+    const pending = rec.rearmPendingSince ? Date.parse(rec.rearmPendingSince) : null;
+    if (pending !== null && this.now() - pending < PENDING_DEADLINE_MS) return;
+
+    const attempts = rec.rearmAttempts ?? 0;
+    if (pending !== null && attempts >= MAX_REARM_ATTEMPTS) {
+      this.finishRearm();
+      this.stopRec("rearm-failed", "the goal did not register after being typed back in");
+      this.say(REARM_LOST_TEXT);
+      return;
+    }
+
+    if (this.dialogHooks?.read()) {
+      this.noticeRearmBlocked(rec);
+      return;
+    }
+
+    // The screen is asked before anything is typed. Most resumes do not lose
+    // the goal at all — it only goes when a compaction has moved the row it
+    // would be rebuilt from out of reach — and re-setting one that is already
+    // there costs a superseded goal and an extra evaluation for nothing.
+    //
+    // Only a clear "yes" skips. Null means there was no screen to ask, and
+    // typing the goal in again is harmless where believing a guess is not:
+    // measured, a `/goal` sent into a session that already has that goal
+    // replaces it with an identical one and does not interrupt the turn in
+    // flight — a 90-second command ran to completion through one.
+    if (hooks.goalArmed() === true) {
+      this.finishRearm();
+      this.log.info("goal survived the resume; nothing to re-arm");
+      return;
+    }
+
+    hooks.rearmGoal(rec.goal);
+    this.updateRec({
+      rearmAttempts: attempts + 1,
+      rearmPendingSince: new Date(this.now()).toISOString(),
+    });
+    this.log.info("typing the goal back in", { attempt: attempts + 1 });
+  }
+
+  /** Say once, and only once, that a run is sitting without its goal. */
+  private noticeRearmBlocked(rec: AutopilotRecord): void {
+    if (rec.rearmNotified) return;
+    // Start the clock here when nothing else did. The record is edited out of
+    // band by `/autopilot`, and a missing field must not mean "blocked for no
+    // time at all" on every tick — which is silence for ever.
+    if (!rec.blockedSince) {
+      this.updateRec({ blockedSince: new Date(this.now()).toISOString() });
+      return;
+    }
+    const blocked = this.now() - Date.parse(rec.blockedSince);
+    if (blocked < REARM_BLOCKED_NOTICE_MS) return;
+    this.updateRec({ rearmNotified: true });
+    this.log.warn("goal still not re-armed", { blocked: formatDuration(blocked) });
+    this.say("⚠️ Autopilot paused — the goal has not been re-armed yet.");
+  }
+
+  /** Clear the re-arm bookkeeping, however it ended. */
+  private finishRearm(): void {
+    this.updateRec({
+      needsRearm: false,
+      rearmAttempts: 0,
+      rearmPendingSince: undefined,
+      blockedSince: undefined,
+      rearmNotified: false,
+    });
+  }
+
   private checkDrift(rec: AutopilotRecord): void {
-    const since = this.now() - this.lastGoalCheckAt;
-    if (since < DRIFT_CHECK_INTERVAL_MS) return;
+    // From the last check, or from the start of the run when there has been
+    // none. Both are on the record, so neither resets with the watcher.
+    const from = rec.lastGoalCheckAt ?? rec.startedAt;
+    const last = from ? Date.parse(from) : NaN;
+    if (!Number.isFinite(last)) {
+      // Nothing to count from — start the clock rather than never firing.
+      this.updateRec({ lastGoalCheckAt: new Date(this.now()).toISOString() });
+      return;
+    }
+    if (this.now() - last < DRIFT_CHECK_INTERVAL_MS) return;
 
     if (!this.inject(DRIFT_TEXT, WATCHER_SENDER_ID)) return; // not reachable; try next tick
 
-    this.lastGoalCheckAt = this.now();
     const count = (rec.driftChecks ?? 0) + 1;
-    this.updateRec({ driftChecks: count });
+    this.updateRec({
+      driftChecks: count,
+      lastGoalCheckAt: new Date(this.now()).toISOString(),
+    });
     this.log.info("asked the model to check itself against the goal", {
       check: count,
-      since: formatDuration(since),
+      since: formatDuration(this.now() - last),
     });
   }
 

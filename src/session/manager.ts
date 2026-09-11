@@ -22,7 +22,7 @@ import {
   lastTranscriptModel,
   formatModelName,
 } from "./transcript.js";
-import { readDialog, type Dialog } from "./dialog.js";
+import { readDialog, goalArmed, type Dialog } from "./dialog.js";
 import {
   parseModelPicker,
   chooseModelRow,
@@ -1485,6 +1485,20 @@ export class SessionManager extends EventEmitter {
         // whether the goal actually went.
         void this.sendSlashCommand(key, "/goal clear").catch(() => {});
       },
+      goalArmed: () => {
+        // Only from a connected session: a pane still drawing its first frame
+        // has no input box yet, and "no box" is reported as "cannot say"
+        // rather than "no goal", which would type the goal in for nothing.
+        if (this.sessions.get(key)?.state !== "connected") return null;
+        return goalArmed(capturePaneSafe(`${TMUX_PREFIX}${key}`));
+      },
+      rearmGoal: (condition: string) => {
+        // Not waited on, and no interrupt first — unlike `clearGoal`, this is
+        // not trying to stop anything. A slash command typed into a busy pane
+        // queues and runs at the end of the turn, which is soon enough; what
+        // says whether it took is the `goal_status` row, not this call.
+        void this.sendSlashCommand(key, `/goal ${condition}`).catch(() => {});
+      },
       contextWindow: () => this.config.claude.contextWindow ?? 0,
       compactPercent: () => this.config.claude.autoCompactPercent ?? DEFAULT_COMPACT_PERCENT,
     };
@@ -2092,6 +2106,26 @@ export class SessionManager extends EventEmitter {
       workspace: meta.workspace,
       resume,
     });
+
+    // A new claude process has no goal until something puts one back. Claude
+    // rebuilds it from its own conversation, which after a compaction no
+    // longer reaches the row the goal was set on — so a run can come back
+    // with nothing driving it and nothing anywhere saying so. Mark it here,
+    // at the one place a pane is created, and let the watcher type it in.
+    // `running` only, not every state a run can be in. A `starting` task has
+    // cork's own `/goal` in flight already and re-arming would send a second;
+    // a `stopping` one is having its goal cleared on purpose, and putting it
+    // back is the opposite of what was asked.
+    if (resume && loadAutopilot(key).state === "running") {
+      updateAutopilot(key, {
+        needsRearm: true,
+        rearmAttempts: 0,
+        rearmPendingSince: undefined,
+        blockedSince: new Date().toISOString(),
+        rearmNotified: false,
+      });
+      logger.info("goal needs re-arming after resume", { key });
+    }
 
     try {
       this.spawnPane(key, meta, claudeArgs);

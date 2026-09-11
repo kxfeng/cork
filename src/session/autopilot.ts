@@ -50,7 +50,11 @@ export type AutopilotStopReason =
   | "failed" // the evaluator says it cannot be met in this session
   | "user-stop" // /autopilot stop, or a /goal clear typed in the pane
   | "start-failed" // the /goal never registered
-  | "stop-failed" // /goal clear did not take, and the goal is still live
+  // No longer produced: a clear that comes back silent means both "it worked"
+  // and "there was no goal to clear", and cork was asserting the first of
+  // those. Kept for records already on disk.
+  | "stop-failed"
+  | "rearm-failed" // the goal was lost with the pane and could not be put back
   | "unreachable"; // the pane could not be brought back
 
 export interface AutopilotRecord {
@@ -69,6 +73,39 @@ export interface AutopilotRecord {
   stuckWarned?: boolean;
   /** Consecutive failed attempts to bring the pane back. */
   restartCount?: number;
+  /**
+   * When the goal was last checked against the work, ISO.
+   *
+   * On the record rather than in the watcher because a watcher is new on
+   * every daemon start, and an hourly timer that restarts with it never
+   * fires on a machine being worked on: nine restarts in four hours left a
+   * real run with `driftChecks: 0` while the check that would have caught
+   * the goal going missing sat at zero the whole time.
+   */
+  lastGoalCheckAt?: string;
+  /**
+   * Whether this run is waiting for its `/goal` to be typed in again.
+   *
+   * Claude keeps a goal in memory only — a Stop hook and one field of app
+   * state — and rebuilds it on `claude -r` by scanning its conversation back
+   * for the newest `goal_status` row. After a compaction that conversation
+   * starts at the compact boundary, so a goal set before it is invisible and
+   * comes back as no goal at all, silently: nothing is written anywhere, and
+   * the row cork can still see in the transcript file says the goal is live.
+   * Measured on claude code 2.1.268, and reproduced from both sides.
+   *
+   * Cork restarts claude on every daemon restart, so rather than try to tell
+   * the two cases apart it types the goal in again after each one. A goal
+   * that was fine is merely superseded by an identical one.
+   */
+  needsRearm?: boolean;
+  /** Attempts that actually reached the input box and did not take. */
+  rearmAttempts?: number;
+  /** When the current attempt was typed, for the deadline. */
+  rearmPendingSince?: string;
+  /** When re-arming was first blocked, and whether that was mentioned. */
+  blockedSince?: string;
+  rearmNotified?: boolean;
   /** How many times this run has been compacted. */
   compactCount?: number;
   /**
@@ -298,6 +335,7 @@ const OUTCOMES: Record<AutopilotStopReason, string> = {
   "user-stop": "stopped on request",
   "start-failed": "never started",
   "stop-failed": "the goal could not be cleared",
+  "rearm-failed": "the goal was lost with the terminal and could not be set again",
   unreachable: "the session could not be brought back",
 };
 

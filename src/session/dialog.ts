@@ -226,3 +226,45 @@ function readOptions(region: string[]): {
 export function dialogSignature(d: Dialog): string {
   return [d.title, ...d.options.map((o) => o.text)].join(" | ");
 }
+
+/**
+ * Claude's own marker for a live goal, drawn just above the input box.
+ *
+ *                                              ◎ /goal active (7s)
+ *     ──… Cork · Long Task Dev ─────────────────────────────────  ← box top
+ *     ❯
+ *     ───────────────────────────────────────────────────────────  ← box foot
+ *       Opus 5 | Context: ▒▒▒▒ 37K/1M 4%
+ *
+ * It is read rather than trusted from anywhere else because a goal lives only
+ * in claude's memory: a `claude -r` rebuilds it from the conversation, and
+ * after a compaction that conversation no longer reaches the row it was set
+ * on, so it can simply not come back — with nothing written anywhere saying
+ * so. The screen is the only place that answers "is there a goal right now".
+ *
+ * The last few lines and nothing else. Two earlier versions tried to locate
+ * the input box first — by both its rules, then by its foot — and each added
+ * a way to be quietly wrong: the rule above the box carries the session title
+ * on a named session, and finding any rule at all depends on knowing the
+ * pane's width. Either one failing turns this into "no goal, every time",
+ * which reads as working and is not.
+ *
+ * Being wrong is not symmetric, which is what makes a short window the right
+ * shape. A miss types the goal in again, and a `/goal` into a session that
+ * already holds it replaces it with an identical one and interrupts nothing —
+ * measured, through a 90-second command that ran to completion. A false match
+ * skips the re-arm and leaves the run with no goal, which is the fault this
+ * exists to catch. So the marker is claude's glyph as well as its words: this
+ * conversation is drawn in the same pane, and the bottom of the screen is not
+ * so far from the last thing said.
+ */
+const GOAL_MARK = "\u25CE"; // ◎
+const GOAL_TEXT = "/goal active";
+const GOAL_TAIL_LINES = 8;
+
+export function goalArmed(pane: string): boolean {
+  return pane
+    .split("\n")
+    .slice(-GOAL_TAIL_LINES)
+    .some((l) => l.includes(GOAL_MARK) && l.includes(GOAL_TEXT));
+}

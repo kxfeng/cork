@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readDialog, dialogSignature } from "../src/session/dialog.js";
+import { readDialog, dialogSignature, goalArmed } from "../src/session/dialog.js";
 
 /**
  * The fixtures are pane text captured off real sessions at 155 columns, not
@@ -310,5 +310,96 @@ describe("change detection", () => {
     // Moving the cursor is not a change worth telling anyone about.
     expect(dialogSignature(readDialog(moved, W)!)).toBe(a);
     expect(dialogSignature(readDialog(CONFIRM, W)!)).not.toBe(a);
+  });
+});
+
+describe("the goal indicator", () => {
+  /**
+   * Claude draws `◎ /goal active` just above the input box while a goal is
+   * live, and that is the only place which answers "is there a goal right
+   * now" — the goal lives in claude's memory, a resume rebuilds it from a
+   * conversation a compaction can cut short, and nothing is written when it
+   * fails to come back. Every shape below was captured off a real pane.
+   *
+   * Two earlier versions of this looked for the input box first, and each
+   * added a way to be quietly wrong — a named session's upper rule carries
+   * its title, and finding a rule at all needs the pane's width. Both fail
+   * towards "no goal, every time", which reads as working. The last few lines
+   * need neither.
+   */
+  const titled =
+    "─".repeat(120) + " Cork · Long Task Dev " + "─".repeat(W - 120 - 22);
+
+  const pane = (above: string[], top = rule("─")) =>
+    [
+      "● some earlier output",
+      ...above,
+      top,
+      "❯ ",
+      rule("─"),
+      "  Opus 5 (1M context) | Context: ▒▒▒▒ 37K/1M 4%",
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents",
+    ].join("\n");
+
+  it("finds it on an idle pane", () => {
+    expect(goalArmed(pane(["", "              ◎ /goal active (7s)"]))).toBe(true);
+  });
+
+  it("finds it on a named session, whose upper rule carries the title", () => {
+    // Nothing here reads that rule, which is the point: the version that did
+    // failed on every session cork runs autopilot in.
+    expect(titled).toHaveLength(W);
+    expect(goalArmed(pane(["", "     ◎ /goal active (7s)"], titled))).toBe(true);
+  });
+
+  it("finds it sharing the line with the compaction countdown", () => {
+    const line = "     0% until auto-compact · ◎ /goal active (1m)";
+    expect(goalArmed(pane(["✻ Elucidating… (1m 3s)", line]))).toBe(true);
+  });
+
+  it("finds it on the line claude draws it on at startup", () => {
+    expect(goalArmed(pane(["   ● high · /effort · ◎ /goal active"]))).toBe(true);
+  });
+
+  it("says no when there is no marker", () => {
+    expect(goalArmed(pane(["", "✻ Elucidating… (1m 3s)"]))).toBe(false);
+  });
+
+  it("says no when a dialog has taken the screen", () => {
+    // Nothing is typed on the strength of this: the caller checks for a
+    // dialog first and waits it out.
+    const overlay = [rule("▔"), "   Bash command", "", "   ❯ 1. Yes", "     2. No"].join("\n");
+    expect(goalArmed(overlay)).toBe(false);
+  });
+
+  it("does not read cork's own words about the marker as the marker", () => {
+    // This very conversation is drawn in the same pane, and these exact
+    // characters appear in it — including the glyph. Distance is what keeps
+    // them apart, so the window is only as deep as the box and its status.
+    const talking = [
+      "● The indicator reads ◎ /goal active when a goal is live.",
+      ...Array(12).fill("  more of the conversation"),
+      rule("─"),
+      "❯ ",
+      rule("─"),
+      "  Opus 5 | Context: ▒▒▒▒ 37K/1M 4%",
+      "  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+    ].join("\n");
+    expect(goalArmed(talking)).toBe(false);
+  });
+
+  it("misses it under a draft tall enough to push it out of the window", () => {
+    // Recorded rather than defended: a miss costs one `/goal` that was not
+    // needed, which is measured to be harmless, and the box is empty anyway
+    // whenever this runs — the session has only just come back.
+    const tall = [
+      "          ◎ /goal active (7s)",
+      titled,
+      "❯ line one of a long goal",
+      ...Array(6).fill("  another line"),
+      rule("─"),
+      "  Opus 5 | Context: ▒▒▒▒ 37K/1M 4%",
+    ].join("\n");
+    expect(goalArmed(tall)).toBe(false);
   });
 });

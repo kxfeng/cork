@@ -629,6 +629,11 @@ function autopilotStatus(key: string): string {
   // happening, and the log has the rest.
   const lines = [`📋 **Autopilot**: ${rec.state}`];
 
+  // A run whose goal went with the terminal is not doing anything, whatever
+  // the state says. One line, no cause: what is blocking it changes minute to
+  // minute and is not something to act on — that the goal is missing is.
+  if (rec.needsRearm) lines.push("Goal: not re-armed");
+
   if (rec.goal) lines.push(`Goal: ${preview(rec.goal)}`);
   if (rec.startedAt) lines.push(`Started: ${startedLine(rec)}`);
 
@@ -666,6 +671,7 @@ const ENDINGS: Record<AutopilotStopReason, string> = {
   "user-stop": "stopped on request",
   "start-failed": "never started",
   "stop-failed": "the goal could not be cleared",
+  "rearm-failed": "the goal was lost with the terminal and could not be set again",
   unreachable: "the session could not be brought back",
 };
 
