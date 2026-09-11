@@ -351,7 +351,21 @@ async function handleMessageEvent(
     // merely invited to.
     if (chatType === "p2p" || mentioned) {
       try {
-        await ctx.channel.sendReply(chatId, rejectionNotice(ctx.config.owners, senderId));
+        // In a group the notice has to say who it is for. It lands among other
+        // people's messages, and a warning with no addressee reads as aimed at
+        // whoever happens to be looking — or at nobody, which is worse: the
+        // person actually turned away has no reason to think it concerns them.
+        // The quote says which message, the @ says which person.
+        //
+        // A DM gets neither. There is one other party, they just spoke, and
+        // quoting them back to themselves is noise.
+        await ctx.channel.sendReply(
+          chatId,
+          rejectionNotice(ctx.config.owners, senderId),
+          chatType === "group"
+            ? { replyToMessageId: messageId, atUserIds: [senderId] }
+            : {}
+        );
       } catch {}
     }
     logger.debug("ignoring message from non-owner", {

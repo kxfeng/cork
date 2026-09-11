@@ -26,6 +26,7 @@ function makeCtx(opts: {
 }) {
   const dispatched: Array<Record<string, unknown>> = [];
   const replies: string[] = [];
+  const replyOpts: Array<Record<string, unknown> | undefined> = [];
   const fetchedMessages: string[] = [];
   const ctx = {
     config: { owners: opts.owners, ackEmoji: "" },
@@ -48,8 +49,13 @@ function makeCtx(opts: {
       ensureBotOpenId: async () => BOT_OPEN,
       botName: "XiaoK",
       addReaction: async () => "",
-      sendReply: async (_chatId: string, text: string) => {
+      sendReply: async (
+        _chatId: string,
+        text: string,
+        opts?: Record<string, unknown>
+      ) => {
         replies.push(text);
+        replyOpts.push(opts);
       },
     },
     dispatcher: {
@@ -60,7 +66,7 @@ function makeCtx(opts: {
       getMentionRequired: () => opts.mentionRequired ?? false,
     },
   } as never;
-  return { ctx, dispatched, replies, fetchedMessages };
+  return { ctx, dispatched, replies, replyOpts, fetchedMessages };
 }
 
 function onMessage(ctx: never): (data: unknown) => Promise<void> {
@@ -136,6 +142,21 @@ describe("an allowlist with people on it", () => {
     expect(replies[0]).not.toContain(STRANGER);
   });
 
+  it("addresses the refusal to the person refused", async () => {
+    // The notice lands in a room full of other people. Without a quote and an
+    // @ it names nobody, so the one person it concerns has no reason to read
+    // it and everyone else wonders whether it was theirs.
+    const { ctx, replies, replyOpts } = makeCtx({ owners: [OWNER] });
+    await onMessage(ctx)(
+      message({ chatId: "oc_a2b", tag: "1", sender: STRANGER, mentionsBot: true })
+    );
+    expect(replies).toHaveLength(1);
+    expect(replyOpts[0]).toMatchObject({
+      replyToMessageId: "om_oc_a2b_1",
+      atUserIds: [STRANGER],
+    });
+  });
+
   it("stays silent when a stranger did not name the bot", async () => {
     // Otherwise the bot would answer every passing remark in a group it was
     // merely invited to.
@@ -157,6 +178,17 @@ describe("an allowlist with people on it", () => {
     expect(dispatched).toEqual([]);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("only responds to authorized users");
+  });
+
+  it("does not quote or @ in a DM", async () => {
+    // One other party, who just spoke. Quoting them back to themselves and
+    // ringing their phone about it is noise, not clarity.
+    const { ctx, replies, replyOpts } = makeCtx({ owners: [OWNER] });
+    await onMessage(ctx)(
+      message({ chatId: "oc_a4b", tag: "1", sender: STRANGER, chatType: "p2p" })
+    );
+    expect(replies).toHaveLength(1);
+    expect(replyOpts[0]).toEqual({});
   });
 });
 
