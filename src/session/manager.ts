@@ -733,6 +733,13 @@ export class SessionManager extends EventEmitter {
     if (message.chatName) {
       session.meta.chatName = message.chatName;
     }
+    if (message.threadRootId) {
+      // Written every time rather than only when missing: the value is
+      // constant for a thread, so this costs one assignment inside a save that
+      // was happening anyway, and it repairs sessions recorded before the
+      // field existed without a migration.
+      session.meta.threadRootId = message.threadRootId;
+    }
     saveSession(key, session.meta);
 
     const udsMsg: QueuedMessage = {

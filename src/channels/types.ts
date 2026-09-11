@@ -14,6 +14,13 @@ export interface IncomingMessage {
    * ordinary whole-chat messages. */
   threadId?: string;
   /**
+   * Id of the message a thread hangs off. Only a message inside a thread has
+   * one, and it is the only durable way to address that thread: the thread id
+   * is not a message id, and the thread listing API leaves the root out, so
+   * this is available exactly while the message is being handled.
+   */
+  threadRootId?: string;
+  /**
    * Display name of the sender, when it could be resolved. Surfaced to the
    * model as a `sender` attribute on the channel tag — `senderId` alone is an
    * opaque `ou_…` that names nobody, while a forwarded sub-message has carried

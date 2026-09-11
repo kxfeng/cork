@@ -32,6 +32,17 @@ export interface SessionMeta {
    * whole-chat session. Part of what identifies a session, alongside
    * channel + chatId. */
   threadId?: string;
+  /**
+   * The message this thread hangs off, kept so replies can be addressed to the
+   * thread after a restart.
+   *
+   * Lark places a reply in a thread by quoting a message that belongs to it,
+   * so a reply needs some message id to aim at. That used to be the session's
+   * last inbound id, which lives in memory only — after a restart it was empty,
+   * and a thread session's replies escaped into the main chat. The root is
+   * fixed for the life of the thread and survives here.
+   */
+  threadRootId?: string;
   chatType: "p2p" | "group";
   chatName: string;
   workspace: string;

@@ -24,6 +24,8 @@ export interface ReplyMessage extends UdsMessage {
   content: string;
   /** Local paths to upload and send alongside the text. */
   files?: string[];
+  /** Message to quote, chosen by the model. Ignored in a thread session. */
+  replyToMessageId?: string;
 }
 
 export interface PermissionRequestMessage extends UdsMessage {

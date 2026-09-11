@@ -110,6 +110,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "message after the text. Use this for documents and other " +
               "non-image files; images are better inlined via `![](path)`.",
           },
+          replyToMessageId: {
+            type: "string",
+            description:
+              "The `messageId` of the message this reply is about, copied from " +
+              "the `<channel>` tag it arrived in. The reply then renders as a " +
+              "quote showing who was replied to and a snippet of what they " +
+              "said, which is worth doing in a busy group where a bare reply " +
+              "reads as unattached — and worth skipping in a quiet chat, where " +
+              "quoting every message is noise. Note that quoting a message " +
+              "which already has a thread pulls the reply into that thread, " +
+              "out of the main chat.",
+          },
         },
         required: ["text"],
       },
@@ -119,9 +131,10 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "reply") {
-    const { text, files } = req.params.arguments as {
+    const { text, files, replyToMessageId } = req.params.arguments as {
       text: string;
       files?: string[];
+      replyToMessageId?: string;
     };
     log("reply_tool_called", {
       contentLen: text.length,
@@ -134,6 +147,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         corkSessionKey: sessionKey!,
         content: text,
         ...(files?.length ? { files } : {}),
+        ...(replyToMessageId ? { replyToMessageId } : {}),
       });
       log("reply_sent_to_uds");
       return { content: [{ type: "text" as const, text: "sent" }] };

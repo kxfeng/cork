@@ -303,9 +303,7 @@ export class CorkDaemon {
       return;
     }
 
-    // For a thread session, send the reply back INTO the thread (see
-    // threadReplyOpts). Falls back to a plain chat message otherwise.
-    const replyOpts = this.threadReplyOpts(session);
+    const replyOpts = this.replyTarget(session, msg.replyToMessageId);
 
     logger.info("forwarding reply", {
       sessionKey,
@@ -378,12 +376,52 @@ export class CorkDaemon {
    * im.message.reply on the last inbound message), or undefined for a
    * whole-chat session. Shared by model replies, permission prompts and errors.
    */
+  /**
+   * Which message this reply should quote, if any.
+   *
+   * A thread session addresses its thread and nothing else, so a quote the
+   * model asked for is dropped there. That is not deference lost: a thread
+   * renders every reply the same way, flat and with no sign of what was
+   * quoted, so honouring the request could only change which thread the reply
+   * lands in — never what anyone sees. Outside a thread the quote is visible
+   * and is the entire point, and there is nothing to conflict with.
+   */
+  private replyTarget(
+    session: {
+      meta: { threadId?: string; threadRootId?: string };
+      lastInboundMessageId?: string;
+    },
+    requested?: string
+  ): { replyToMessageId: string; replyInThread: boolean } | undefined {
+    const thread = this.threadReplyOpts(session);
+    if (thread) return thread;
+    return requested
+      ? { replyToMessageId: requested, replyInThread: false }
+      : undefined;
+  }
+
+  /**
+   * How to address a reply so it lands in the session's thread, or undefined
+   * for an ordinary chat.
+   *
+   * Lark has no "post to thread X" call — a reply joins a thread by quoting a
+   * message already in it, so this needs some message id to aim at. The root
+   * is the one that is always available: it is fixed for the thread's lifetime
+   * and stored in the session record, whereas the last inbound id lives only
+   * in memory and is empty after a restart — which used to send a thread
+   * session's replies into the main chat instead.
+   *
+   * The last inbound id remains as a fallback for sessions recorded before the
+   * root was stored; the next message in the thread fills it in for good.
+   */
   private threadReplyOpts(session: {
-    meta: { threadId?: string };
+    meta: { threadId?: string; threadRootId?: string };
     lastInboundMessageId?: string;
   }): { replyToMessageId: string; replyInThread: boolean } | undefined {
-    return session.meta.threadId && session.lastInboundMessageId
-      ? { replyToMessageId: session.lastInboundMessageId, replyInThread: true }
+    if (!session.meta.threadId) return undefined;
+    const anchor = session.meta.threadRootId ?? session.lastInboundMessageId;
+    return anchor
+      ? { replyToMessageId: anchor, replyInThread: true }
       : undefined;
   }
 

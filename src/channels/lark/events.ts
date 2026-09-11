@@ -542,6 +542,10 @@ async function handleMessageEvent(
     text: text.trim(),
     chatName: chatName || undefined,
     threadId: threadId || undefined,
+    // Present on every message in a thread; the only chance to capture it.
+    threadRootId: threadId
+      ? message.root_id || message.parent_id || undefined
+      : undefined,
     // Best-effort and cached; an unresolved name simply omits the attribute
     // rather than echoing the raw id back as if it were one.
     senderName: (await resolveName(senderId)) || undefined,
