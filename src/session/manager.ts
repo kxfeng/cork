@@ -2182,6 +2182,24 @@ export class SessionManager extends EventEmitter {
       return;
     }
     session.channelRegistered = true;
+
+    // A channel that registers while the session is inactive is reconnecting,
+    // not starting: the tmux session and the claude process inside it are still
+    // running, and only the MCP connection went away — `/mcp` → Reconnect does
+    // exactly this, replacing the server subprocess under a live session.
+    //
+    // The gate below only ever promotes a session out of "starting", so without
+    // this the session stays inactive forever with a perfectly good channel
+    // attached. The next message then looks to the dispatcher like a session
+    // that needs starting, and starting it fails — `duplicate session`, because
+    // the tmux session it wants to create is already there — so every message
+    // from then on is dropped with the chat none the wiser.
+    if (session.state === "inactive") {
+      logger.info("channel re-registered, session → connected", { key });
+      this.completeConnection(key);
+      return;
+    }
+
     this.tryCompleteConnection(session);
   }
 
