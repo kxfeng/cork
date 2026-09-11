@@ -280,6 +280,28 @@ async function handleMessageEvent(
 
   // --- Early filtering (before content parsing, minimal logging) ---
 
+  // Never answer ourselves.
+  //
+  // Lark does not push a bot its own messages today — measured over 944 received
+  // events in a live group, not one came from an app — so this drops nothing
+  // now. It is here because the cost of being wrong has no floor: a reply
+  // arriving back as an event would be handed to the model, answered, and the
+  // answer delivered to the chat for real, which arrives as another event.
+  // Nothing in that loop gets tired and every turn of it is public.
+  //
+  // Matched on the open id alone. `senderId` is the sender's open id or nothing,
+  // so comparing it against the app id would never fire, and an event carrying
+  // no open id is already turned away by the owner check below — which compares
+  // the same empty string against the allowlist.
+  //
+  // Only *our own* messages go. Another bot is a correspondent, not an echo: a
+  // group can hold several and a message from one may be exactly what the user
+  // wants read, so `sender_type === "app"` is not the test.
+  if (senderId && senderId === ctx.channel.botOpenId) {
+    logger.debug("dropping own message", { messageId, chatId, chatType });
+    return;
+  }
+
   // Deduplicate: Lark WebSocket delivers at-least-once
   if (messageId && isDuplicate(messageId)) {
     logger.debug("dropping duplicate message", { messageId, chatId, chatType });
