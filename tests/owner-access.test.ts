@@ -110,10 +110,23 @@ function message(opts: {
   };
 }
 
+/**
+ * Each case runs an hour after the last.
+ *
+ * Module-scope state outlives individual tests — the dedup filter, the name
+ * caches, and the per-sender refusal cooldown — so two cases that refuse the
+ * same stranger would otherwise see the second notice swallowed. Unique ids
+ * handle the first two; only moving the clock handles the third, since the
+ * cooldown is keyed by sender and measured in time.
+ */
+let testClock = Date.now();
+
 beforeEach(() => {
   vi.useFakeTimers();
-  // Past the 30s startup grace, so nothing is dropped as a reconnect replay.
-  vi.setSystemTime(Date.now() + 60_000);
+  // An hour on from the previous case, and past the 30s startup grace so
+  // nothing is dropped as a reconnect replay.
+  testClock += 60 * 60_000;
+  vi.setSystemTime(testClock);
 });
 
 afterEach(() => {
@@ -178,6 +191,44 @@ describe("an allowlist with people on it", () => {
     expect(dispatched).toEqual([]);
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain("only responds to authorized users");
+  });
+
+  it("says it once per sender, not once per message", async () => {
+    // Two bots that both answer a refusal with a refusal trade the notice
+    // forever; this ran at four seconds a round, in public, until the other
+    // side went down. The @ that made each refusal look addressed is worth
+    // keeping, so the loop is cut by not repeating the notice at all.
+    const { ctx, replies } = makeCtx({ owners: [OWNER] });
+    for (const tag of ["1", "2", "3"]) {
+      await onMessage(ctx)(
+        message({ chatId: "oc_a2c", tag, sender: STRANGER, mentionsBot: true })
+      );
+    }
+    expect(replies).toHaveLength(1);
+  });
+
+  it("says it again once the cooldown has passed", async () => {
+    // A person who comes back an hour later has not been told anything today.
+    const { ctx, replies } = makeCtx({ owners: [OWNER] });
+    await onMessage(ctx)(
+      message({ chatId: "oc_a2d", tag: "1", sender: STRANGER, mentionsBot: true })
+    );
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    await onMessage(ctx)(
+      message({ chatId: "oc_a2d", tag: "2", sender: STRANGER, mentionsBot: true })
+    );
+    expect(replies).toHaveLength(2);
+  });
+
+  it("keeps one sender's cooldown from silencing another", async () => {
+    const { ctx, replies } = makeCtx({ owners: [OWNER] });
+    await onMessage(ctx)(
+      message({ chatId: "oc_a2e", tag: "1", sender: "ou_first", mentionsBot: true })
+    );
+    await onMessage(ctx)(
+      message({ chatId: "oc_a2e", tag: "2", sender: "ou_second", mentionsBot: true })
+    );
+    expect(replies).toHaveLength(2);
   });
 
   it("does not quote or @ in a DM", async () => {

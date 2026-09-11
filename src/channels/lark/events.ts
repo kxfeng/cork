@@ -220,6 +220,17 @@ function rejectionNotice(owners: string[], senderId: string): string {
   );
 }
 
+/**
+ * When each sender was last told they are not authorized.
+ *
+ * Holds only the senders still inside the cooldown. Past that point an entry
+ * decides nothing — an expired timestamp and a missing one both mean "say it"
+ * — so entries are dropped as they expire and the map stays the size of the
+ * last ten minutes rather than of the process's whole life.
+ */
+const refusalNoticeSent = new Map<string, number>();
+const REFUSAL_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
+
 // Cache of "is this thread rooted by the bot" per thread_id, so the @-gate
 // resolves it with at most one fetchMessage per thread.
 const threadBotRootedCache = new Map<string, boolean>();
@@ -345,11 +356,49 @@ async function handleMessageEvent(
   // order means the thread lookup below is only paid for on behalf of someone
   // entitled to it.
   if (!ownerCheck) {
+    let noticeSent = false;
     // A DM is addressed to the bot by existing, so it always deserves an
     // answer. In a group, only a message that named the bot does: replying to
     // every passing remark would make the bot a nuisance in a chat it was
     // merely invited to.
     if (chatType === "p2p" || mentioned) {
+      // At most one notice per sender per cooldown.
+      //
+      // The notice is for a person who can act on it, and a person needs to
+      // read it once. Saying it again on their next message adds nothing, and
+      // when the sender is another bot it is actively dangerous: two bots that
+      // both answer refusals with a refusal trade the notice forever. That is
+      // not hypothetical — it ran at four seconds a round for 37 turns, in a
+      // group, in public, and stopped only because the other side went down.
+      //
+      // What set it off was adding an @ to this notice. Without one, the other
+      // bot's group gate saw a message that did not name it and stayed quiet;
+      // with one, every refusal read as addressed and earned a refusal back.
+      // The @ is worth keeping — a notice that names nobody helps nobody — so
+      // the loop is cut here instead, where it cannot come back through some
+      // other door.
+      //
+      // Deliberately not "don't answer bots": the receive event's sender_type
+      // does not say "app" for a bot — this exact loop kept running through a
+      // build that checked for it — and a fix resting on a field nobody has
+      // confirmed is how the loop got written in the first place. A cooldown
+      // needs to know nothing about who is on the other end.
+      const now = Date.now();
+      const lastSent = refusalNoticeSent.get(senderId) ?? 0;
+      if (now - lastSent >= REFUSAL_NOTICE_COOLDOWN_MS) {
+        // Swept here rather than on a timer: this runs only when a notice is
+        // actually going out, which is rare, and the map is at most the people
+        // refused in the last ten minutes. Removing an expired entry changes
+        // no behaviour — it already said "say it" — so this is only about not
+        // holding ids forever.
+        for (const [id, at] of refusalNoticeSent) {
+          if (now - at >= REFUSAL_NOTICE_COOLDOWN_MS) refusalNoticeSent.delete(id);
+        }
+        refusalNoticeSent.set(senderId, now);
+        noticeSent = true;
+      }
+    }
+    if (noticeSent) {
       try {
         // In a group the notice has to say who it is for. It lands among other
         // people's messages, and a warning with no addressee reads as aimed at
@@ -373,7 +422,12 @@ async function handleMessageEvent(
       chatId,
       chatType,
       senderId,
+      // Recorded because a fix once assumed it reads "app" for a bot. It does
+      // not, and nothing else in this file should trust it until this line has
+      // shown what it actually carries.
+      senderType: sender.sender_type,
       ownersConfigured: ctx.config.owners.length,
+      noticeSent,
     });
     return;
   }
