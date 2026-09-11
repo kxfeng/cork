@@ -296,9 +296,10 @@ export class CorkDaemon {
     }
 
     if (!content?.trim()) {
-      // The model did call the reply tool, it just had nothing to send. That
-      // still counts as answering, so the acks come off.
-      logger.debug("empty reply, skipping", { sessionKey });
+      // The model did call the reply tool, it just had nothing to send — it
+      // read a message meant for someone else, or let an exchange end. That
+      // still counts as answering, so the acks come off. Not logged: it is a
+      // normal outcome, and one the model is told to reach for.
       this.clearAcks(sessionKey, chatId, channel);
       return;
     }

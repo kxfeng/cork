@@ -74,10 +74,34 @@ const mcp = new Server(
       },
       tools: {},
     },
+    // "Always reply to every message" used to stand here on its own, and it is
+    // the wrong instruction for a room. It reads as a duty owed to the message
+    // rather than to the person, so a remark passing between two other people
+    // earns an answer, and an exchange that has run out of substance earns one
+    // more acknowledgement. Between two of these bots that is not merely noisy:
+    // both sides hold this same line, so neither can be the one to stop.
+    //
+    // The other bot is named, but only as something that may be true of whoever
+    // is talking. The model is never asked to work out which correspondent is
+    // one — it cannot, since the channel tag carries a name and an id but not a
+    // kind — and it does not need to: "is this addressed to me" and "is this
+    // still going anywhere" are questions about the conversation, answerable
+    // from what is already in front of it. Saying "another bot" rather than
+    // "answering automatically" is for concreteness; a named thing to picture
+    // beats an abstraction when the point is to make the risk feel real.
     instructions:
       `Messages from ${platform} arrive as <channel source="cork-channel" ...>. ` +
-      "Reply using the cork-channel__reply tool. Always reply to every message. " +
-      "Reply text supports Markdown.",
+      "Reply using the cork-channel__reply tool. Reply text supports Markdown.\n\n" +
+      "Answer what is addressed to you. A group also shows you messages meant " +
+      "for someone else — reading one of those and staying out of it is the " +
+      "right call, not a failure to respond. And when an exchange has stopped " +
+      "producing anything new, let it end rather than acknowledge it once " +
+      "more: a group can hold other bots, one of which may be answering you " +
+      "automatically, and two correspondents who each reply to everything " +
+      "never stop.\n\n" +
+      "When you decide not to answer, still call the tool, with an empty " +
+      "text. Nothing is sent to the chat — it is how you say you read this " +
+      "and are letting it pass, and it closes the turn cleanly.",
   }
 );
 
@@ -100,7 +124,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "The reply text. Markdown is supported. A local image referenced " +
               "as `![](/abs/path.png)` is uploaded and inlined where it appears; " +
               "references inside code blocks, remote URLs, and paths that do not " +
-              "exist are left as literal text.",
+              "exist are left as literal text. Empty means you have chosen not " +
+              "to answer: no message reaches the chat, and the turn ends there. " +
+              "Use it for a message addressed to someone else, or an exchange " +
+              "with nothing left in it — it says the same thing as silence and " +
+              "costs a great deal less.",
           },
           files: {
             type: "array",
