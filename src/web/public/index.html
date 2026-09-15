@@ -573,6 +573,9 @@
        * That is the point: a message typed here is addressed to the pane, not to
        * the group.
        */
+      /** How long the Enter trails the text it submits — see send(). */
+      const SUBMIT_DELAY_MS = 50;
+
       function send() {
         const text = $("msg").value;
         if (!text.trim() || !current) return;
@@ -587,13 +590,34 @@
           return;
         }
 
-        // Sent as-is, then a carriage return to submit. Newlines inside the text
-        // stay newlines: a terminal app reads Enter as CR, so LF passes through as
-        // a line break rather than submitting the message early. (Bracketed paste
-        // would be the tidier way to say "this is one block", but Claude Code does
-        // not turn it on — the markers would arrive as literal characters.)
-        ws.send(JSON.stringify({ type: "input", data: text }));
-        ws.send(JSON.stringify({ type: "input", data: "\r" }));
+        // Sent as a bracketed paste when the pane asks for it, and the carriage
+        // return that submits it follows a moment later, on its own.
+        //
+        // Bare text followed at once by "\r" loses the Enter whenever the two
+        // arrive in the same read: Claude Code takes a burst of many characters
+        // for a paste and swallows a CR inside it as part of the pasted content,
+        // so a long multi-line message sits in the prompt unsent. Measured
+        // through tmux: six sends out of six stuck, and the same text went
+        // through every time once the CR trailed it by 5ms or more. That is also
+        // why it only failed sometimes from here — the socket occasionally put
+        // that gap in.
+        //
+        // The markers say "this is one block" outright — wrapped, the same text
+        // submitted three times out of three with no gap at all — so they are
+        // used whenever the program in the pane has turned bracketed paste on.
+        // Claude Code does, at startup, and tmux relays that mode to every
+        // attached client, so this terminal's own flag reports the pane's state.
+        // Without it the markers would reach the program as stray bytes, and the
+        // text goes bare. The delay covers that case, and costs nothing in the
+        // other.
+        const sock = ws; // the Enter must go to the pane the text went to
+        const data = term && term.modes.bracketedPasteMode
+          ? "\x1b[200~" + text + "\x1b[201~"
+          : text;
+        sock.send(JSON.stringify({ type: "input", data }));
+        setTimeout(() => {
+          if (sock.readyState === 1) sock.send(JSON.stringify({ type: "input", data: "\r" }));
+        }, SUBMIT_DELAY_MS);
         $("msg").value = "";
         drafts.delete(current); // it went to the pane; it is not a draft any more
         sizeComposer();
