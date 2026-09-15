@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, it, expect, vi } from "vitest";
 import { TranscriptWatcher, formatDialog } from "../src/session/transcript-watcher.js";
 import { readDialog, type Dialog } from "../src/session/dialog.js";
@@ -8,7 +9,7 @@ import { readDialog, type Dialog } from "../src/session/dialog.js";
  * A dialog stops the session dead and writes nothing to the transcript, so the
  * only way to know is to look at the screen on a timer. What is tested here is
  * everything around that look: how often, when to stay quiet, and saying each
- * thing once rather than every 30 seconds.
+ * thing once rather than on every look.
  */
 const W = 155;
 const rule = (ch: string) => ch.repeat(W);
@@ -320,17 +321,62 @@ describe("the message", () => {
     );
   });
 
-  it("trims long prose but never an option", () => {
+  it("keeps both ends of long prose, and every option", () => {
     // A list cut short would still be numbered by /pick, and someone could
     // choose an option they were never shown.
     const many = [rule("▔"), "   Title"];
     for (let i = 0; i < 20; i++) many.push(`   prose line ${i}`);
     many.push("   ❯ 1. First", "     2. Second", "", "   Esc to cancel");
-    const d = readDialog(many.join("\n"), W)!;
-    const text = formatDialog(d);
-    expect(text).toContain("…");
-    expect(text).not.toContain("prose line 19");
+    const text = formatDialog(readDialog(many.join("\n"), W)!);
+    // Title and 20 lines is 21 of prose: the first 8, a gap, the last 8.
+    expect(text).toContain("Title");
+    expect(text).toContain("prose line 6");
+    expect(text).not.toContain("prose line 7");
+    expect(text).not.toContain("prose line 11");
+    expect(text).toContain("prose line 12");
+    expect(text).toContain("prose line 19");
+    expect(text.split("\n").filter((l) => l === "…")).toHaveLength(1);
     expect(text).toContain("1. First");
     expect(text).toContain("2. Second");
+  });
+
+  it("shows prose whole when it fits, not counting claude's key hints", () => {
+    // 16 lines exactly. The footer is dropped from the message, and counting
+    // it as a 17th would cut a line that was always going to fit.
+    const lines = [rule("▔"), "   Title"];
+    for (let i = 0; i < 15; i++) lines.push(`   prose line ${i}`);
+    lines.push("   ❯ 1. Yes", "     2. No", "", "   Esc to cancel");
+    const text = formatDialog(readDialog(lines.join("\n"), W)!);
+    expect(text).not.toContain("…");
+    expect(text).toContain("prose line 14");
+  });
+
+  const fixture = (name: string) =>
+    readDialog(fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"), 200)!;
+
+  it("keeps a prompt's reason, however long its command", () => {
+    // Captured: a 21-line command. Why claude is asking sits right above the
+    // question — the end that taking only the start threw away.
+    const text = formatDialog(fixture("dialog-permission-long-command.txt"));
+    expect(text).toContain("Bash command");
+    expect(text).toContain("…");
+    expect(text).toContain("Dangerous rm operation on possibly-empty variable path");
+    expect(text).toContain("Do you want to proceed?");
+    expect(text).not.toContain("Esc to cancel");
+  });
+
+  it("shows only the end of a dialog whose top is off the screen", () => {
+    const text = formatDialog(fixture("dialog-permission-taller-than-pane.txt"));
+    const fenced = text.split("```")[1].split("\n").filter((l) => l.trim());
+    // Opens on the gap, since the start is missing from the screen itself.
+    expect(fenced[0]).toBe("…");
+    const prose = fenced.slice(1).filter((l) => !/^\s*(❯\s*)?\d+\.\s/.test(l));
+    expect(prose).toHaveLength(8);
+    expect(prose[prose.length - 2]).toContain("Dangerous rm operation");
+    expect(prose[prose.length - 1]).toBe("Do you want to proceed?");
+    expect(text).toContain("❯ 1. Yes");
+    expect(text.trimEnd().split("\n").pop()).toBe(
+      "`/pick <n>` to choose · `/pick esc` to cancel"
+    );
   });
 });

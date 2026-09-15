@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, it, expect } from "vitest";
 import { readDialog, dialogSignature, goalArmed } from "../src/session/dialog.js";
 
@@ -136,7 +137,7 @@ describe("no dialog", () => {
 
   it("reads a streaming pane as taking input", () => {
     // The most dangerous false positive: a session that is merely busy would
-    // be reported to the user as waiting on them, every 30 seconds.
+    // be reported to the user as waiting on them, on every check.
     expect(readDialog(STREAMING, W)).toBeNull();
   });
 
@@ -237,6 +238,54 @@ describe("numbered dialogs", () => {
     expect(d.options[3].text).toBe("4. No");
     // The command being approved is prose, not an option.
     expect(d.body.join(" ")).toContain("curl -s https://example.net");
+  });
+});
+
+/**
+ * Whole 200x50 panes captured while a real session asked to run a command,
+ * with only the scratch directory's path shortened.
+ */
+const fixture = (name: string) =>
+  fs.readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+const TALL = fixture("dialog-permission-taller-than-pane.txt");
+const LONG = fixture("dialog-permission-long-command.txt");
+
+describe("a dialog taller than the pane", () => {
+  it("is still read as a dialog, with its top marked as missing", () => {
+    // A 72-line command: the rule and "Bash command" are above the screen, and
+    // the first line on it is the middle of the command. This was once read
+    // as no dialog at all, and /pick could not answer it either.
+    const d = readDialog(TALL, 200)!;
+    expect(d).not.toBeNull();
+    expect(d.clipped).toBe(true);
+    expect(d.kind).toBe("takeover");
+    expect(d.title).toBe("");
+    expect(d.options.map((o) => o.text)).toEqual(["1. Yes", "2. No"]);
+    expect(d.selected).toBe(0);
+    expect(d.answerable).toBe(true);
+    expect(d.footer).toContain("Esc to cancel");
+    expect(d.body.join("\n")).toContain("Dangerous rm operation");
+  });
+
+  it("is not clipped when the whole of it fits", () => {
+    const d = readDialog(LONG, 200)!;
+    expect(d.clipped).toBe(false);
+    expect(d.title).toBe("Bash command");
+    expect(readDialog(PERMISSION, W)!.clipped).toBe(false);
+  });
+
+  it("needs the bottom of a dialog on a screen with no rule, not just a cursor and an Esc", () => {
+    // The conversation draws ❯ before every prompt, and "Esc" turns up in
+    // prose. With no rule to say where a dialog starts, the options have to
+    // sit right above the way out.
+    const pane = [
+      "❯ fix the bug",
+      "",
+      "● Done. Press Esc to stop a run.",
+      "",
+      "  Esc to interrupt",
+    ].join("\n");
+    expect(readDialog(pane, W)).toBeNull();
   });
 });
 

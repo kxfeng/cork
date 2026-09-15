@@ -1,0 +1,50 @@
+  import sys,re
+  D=sys.argv[1]
+  full=open(D+"/typescript","rb").read(); start=open(D+"/ts_startup","rb").read()
+  print("total bytes:",len(full)," bytes up to prompt visible:",len(start))
+  for m in re.finditer(rb"\x1b\[\?(2004|1004|2026|25|1049)[hl]",full):
+      ctx_before=re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]",b"",full[max(0,m.start()-120):m.start()]).decode("utf8","ignore").replace("\n"," ").replace("\r"," ")[-60:]
+      phase="startup" if m.start()<len(start) else "at/after /exit"
+      if b"2004" in m.group(0) or b"1049" in m.group(0):
+          print(f"offset {m.start():>7} [{phase}] {m.group(0)!r}  text-before: …{ctx_before!r}")
+  print("2004h count:",full.count(b"\x1b[?2004h")," 2004l count:",full.count(b"\x1b[?2004l"))
+  EOF
+
+● Starting Claude in tmux, exit it, and analyzing terminal mode sequences
+  ⎿  $ D=/tmp/probe/bpclaude; mkdir -p $D; rm -f $D/*
+     tmux -L bpclaude kill-server 2>/dev/null
+     tmux -L bpclaude -f /dev/null new-session -d -s c -x 155 -y 47 "cd /home/me/ws && script -q -f …
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   │ D=/tmp/probe/bpclaude; mkdir -p $D; rm -f $D/*
+   │ tmux -L bpclaude kill-server 2>/dev/null
+   │ tmux -L bpclaude -f /dev/null new-session -d -s c -x 155 -y 47 "cd /home/me/ws && script -q -f -c 'claude' $D/typescript"
+   │ for i in $(seq 1 25); do ping -c 2 -i 1 127.0.0.1 >/dev/null; if tmux -L bpclaude capture-pane -p -t c 2>/dev/null | grep -q '❯'; then break; fi; done
+   │ echo "=== screen after startup ==="; tmux -L bpclaude capture-pane -p -t c | grep -v '^\s*$' | tail -8
+   │ cp $D/typescript $D/ts_startup
+   │ tmux -L bpclaude send-keys -t c '/exit' ; ping -c 2 -i 1 127.0.0.1 >/dev/null; tmux -L bpclaude send-keys -t c Enter
+   │ for i in $(seq 1 10); do ping -c 2 -i 1 127.0.0.1 >/dev/null; tmux -L bpclaude has-session -t c 2>/dev/null || break; done
+   │ tmux -L bpclaude kill-server 2>/dev/null
+   │ python3 - "$D" <<'EOF'
+   │ import sys,re
+   │ D=sys.argv[1]
+   │ full=open(D+"/typescript","rb").read(); start=open(D+"/ts_startup","rb").read()
+   │ print("total bytes:",len(full)," bytes up to prompt visible:",len(start))
+   │ for m in re.finditer(rb"\x1b\[\?(2004|1004|2026|25|1049)[hl]",full):
+   │     ctx_before=re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]",b"",full[max(0,m.start()-120):m.start()]).decode("utf8","ignore").replace("\n"," ").replace("\r"," ")[-60:]
+   │     phase="startup" if m.start()<len(start) else "at/after /exit"
+   │     if b"2004" in m.group(0) or b"1049" in m.group(0):
+   │         print(f"offset {m.start():>7} [{phase}] {m.group(0)!r}  text-before: …{ctx_before!r}")
+   │ print("2004h count:",full.count(b"\x1b[?2004h")," 2004l count:",full.count(b"\x1b[?2004l"))
+   │ EOF
+   Start Claude in tmux, exit it, and analyze terminal mode sequences
+
+ Dangerous rm operation on possibly-empty variable path: $D/*
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend

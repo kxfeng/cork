@@ -1,0 +1,50 @@
+   │     bufs[name]=bytearray()
+   │     def rd():
+   │         while True:
+   │             try:
+   │                 b=os.read(fd,65536)
+   │                 if not b: break
+   │                 bufs[name]+=b
+   │             except OSError: break
+   │     threading.Thread(target=rd,daemon=True).start()
+   │     return pid,fd
+   │ pa,fa=client("A"); time.sleep(1); pb,fb=client("B"); time.sleep(1)
+   │ print("clients:", tm("list-clients","-t","t","-F","#{client_tty}").stdout.split())
+   │ def mark(label):
+   │     with open(LOG,"a") as f: f.write("---- "+label+"\n")
+   │ def state(): return {k:(b"\x1b[?2004h" in v, b"\x1b[?2004l" in v) for k,v in bufs.items()}
+   │ print("before pane enables mode: client got (?2004h, ?2004l):", state())
+   │ for k in bufs: bufs[k].clear()
+   │ mark("1 pane mode OFF: client A sends ESC[200~abc ESC[201~")
+   │ os.write(fa,b"\x1b[200~abc\x1b[201~"); time.sleep(1)
+   │ open(CMD,"w").write("on"); time.sleep(1.5)
+   │ print("after pane enables mode: client got (?2004h, ?2004l):", state())
+   │ mark("2 pane mode ON: client A sends ESC[200~abc ESC[201~")
+   │ os.write(fa,b"\x1b[200~abc\x1b[201~"); time.sleep(1)
+   │ mark("3 pane mode ON: client B sends ESC[200~line1 CR line2 ESC[201~")
+   │ os.write(fb,b"\x1b[200~line1\rline2\x1b[201~"); time.sleep(1)
+   │ mark("4 pane mode ON: client A sends plain burst xyz (no markers)")
+   │ os.write(fa,b"xyz"); time.sleep(1)
+   │ mark("5 pane mode ON: client A sends ESC[200~one ESC[201~ two CR three ESC[201~")
+   │ os.write(fa,b"\x1b[200~one\x1b[201~two\rthree\x1b[201~"); time.sleep(1)
+   │ for k in bufs: bufs[k].clear()
+   │ open(CMD,"w").write("off"); time.sleep(1.5)
+   │ print("after pane disables mode: client got (?2004h, ?2004l):", state())
+   │ mark("6 pane mode OFF again: client B sends ESC[200~abc ESC[201~")
+   │ os.write(fb,b"\x1b[200~abc\x1b[201~"); time.sleep(1)
+   │ for p in (pa,pb):
+   │     try: os.kill(p,15)
+   │     except: pass
+   │ tm("kill-server")
+   │ print(open(LOG).read())
+   │ EOF
+   │ tmux -V; timeout 120 python3 $D/run.py $D 2>&1 | tail -40
+   Run tmux bracketed-paste passthrough test
+
+ Dangerous rm operation on possibly-empty variable path: $D/*
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. No
+
+ Esc to cancel · Tab to amend

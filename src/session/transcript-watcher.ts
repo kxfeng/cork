@@ -109,11 +109,12 @@ const TICK_INTERVAL_MS = 10_000;
  * A dialog stops claude acting on anything — a message sent from Lark sits
  * there unanswered — and nothing in the transcript says one is up: dialogs
  * write no rows at all (measured: 32 lines before, 32 after). Screen-reading
- * on a timer is the only way to find out, and 30s is chosen against how long
- * someone is willing to wait wondering why there is no reply, not against
- * cost: a capture is a few milliseconds.
+ * on a timer is the only way to find out, and it happens on every tick. At 30s
+ * a prompt could sit there half a minute before anyone was told, and one that
+ * was approved from the Claude app 25 seconds in was never reported at all.
+ * Cost is not what limits this: a capture is a few milliseconds.
  */
-const DIALOG_POLL_MS = 30_000;
+const DIALOG_POLL_MS = TICK_INTERVAL_MS;
 
 /**
  * How far a dialog has to outlast the last keystroke before the chat hears
@@ -275,13 +276,34 @@ function formatTokens(n: number): string {
  * invites being read as a clock time.
  */
 /**
- * How much of a dialog's own prose is worth putting in a chat message.
+ * How much of a dialog's own prose is worth putting in a chat message: this
+ * many lines from its start and as many from its end, with what lies between
+ * them left out.
+ *
+ * Both ends, because both carry something. The start is the title and what is
+ * being asked about; the end is what sits right above the options — the reason
+ * for a prompt ("Dangerous rm operation on possibly-empty variable path") and
+ * the question itself. Taking only the start, as this once did, cut exactly
+ * that off any prompt whose command ran past a few lines.
  *
  * Prose only. Options are never dropped: a list cut short still gets numbers
  * from `/pick`, so someone could choose an option they were never shown —
  * which is worse than a long message by a distance.
  */
-const DIALOG_PROSE_LINES = 8;
+const DIALOG_HEAD_LINES = 8;
+const DIALOG_TAIL_LINES = 8;
+
+/** Which lines of prose make it into the message, by index into the screen. */
+function keptProse(prose: number[], clipped: boolean): Set<number> {
+  // A clipped dialog has already lost its start to the top of the pane, so all
+  // there is to show is its end.
+  if (clipped) return new Set(prose.slice(-DIALOG_TAIL_LINES));
+  if (prose.length <= DIALOG_HEAD_LINES + DIALOG_TAIL_LINES) return new Set(prose);
+  return new Set([
+    ...prose.slice(0, DIALOG_HEAD_LINES),
+    ...prose.slice(-DIALOG_TAIL_LINES),
+  ]);
+}
 
 /**
  * A dialog, as a message someone reads on their phone.
@@ -301,31 +323,29 @@ export function formatDialog(d: Dialog): string {
     : "🔔 Dialog needs you at the terminal";
 
   const options = new Set(d.optionRows);
-  const shown: string[] = [];
-  let prose = 0;
-  let cut = false;
-  for (const [i, line] of d.screen.entries()) {
-    if (options.has(i) || !line.trim()) {
-      shown.push(line);
-      continue;
-    }
-    if (prose < DIALOG_PROSE_LINES) {
-      shown.push(line);
-      prose++;
-    } else if (!cut) {
-      shown.push("…");
-      cut = true;
-    }
-  }
-  // Trailing blanks survive the walk above (a blank is never prose), and a cut
-  // leaves the ones that followed what was dropped.
-  while (shown.length && !shown[shown.length - 1].trim()) shown.pop();
 
-  // Drop claude's own key hints. Everything that line says — Enter, `s`, Tab —
-  // is about pressing keys at the terminal, which is exactly where the reader
-  // of this message is not. Keeping it would hand them a manual for a keyboard
-  // they are not sitting at.
-  if (shown.length && shown[shown.length - 1].includes("Esc")) shown.pop();
+  // Drop claude's own key hints, before anything is counted. Everything that
+  // line says — Enter, `s`, Tab — is about pressing keys at the terminal, which
+  // is exactly where the reader of this message is not. Counted, it would also
+  // take one of the lines kept from the end, from the prose beside the options.
+  let end = d.screen.length;
+  while (end > 0 && !d.screen[end - 1].trim()) end--;
+  if (end > 0 && !options.has(end - 1) && d.screen[end - 1].includes("Esc")) end--;
+  const screen = d.screen.slice(0, end);
+
+  const prose = [...screen.keys()].filter((i) => screen[i].trim() && !options.has(i));
+  const kept = keptProse(prose, d.clipped);
+
+  // One "…" for each run of lines left out, blanks inside the run included. A
+  // clipped dialog opens on one: its start is missing too, if not by choice.
+  const shown: string[] = d.clipped ? ["…"] : [];
+  for (const [i, line] of screen.entries()) {
+    const gap = shown[shown.length - 1] === "…";
+    if (options.has(i) || kept.has(i)) shown.push(line);
+    else if (!line.trim()) {
+      if (!gap) shown.push(line);
+    } else if (!gap) shown.push("…");
+  }
   while (shown.length && !shown[shown.length - 1].trim()) shown.pop();
 
   // "cancel" rather than a word of cork's own: it is what claude's own footer
@@ -1211,7 +1231,9 @@ export class TranscriptWatcher {
     const hooks = this.dialogHooks;
     if (!hooks) return;
     const now = this.now();
-    if (now - this.lastDialogCheckAt < DIALOG_POLL_MS) return;
+    // Most of an interval rather than all of it: the poll is the tick, and a
+    // timer that fires a millisecond early would otherwise skip every other one.
+    if (now - this.lastDialogCheckAt < DIALOG_POLL_MS * 0.9) return;
     this.lastDialogCheckAt = now;
 
     if (hooks.driving()) return;

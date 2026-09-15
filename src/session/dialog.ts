@@ -18,6 +18,7 @@
  *   model picker           ▔          5        yes    dialog
  *   Switch model?          ▔          2        no     dialog (by options)
  *   permission prompt      ─          4        yes    dialog
+ *   tall permission prompt none       2        yes    dialog, top clipped
  *   trust screen           ─          2        yes    dialog
  *   /help                  ▔          0        yes    dialog (by Esc)
  *   /status                ▔          0        yes    dialog (by Esc)
@@ -29,6 +30,12 @@
  * (`────… Cork · Long Task Dev ────…`), so it was not recognised, the box was
  * not found, and the status area was reported to a real chat as a dialog. The
  * rule above the box is not consulted here at all.
+ *
+ * A screen with no such rule at all has something taller than the pane on it,
+ * since the rule under the input box is anchored to the bottom whenever no
+ * dialog is up. A permission prompt for a long command is the one seen: its own
+ * rule and title scroll off, and what is left is read as the bottom of a dialog
+ * provided it looks like one — see isDialogBottom.
  *
  * The rule must be exactly the pane's width, which is what keeps a transcript
  * apart from a frame: message text is indented and can never reach the edge —
@@ -81,6 +88,16 @@ export interface Dialog {
    * to choose an option they were never shown.
    */
   folded: boolean;
+  /**
+   * The dialog is taller than the pane, so its top — the rule, the title and
+   * the start of what it says — has scrolled off, and what is on screen is the
+   * rest of it.
+   *
+   * A long command does this to a permission prompt. It was once read as no
+   * dialog at all, because the rule the reader starts from was not there: a
+   * 72-line command on a 50-row pane went unreported for as long as it was up.
+   */
+  clipped: boolean;
   options: DialogOption[];
   /** Index of the selected option, or null when nothing is selected. */
   selected: number | null;
@@ -117,7 +134,7 @@ export function readDialog(pane: string, width: number): Dialog | null {
   const lines = pane.split("\n").map((l) => l.replace(/\s+$/, ""));
   let last = -1;
   for (let i = 0; i < lines.length; i++) if (isRule(lines[i], width)) last = i;
-  if (last === -1) return null;
+  const clipped = last === -1;
 
   const region = lines.slice(last + 1);
   const { options, selected, rows } = readOptions(region);
@@ -126,6 +143,7 @@ export function readDialog(pane: string, width: number): Dialog | null {
   // The status area offers nothing to choose and no way out, because it is not
   // asking anything. That is the whole test.
   if (options.length === 0 && !canLeave) return null;
+  if (clipped && !isDialogBottom(region, rows)) return null;
 
   const taken = new Set(options.map((o) => o.text));
   const rest = region
@@ -138,18 +156,42 @@ export function readDialog(pane: string, width: number): Dialog | null {
   const folded = screen.some((l) => /^[↓↑]/.test(l.trim()));
 
   return {
-    kind: lines[last].trim()[0] === OVERLAY_RULE ? "overlay" : "takeover",
-    title: rest[0]?.trim() ?? "",
-    body: rest.slice(1, footer ? rest.length - 1 : undefined).map((l) => l.trim()),
+    // Only a permission prompt has been seen tall enough to clip, and it is a
+    // takeover.
+    kind: !clipped && lines[last].trim()[0] === OVERLAY_RULE ? "overlay" : "takeover",
+    // A clipped dialog's first line is the middle of whatever it was showing.
+    title: clipped ? "" : (rest[0]?.trim() ?? ""),
+    body: rest
+      .slice(clipped ? 0 : 1, footer ? rest.length - 1 : undefined)
+      .map((l) => l.trim()),
     screen,
     // `screen` only drops trailing blanks, so an option's index is unchanged.
     optionRows: rows.filter((i) => i < screen.length),
     folded,
+    clipped,
     options,
     selected,
     footer,
     answerable: options.length > 0 && !folded,
   };
+}
+
+/**
+ * Whether a screen with no rule on it shows the bottom of a dialog.
+ *
+ * Without the rule there is no telling where a dialog starts, so this asks for
+ * what the bottom of one looks like instead, and all of it: options, the way
+ * out as the last thing on screen, and nothing but blank lines between the two.
+ * A cursor and an "Esc" anywhere on screen are not enough — the conversation
+ * draws `❯` before every prompt it shows.
+ */
+function isDialogBottom(region: string[], rows: number[]): boolean {
+  if (rows.length === 0) return false;
+  let end = region.length - 1;
+  while (end >= 0 && !region[end].trim()) end--;
+  const lastOption = rows[rows.length - 1];
+  if (end <= lastOption || !region[end].includes(LEAVE_KEY)) return false;
+  return region.slice(lastOption + 1, end).every((l) => !l.trim());
 }
 
 /**
