@@ -15,7 +15,6 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { z } from "zod";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -63,14 +62,20 @@ log("subprocess_started", { sockPath });
 const channelName = process.env.CORK_CHANNEL_NAME || "lark";
 const platform = channelName.charAt(0).toUpperCase() + channelName.slice(1);
 
-// Create the MCP server with channel capability
+// Create the MCP server with channel capability.
+//
+// Deliberately not `claude/channel/permission`. Declaring it has Claude Code
+// relay each tool approval here as well as drawing its dialog, and cork already
+// reads that dialog off the pane and offers `/pick` for it (session/dialog.ts).
+// Two paths meant one prompt announced twice with nothing tying the two
+// together, and the relay never says when a prompt was answered somewhere else,
+// so its message stayed open in the chat after the dialog had gone.
 const mcp = new Server(
   { name: "cork-channel", version: "0.1.0" },
   {
     capabilities: {
       experimental: {
         "claude/channel": {},
-        "claude/channel/permission": {},
       },
       tools: {},
     },
@@ -214,32 +219,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   throw new Error(`unknown tool: ${req.params.name}`);
 });
 
-// Permission relay: forward permission prompts from Claude Code to Lark via cork
-const PermissionRequestSchema = z.object({
-  method: z.literal("notifications/claude/channel/permission_request"),
-  params: z.object({
-    request_id: z.string(),
-    tool_name: z.string(),
-    description: z.string(),
-    input_preview: z.string(),
-  }),
-});
-
-mcp.setNotificationHandler(PermissionRequestSchema, async ({ params }) => {
-  try {
-    udsClient.send({
-      type: "permission_request",
-      corkSessionKey: sessionKey!,
-      toolName: params.tool_name,
-      description: params.description,
-      inputPreview: params.input_preview,
-      requestId: params.request_id,
-    });
-  } catch {
-    // Can't forward, user will need to approve in terminal
-  }
-});
-
 // UDS client: connects to cork daemon
 const udsClient = new UdsClient(sockPath, sessionKey);
 
@@ -267,16 +246,6 @@ udsClient.on("message", async (msg) => {
     } catch (err) {
       log("forward_to_claude_failed", { err: (err as Error).message });
     }
-  } else if (msg.type === "permission_verdict") {
-    // Forward permission verdict to Claude Code
-    log("recv_permission_verdict", { requestId: msg.requestId });
-    await mcp.notification({
-      method: "notifications/claude/channel/permission" as any,
-      params: {
-        request_id: msg.requestId as string,
-        behavior: msg.behavior as string,
-      },
-    } as any);
   }
 });
 

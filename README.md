@@ -185,7 +185,7 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
 4. Claude loads the bundled `cork-channel-mcp` MCP server, which connects back to cork's UDS and registers itself.
 5. From then on: Lark → cork → UDS → channel MCP → Claude (and back the other way for replies).
 
-The full design — message flow, dedup, queueing, permission relay — is in [DESIGN.md](./DESIGN.md).
+The full design — message flow, dedup, queueing, dialogs — is in [DESIGN.md](./DESIGN.md).
 
 ## Troubleshooting
 

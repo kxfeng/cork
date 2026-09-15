@@ -411,7 +411,6 @@ interface ActiveSession {
  *
  * Events:
  * - "reply" (sessionKey, content) — reply from Claude, forward to Lark
- * - "permission_request" (sessionKey, msg) — permission prompt from Claude
  * - "notify" (sessionKey, text) — cork itself has something to tell the chat
  *   (an autopilot run finished, stalled, or could not be restarted)
  */

@@ -30,20 +30,6 @@ export interface ReplyMessage extends UdsMessage {
   at?: string;
 }
 
-export interface PermissionRequestMessage extends UdsMessage {
-  type: "permission_request";
-  corkSessionKey: string;
-  toolName: string;
-  description: string;
-  requestId: string;
-}
-
-export interface PermissionVerdictMessage extends UdsMessage {
-  type: "permission_verdict";
-  requestId: string;
-  behavior: "allow" | "deny";
-}
-
 interface ChannelConnection {
   socket: net.Socket;
   sessionKey: string;
@@ -56,7 +42,6 @@ interface ChannelConnection {
  * Events:
  * - "register" (sessionKey: string, conn: ChannelConnection)
  * - "reply" (msg: ReplyMessage)
- * - "permission_request" (msg: PermissionRequestMessage)
  * - "disconnect" (sessionKey: string)
  */
 export class UdsServer extends EventEmitter {
@@ -197,10 +182,6 @@ export class UdsServer extends EventEmitter {
       }
       case "reply": {
         this.emit("reply", msg as ReplyMessage);
-        break;
-      }
-      case "permission_request": {
-        this.emit("permission_request", msg as PermissionRequestMessage);
         break;
       }
       default:

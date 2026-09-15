@@ -192,40 +192,6 @@ describe("UDS Protocol", () => {
     expect(client.writable).toBe(false);
   });
 
-  it("handles permission relay flow", async () => {
-    const clientGotRequest = new Promise<UdsMessage>((resolve) => {
-      server.on("connection", async (conn) => {
-        await readJson(conn); // register
-        // Send permission request to client
-        sendJson(conn, {
-          type: "permission_request",
-          toolName: "Bash",
-          description: "run ls -la",
-          requestId: "abcde",
-        });
-        resolve(await readJson(conn)); // wait for verdict
-      });
-    });
-
-    const client = await connectClient();
-    sendJson(client, { type: "register", corkSessionKey: "lark_oc_xxx" });
-
-    // Read permission request
-    const request = await readJson(client);
-    expect(request.type).toBe("permission_request");
-    expect(request.toolName).toBe("Bash");
-    expect(request.requestId).toBe("abcde");
-
-    // Send verdict back
-    sendJson(client, {
-      type: "permission_verdict",
-      requestId: "abcde",
-      behavior: "allow",
-    });
-
-    // We don't need the server-side verification here since we're testing protocol
-    client.destroy();
-  });
 });
 
 function delay(ms: number): Promise<void> {

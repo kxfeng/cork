@@ -2,7 +2,7 @@ import type { Channel } from "../channels/types.js";
 import { MessageRouter } from "../dispatcher/router.js";
 import type { CorkConfig } from "../config/schema.js";
 import { ensureDirs } from "../config/loader.js";
-import { UdsServer, type ReplyMessage, type PermissionRequestMessage } from "./uds-server.js";
+import { UdsServer, type ReplyMessage } from "./uds-server.js";
 import { CommandSpool, type SpoolCommand } from "./command-spool.js";
 import { writeSkills } from "../skills/index.js";
 import { paths } from "../config/paths.js";
@@ -64,11 +64,6 @@ export class CorkDaemon {
     // Handle replies from Claude via UDS → forward to Lark
     this.udsServer.on("reply", (msg: ReplyMessage) => {
       this.handleReply(msg);
-    });
-
-    // Handle permission requests from Claude
-    this.udsServer.on("permission_request", (msg: PermissionRequestMessage) => {
-      this.handlePermissionRequest(msg);
     });
 
     // Handle session errors (starting timeout, etc.)
@@ -335,26 +330,6 @@ export class CorkDaemon {
       .catch((err) => {
         logger.error("failed to send reply", { sessionKey, channel: channel.name, err });
       });
-  }
-
-  private handlePermissionRequest(msg: PermissionRequestMessage): void {
-    const sessionKey = msg.corkSessionKey;
-    const session = this.router.sessionManager.getSessionByKey(sessionKey);
-    if (!session) return;
-
-    const channel = this.findChannel(session.meta);
-    if (!channel) return;
-
-    const chatId = session.meta.chatId;
-    const text =
-      `🔐 **Permission Request**\n` +
-      `Tool: \`${msg.toolName}\`\n` +
-      `Action: ${msg.description}\n\n` +
-      `Reply "yes ${msg.requestId}" or "no ${msg.requestId}"`;
-
-    channel.sendReply(chatId, text, this.threadReplyOpts(session)).catch((err) => {
-      logger.error("failed to send permission request", { err });
-    });
   }
 
   private handleSessionError(sessionKey: string, errorMsg: string): void {

@@ -176,23 +176,12 @@ JSON-line protocol, one JSON object per line:
 {"type": "reply", "corkSessionKey": "lark_oc_xxx", "content": "claude's reply", "streaming": true, "updateMessageId": "om_yyy"}
 ```
 
-**Channel → Cork (permission relay):**
-```json
-{"type": "permission_request", "corkSessionKey": "lark_oc_xxx", "toolName": "Bash", "description": "run ls -la", "requestId": "abcde"}
-```
-
-**Cork → Channel (permission verdict):**
-```json
-{"type": "permission_verdict", "requestId": "abcde", "behavior": "allow"}
-```
-
 ### 3.3 Channel MCP (cork-channel)
 
 An MCP server that runs inside Claude Code, bridging Claude Code ↔ Cork daemon.
 
 **Capabilities:**
 - `claude/channel` — receive notifications from Claude Code
-- `claude/channel/permission` — relay permission prompts to Lark
 - `tools` — expose `reply` tool for Claude to send messages
 
 **Configuration:**
