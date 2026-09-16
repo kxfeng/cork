@@ -21,7 +21,10 @@ import {
 } from "../session/autopilot.js";
 import { formatDuration } from "../session/transcript-watcher.js";
 import { readableTime, zoneLabel } from "../time.js";
+import { getLogger } from "../logger.js";
 import fs from "node:fs";
+
+const logger = getLogger("commands");
 
 export interface CommandResult {
   handled: boolean;
@@ -368,6 +371,34 @@ async function handleMentionOn(
  */
 const AUTOPILOT_COMMANDS = ["/autopilot", "/ap"] as const;
 
+/**
+ * How long `/autopilot start` waits for a busy model to come to a stop, and
+ * how often it looks while waiting.
+ *
+ * A minute covers the ordinary case — the model is finishing the very answer
+ * that told the user the work was ready to start — without leaving a start
+ * hanging so long that nobody connects the two. Two seconds is short enough
+ * that the goal goes in as soon as the turn ends; the poll reads one small
+ * JSON file, and cork's other wait on the same signal uses 500ms.
+ */
+export const START_WAIT_MS = 60_000;
+export const START_POLL_MS = 2_000;
+
+/**
+ * Sessions where `/autopilot start` is waiting for the model to stop.
+ *
+ * In memory on purpose. The wait holds nothing worth surviving a daemon
+ * restart: a restart replaces the pane, so the model is not busy any more,
+ * and `/autopilot status` reads `drafting` — the truth, since nothing has
+ * been typed. Retyping `/autopilot start` is a plainer recovery than
+ * resurrecting an intent nobody can see.
+ *
+ * The token is shared with the waiter rather than read back out of the map,
+ * so a cancel still lands on a start that has gone past the wait and is
+ * typing.
+ */
+const pendingStarts = new Map<string, { cancelled: boolean }>();
+
 function isAutopilotCommand(text: string): boolean {
   return AUTOPILOT_COMMANDS.some((c) => text === c || text.startsWith(`${c} `));
 }
@@ -480,6 +511,29 @@ async function handleAutopilot(
   return { handled: false };
 }
 
+/** What a refused GOAL.md gets told, wherever the start was refused from. */
+function goalRefusal(problem: GoalProblem, key: string): string {
+  // Refuse rather than send something truncated or mangled: a goal that is
+  // wrong in a way nobody notices is worse than one that never started.
+  return (
+    `❌ Autopilot did not start.\n\n${goalProblemMessage(problem)}` +
+    `\n\nGOAL.md: \`${goalFilePath(key)}\``
+  );
+}
+
+/**
+ * Said when the session is waiting on a person rather than working.
+ *
+ * Deliberately does not name what it is waiting on. Claude reports `waiting`
+ * for a permission prompt, an elicitation, a worker or sandbox request, and
+ * for its own full-screen commands — five different things, one of which is
+ * somebody reading /help. Naming the wrong one is worse than naming none, and
+ * whatever it is, it is on screen where the answer has to be given anyway.
+ */
+const WAITING_REPLY =
+  "⏸️ Autopilot did not start — the session is waiting on something at the " +
+  "terminal. Deal with it, then `/autopilot start` again.";
+
 /**
  * Type GOAL.md into the pane as a `/goal`, and hand the outcome to the watcher.
  *
@@ -487,48 +541,20 @@ async function handleAutopilot(
  * are different events, and only the transcript says whether the second one
  * happened. The watcher is what reads it, and what tells the user — so this
  * returns a reply only when it did not even get as far as typing.
+ *
+ * Reached either from `/autopilot start` directly or from the waiter, once the
+ * model has stopped, which is why GOAL.md is read here rather than passed in:
+ * a minute is long enough for it to have been edited, and the file is the
+ * whole point of the indirection.
  */
-async function startAutopilot(
-  channel: Channel,
-  message: IncomingMessage,
+async function beginRun(
   sessionManager: SessionManager,
-  key: string
+  key: string,
+  token?: { cancelled: boolean }
 ): Promise<string | null> {
-  const rec = loadAutopilot(key);
-  if (isRunning(rec)) {
-    return "ℹ️ Autopilot is already running here. `/autopilot status` shows it.";
-  }
-
   const goal = readGoal(key);
   const problem = checkGoal(goal, key);
-  if (problem) {
-    // Refuse rather than send something truncated or mangled: a goal that is
-    // wrong in a way nobody notices is worse than one that never started.
-    return (
-      `❌ Autopilot did not start.\n\n${goalProblemMessage(problem)}` +
-      `\n\nGOAL.md: \`${goalFilePath(key)}\``
-    );
-  }
-
-  // Only into an idle session. A command typed while the model is mid-turn is
-  // queued behind it — measured at 53 seconds on a long answer — and a start
-  // that lands a minute late is one the user has already given up on. Rather
-  // than wait, say so, and ask the model to come to a stop so the next attempt
-  // finds a quiet pane.
-  if (!sessionManager.sessionIsIdle(key)) {
-    sessionManager.dispatchSystemMessage(
-      key,
-      message.chatId,
-      "The user wants to start autopilot, which cork can only do while this " +
-        "session is idle. Finish or park what you are doing and stop, rather " +
-        "than starting anything further.",
-      "cork:autopilot"
-    );
-    return (
-      "⏳ Autopilot did not start — the model is busy right now. It has been " +
-      "asked to stop; try `/autopilot start` again in a moment."
-    );
-  }
+  if (problem) return goalRefusal(problem, key);
 
   // The file, whole. What the evaluator reads after every turn and what the
   // model was given to work from are then the same text, with nothing to keep
@@ -538,6 +564,16 @@ async function startAutopilot(
   if (!sent.ok) {
     stopAutopilot(key, "start-failed", sent.reason);
     return `❌ Autopilot did not start — could not set the goal: ${sent.reason}`;
+  }
+
+  // `/autopilot stop` arrived while the goal was being typed — which takes up
+  // to a minute and a half, and no longer blocks the chat behind it. There is
+  // no record to stop, since it is written below, but the goal is in the pane
+  // now and has to come back out.
+  if (token?.cancelled) {
+    sessionManager.interruptPane(key);
+    void sessionManager.sendSlashCommand(key, "/goal clear").catch(() => {});
+    return null; // `/autopilot stop` already said what it did
   }
 
   updateAutopilot(key, {
@@ -560,6 +596,115 @@ async function startAutopilot(
 }
 
 /**
+ * Start a run, waiting the model out first if it is mid-turn.
+ *
+ * The wait is what makes a start ordinary. Asking for one right after the
+ * model has said the work is ready is the normal case, and the model is
+ * usually still finishing that very sentence — so the old answer, "the model
+ * is busy, try again in a moment", put the user in charge of a detail cork can
+ * watch for itself. Now it asks the model to stop, waits a minute for it, and
+ * says nothing at all when that works.
+ *
+ * It waits in the background rather than here. The router serialises messages
+ * per chat, so a minute spent inside this function is a minute the group
+ * cannot say anything else — including "never mind".
+ */
+async function startAutopilot(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  key: string
+): Promise<string | null> {
+  const rec = loadAutopilot(key);
+  if (isRunning(rec)) {
+    return "ℹ️ Autopilot is already running here. `/autopilot status` shows it.";
+  }
+  if (pendingStarts.has(key)) {
+    // Covers both halves of a start in flight — waiting for the model, and
+    // typing the goal in afterwards — because a second start is the wrong
+    // thing to do in either.
+    return "⏳ Autopilot is already starting here. `/autopilot stop` calls it off.";
+  }
+
+  const activity = sessionManager.sessionActivity(key);
+  if (activity === "waiting") return WAITING_REPLY;
+  if (activity !== "busy") return beginRun(sessionManager, key);
+
+  // Checked before the wait as well as inside it, so a GOAL.md that was never
+  // going to be accepted is refused now rather than a minute from now.
+  const problem = checkGoal(readGoal(key), key);
+  if (problem) return goalRefusal(problem, key);
+
+  sessionManager.dispatchSystemMessage(
+    key,
+    message.chatId,
+    "The user wants to start autopilot, which cork can only do while this " +
+      "session is idle. Finish or park what you are doing and stop, rather " +
+      "than starting anything further.",
+    "cork:autopilot"
+  );
+
+  const token = { cancelled: false };
+  pendingStarts.set(key, token);
+  void waitThenStart(channel, message, sessionManager, key, token).catch((err) => {
+    pendingStarts.delete(key);
+    logger.error("autopilot start waiter failed", { err, key });
+  });
+  return null; // silent unless the wait runs out
+}
+
+/**
+ * Watch for the model to stop, then start the run.
+ *
+ * Every way out clears the pending entry before saying anything, and the one
+ * that starts the run holds it until the goal has been typed — so neither
+ * `/autopilot stop` nor a second `/autopilot start` can slip through a gap.
+ */
+async function waitThenStart(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  key: string,
+  token: { cancelled: boolean }
+): Promise<void> {
+  const deadline = Date.now() + START_WAIT_MS;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, START_POLL_MS));
+    if (token.cancelled) return; // `/autopilot stop`; the map entry is gone already
+
+    // A run that began some other way while this was waiting — a `/goal` typed
+    // at the terminal, most plausibly. Nothing to start, and nothing to say.
+    if (isRunning(loadAutopilot(key))) {
+      pendingStarts.delete(key);
+      return;
+    }
+
+    const activity = sessionManager.sessionActivity(key);
+    if (activity === "waiting") {
+      pendingStarts.delete(key);
+      await sendCmdReply(channel, message, WAITING_REPLY);
+      return;
+    }
+    if (activity !== "busy") {
+      const reply = await beginRun(sessionManager, key, token);
+      pendingStarts.delete(key);
+      if (reply) await sendCmdReply(channel, message, reply);
+      return;
+    }
+    if (Date.now() >= deadline) {
+      pendingStarts.delete(key);
+      await sendCmdReply(
+        channel,
+        message,
+        "⏳ Autopilot did not start — the model has been busy for a minute. " +
+          "It was asked to stop; try `/autopilot start` again once it has."
+      );
+      return;
+    }
+  }
+}
+
+/**
  * Get rid of the goal, and hand the outcome to the watcher.
  *
  * The model is, by definition, mid-turn when autopilot is stopped — it is
@@ -576,6 +721,19 @@ async function stopAutopilotRun(
   sessionManager: SessionManager,
   key: string
 ): Promise<string | null> {
+  // A start that is still waiting for the model has written no record — the
+  // record is written when the goal is typed, which has not happened yet. Read
+  // without this, the state says `drafting`, `/autopilot stop` answers that
+  // nothing is running, and autopilot starts half a minute later anyway: the
+  // user says never mind, cork says there was nothing to mind, and then it
+  // does it.
+  const pending = pendingStarts.get(key);
+  if (pending) {
+    pending.cancelled = true;
+    pendingStarts.delete(key);
+    return "🛑 Autopilot start cancelled — cork was waiting for the model to stop.";
+  }
+
   const rec = loadAutopilot(key);
   if (!isRunning(rec)) {
     return "🛑 Autopilot is not running here.";
@@ -607,6 +765,16 @@ async function stopAutopilotRun(
 }
 
 function autopilotStatus(key: string): string {
+  // Before the record, because the record has nothing to say about a start
+  // that has not typed its goal yet: it reads `drafting`, or whatever the
+  // session was before, which is true and leaves out the part that is moving.
+  if (pendingStarts.has(key)) {
+    return (
+      "📋 Autopilot is starting — waiting for the model to stop before " +
+      "setting the goal. `/autopilot stop` calls it off."
+    );
+  }
+
   const rec = loadAutopilot(key);
 
   // `idle` is also what a session with no record at all reads as, and the two

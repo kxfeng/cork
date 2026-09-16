@@ -304,7 +304,18 @@ export function commandIsAtPrompt(pane: string, command: string): boolean {
  * read. Claude keeps a small registry of live sessions under
  * ~/.claude/sessions/<pid>.json, keyed by its own session id.
  *
- * Observed values: "busy" (mid-turn), "shell" (waiting on a tool), "idle".
+ * Four values, and only claude knows which:
+ *
+ *   busy     mid-turn.
+ *   waiting  something is waiting on a person — a permission prompt, an
+ *            elicitation, a local command's own screen (/help, /status, the
+ *            model picker), a worker or sandbox request. The reason comes
+ *            with it in `waitingFor`.
+ *   shell    the turn is over and a background shell is still running.
+ *   idle     nothing at all.
+ *
+ * `shell` is NOT "waiting on a tool", which is what this said for a while: it
+ * is idle with a background job, and claude's own UI counts it as idle.
  */
 export function claudeSessionStatus(sessionId: string): string | null {
   const dir = path.join(os.homedir(), ".claude", "sessions");
@@ -1516,19 +1527,33 @@ export class SessionManager extends EventEmitter {
    * respawns them; claude restores the goal from its own transcript on resume.
    */
   /**
-   * Whether claude says this session is between turns.
+   * Whether cork can type a command into this pane and have it run now.
    *
-   * `/goal` typed into a busy pane is queued behind the turn in progress —
-   * measured at 53 seconds on a long answer — so a start that needs to be
-   * prompt asks first. A session with no registry entry (an older claude, or
-   * one that has not written it yet) counts as idle: there is nothing to wait
-   * for and refusing on that basis would be refusing on no evidence.
+   * `busy` is the one state that has to be waited out: a command typed
+   * mid-turn is queued behind it — measured at 53 seconds on a long answer —
+   * so a start would land long after the user gave up on it. `waiting` is not
+   * a wait at all but a different problem: a person has to answer something
+   * first, and characters typed at it are keypresses in whatever is on screen.
+   *
+   * Everything else is free, INCLUDING `shell`. A background shell holds
+   * claude's status but not its input: the turn is over and nothing queues.
+   * Counting it as busy is how `/autopilot start` refused three times running
+   * for a session whose model had finished twenty minutes earlier and was
+   * sitting on a long build — and cork's own sendSlashCommand disagreed the
+   * whole time, since it only ever waits out `busy`.
+   *
+   * A session with no registry entry (an older claude, or one that has not
+   * written it yet) is free for the same reason: refusing on no evidence is
+   * still refusing. So is one cork has no record of, which sendSlashCommand
+   * then turns down with a reason that names the real problem.
    */
-  sessionIsIdle(key: string): boolean {
+  sessionActivity(key: string): "free" | "busy" | "waiting" {
     const meta = this.sessions.get(key)?.meta ?? loadSession(key);
-    if (!meta) return false;
+    if (!meta) return "free";
     const status = claudeSessionStatus(meta.sessionId);
-    return status === null || status === "idle";
+    if (status === "busy") return "busy";
+    if (status === "waiting") return "waiting";
+    return "free";
   }
 
   /**

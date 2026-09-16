@@ -38,12 +38,12 @@ const channel = {
 } as never;
 
 /** Enough of a SessionManager for the command path. */
-let idle = true;
+let activity: "free" | "busy" | "waiting" = "free";
 
 const sessionManager = {
   getSession: () => undefined,
   sessionKeyFor: () => KEY,
-  sessionIsIdle: () => idle,
+  sessionActivity: () => activity,
   watchAutopilot: () => {},
   interruptPane: () => {
     interrupts++;
@@ -94,11 +94,14 @@ beforeEach(() => {
   slashCalls = [];
   injected = [];
   interrupts = 0;
-  idle = true;
+  activity = "free";
   slashResult = { ok: true };
 });
 
 afterEach(() => {
+  // A start that was left waiting holds a timer. Dropping fake timers throws
+  // away anything still pending, so a waiter cannot fire into the next test.
+  vi.useRealTimers();
   delete process.env.CORK_DIR;
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -259,22 +262,124 @@ describe("/autopilot start", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("refuses to type into a busy pane, and asks the model to stop", async () => {
+  it("waits out a busy model instead of refusing, and says nothing", async () => {
     // A command typed mid-turn is queued behind it — measured at 53 seconds on
-    // a long answer — so a start would land long after the user gave up on it.
+    // a long answer — so the goal goes in once the turn ends, not before. The
+    // usual case is a start asked for while the model is still finishing the
+    // very answer that said the work was ready, and it should just work.
+    vi.useFakeTimers();
     const { handleCommand, loadAutopilot } = await load();
     writeGoal("do the thing\n");
-    idle = false;
+    activity = "busy";
+
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+
+    // Nothing typed, nothing said — but the model is asked to come to a stop.
+    expect(slashCalls).toHaveLength(0);
+    expect(sent).toHaveLength(0);
+    expect(injected).toHaveLength(1);
+    expect(injected[0].text).toContain("idle");
+    expect(loadAutopilot(KEY).state).not.toBe("starting");
+
+    activity = "free";
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(slashCalls).toHaveLength(1);
+    expect(slashCalls[0].command).toBe("/goal do the thing");
+    expect(loadAutopilot(KEY).state).toBe("starting");
+    // Still nothing said: the watcher is what reports a start.
+    expect(sent).toHaveLength(0);
+  });
+
+  it("gives up on a model that stays busy, and only then says so", async () => {
+    vi.useFakeTimers();
+    const { handleCommand, loadAutopilot } = await load();
+    writeGoal("do the thing\n");
+    activity = "busy";
+
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+    await vi.advanceTimersByTimeAsync(70_000);
+
+    expect(slashCalls).toHaveLength(0);
+    expect(loadAutopilot(KEY).state).not.toBe("starting");
+    expect(lastReply()).toContain("busy");
+    // Asked once, at the top of the wait — not once per poll.
+    expect(injected).toHaveLength(1);
+  });
+
+  it("refuses while the session is waiting on a person", async () => {
+    // `waiting` is not a turn to wait out: a permission prompt, an
+    // elicitation, /help, the model picker. Characters typed at any of them
+    // are keypresses in whatever is on screen, and nothing gets better by
+    // waiting — somebody has to answer it.
+    vi.useFakeTimers();
+    const { handleCommand, loadAutopilot } = await load();
+    writeGoal("do the thing\n");
+    activity = "waiting";
 
     await handleCommand(channel, message("/autopilot start"), sessionManager);
 
     expect(slashCalls).toHaveLength(0);
     expect(loadAutopilot(KEY).state).not.toBe("starting");
-    expect(lastReply()).toContain("busy");
-    // And the model is told to come to a stop, so the next attempt finds a
-    // quiet pane.
+    expect(lastReply()).toContain("waiting on something");
+    // Asking the model to stop would be pointless: it is not the one working.
+    expect(injected).toHaveLength(0);
+  });
+
+  it("says so rather than starting a second wait", async () => {
+    vi.useFakeTimers();
+    const { handleCommand } = await load();
+    writeGoal("do the thing\n");
+    activity = "busy";
+
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+
+    expect(lastReply()).toContain("already starting");
+    // One waiter, and the model nudged once.
     expect(injected).toHaveLength(1);
-    expect(injected[0].text).toContain("idle");
+
+    activity = "free";
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(slashCalls).toHaveLength(1);
+  });
+
+  it("reports a waiting start in /autopilot status", async () => {
+    // The record still reads `drafting` — true, and silent about the part that
+    // is moving.
+    vi.useFakeTimers();
+    const { handleCommand } = await load();
+    writeGoal("do the thing\n");
+    activity = "busy";
+
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+    await handleCommand(channel, message("/autopilot status"), sessionManager);
+
+    expect(lastReply()).toContain("waiting for the model to stop");
+  });
+
+  it("cancels a waiting start on /autopilot stop", async () => {
+    // Without this the record reads `drafting`, `/autopilot stop` answers that
+    // nothing is running, and the start lands half a minute later anyway.
+    vi.useFakeTimers();
+    const { handleCommand, loadAutopilot } = await load();
+    writeGoal("do the thing\n");
+    activity = "busy";
+
+    await handleCommand(channel, message("/autopilot start"), sessionManager);
+    await handleCommand(channel, message("/autopilot stop"), sessionManager);
+
+    expect(lastReply()).toContain("cancelled");
+    // Nothing was typed, so there is nothing to interrupt or clear. Escape
+    // here would break off the work the model is actually doing.
+    expect(interrupts).toBe(0);
+    expect(slashCalls).toHaveLength(0);
+
+    activity = "free";
+    await vi.advanceTimersByTimeAsync(70_000);
+
+    expect(slashCalls).toHaveLength(0);
+    expect(loadAutopilot(KEY).state).not.toBe("starting");
   });
 
   it("refuses a GOAL.md past the length the evaluator will read closely", async () => {
