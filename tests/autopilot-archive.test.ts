@@ -204,3 +204,50 @@ describe("archiveRun", () => {
     expect(ls()).toEqual(["20260905-174525", "20260906-062907"]);
   });
 });
+
+describe("archiveBeforeReset", () => {
+  // `/new` clears the session directory down to archive/. A run is otherwise
+  // filed only when the next goal is drafted, so one that finished and was
+  // never followed — or one still going — went with everything else.
+
+  it("files a run that finished and was never followed by another", async () => {
+    const { archiveBeforeReset, saveAutopilot } = await load();
+    saveAutopilot(KEY, ENDED as never);
+    write("GOAL.md", "ship it\n");
+    write("PROJECT.md", "did all of it\n");
+
+    const name = archiveBeforeReset(KEY) as string;
+
+    expect(name).toBe("20260905-174525");
+    expect(read(`${name}/GOAL.md`)).toContain("- Result: completed — the goal was met");
+    expect(read(`${name}/PROJECT.md`)).toBe("did all of it\n");
+    expect(exists("PROJECT.md")).toBe(false);
+  });
+
+  it("ends a run that is still going as a stop on request, then files it", async () => {
+    const { archiveBeforeReset, saveAutopilot, loadAutopilot } = await load();
+    saveAutopilot(KEY, {
+      state: "running",
+      goal: "ship it",
+      startedAt: "2026-09-05T17:45:25.355Z",
+    } as never);
+    write("GOAL.md", "ship it\n");
+    write("PROJECT.md", "half of it\n");
+
+    const name = archiveBeforeReset(KEY) as string;
+
+    const body = read(`${name}/GOAL.md`);
+    expect(body).toContain("- Result: stopped on request");
+    expect(body).toContain("The session was reset with /new.");
+    expect(read(`${name}/PROJECT.md`)).toBe("half of it\n");
+    expect(loadAutopilot(KEY).state).toBe("stopped");
+  });
+
+  it("does nothing for a session that never ran autopilot", async () => {
+    const { archiveBeforeReset } = await load();
+    write("PROJECT.md", "not an autopilot file\n");
+
+    expect(archiveBeforeReset(KEY)).toBeNull();
+    expect(ls()).toEqual([]);
+  });
+});

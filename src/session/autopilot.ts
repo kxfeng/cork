@@ -488,3 +488,24 @@ export function archiveRun(key: string): string | null {
     return null;
   }
 }
+
+/**
+ * File whatever autopilot run a session holds, before `/new` clears it away.
+ *
+ * `archiveRun` alone is not enough here. It only files a run that has ended,
+ * and it is otherwise only called when the NEXT goal is drafted — so a run that
+ * finished and was never followed by another, or one still going when the
+ * session was reset, sat in the session directory, and `/new` deleted it with
+ * everything else. A 6h50min run's GOAL.md and PROJECT.md went that way.
+ *
+ * A run that has not ended is ended first, as a stop on request: resetting the
+ * session is the user ending it, and the pane it ran in is already gone.
+ */
+export function archiveBeforeReset(key: string): string | null {
+  const rec = loadAutopilot(key);
+  if (rec.state === "idle") return null;
+  if (rec.state !== "stopped") {
+    stopAutopilot(key, "user-stop", "The session was reset with /new.");
+  }
+  return archiveRun(key);
+}

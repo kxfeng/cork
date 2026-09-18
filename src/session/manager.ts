@@ -47,6 +47,7 @@ import {
   updateAutopilot,
   stopAutopilot,
   isRunning,
+  archiveBeforeReset,
   type AutopilotRecord,
   type AutopilotStopReason,
 } from "./autopilot.js";
@@ -1828,6 +1829,10 @@ export class SessionManager extends EventEmitter {
 
     // Kill existing tmux session
     const existing = this.sessions.get(key);
+    // What the chat is does not change when its conversation is reset. Taken
+    // from memory when the session is live, else from disk: a group reset
+    // with `/new` used to come back as a P2P chat named after its own id.
+    const previous = existing?.meta ?? loadSession(key);
     if (existing) {
       this.killTmux(key);
       if (existing.startingTimer) clearTimeout(existing.startingTimer);
@@ -1836,6 +1841,11 @@ export class SessionManager extends EventEmitter {
     // The chat carries on existing, so what it has already finished carries on
     // too: `/new` restarts the conversation, it does not undo the work. Only
     // forgetting a session or losing the chat takes the archive with it.
+    //
+    // That includes an autopilot run, which is otherwise filed only when the
+    // next goal is drafted — so one that finished, or was still going, would
+    // be deleted below with everything else. File it first.
+    archiveBeforeReset(key);
     deleteSession(key, { keepArchive: true });
 
     const meta: SessionMeta = {
@@ -1843,8 +1853,8 @@ export class SessionManager extends EventEmitter {
       channel,
       chatId,
       threadId,
-      chatType: "p2p",
-      chatName: chatId,
+      chatType: previous?.chatType ?? "p2p",
+      chatName: previous?.chatName ?? chatId,
       workspace: ws,
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
