@@ -233,8 +233,34 @@ describe("switching a session's model", () => {
     const mgr = await makeManager();
     const r = await mgr.switchModel("k", "gpt", FAST);
     expect(r.ok).toBe(false);
-    expect(r.options).toContain("Fable (Fable 5.1)");
+    // The whole list, so the refusal is answerable: a number off it comes back.
+    expect(r.rows.map((x: { label: string }) => x.label)).toContain("Fable");
+    expect(r.matched).toEqual([]);
     expect(fake.keys).toEqual(["Escape"]);
+  });
+
+  it("hands the whole list back when a name reaches more than one row", async () => {
+    // claude calls the new Opus "Opus (1M context)" and the old one "Opus 5
+    // (1M context)", so the family word is exactly the request that cannot be
+    // resolved — and the one a person is most likely to type.
+    const mgr = await makeManager();
+    fake.rows = [
+      ...fake.rows,
+      ["Opus 5 (1M context)", "Newer version available · select Opus for Opus 5.5"],
+    ];
+    const r = await mgr.switchModel("k", "opus", FAST);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('"opus" matches 2 and 6');
+    expect(r.matched).toEqual([2, 6]);
+    expect(r.rows).toHaveLength(6);
+    expect(fake.keys).toEqual(["Escape"]);
+  });
+
+  it("switches by the number claude printed", async () => {
+    const mgr = await makeManager();
+    const r = await mgr.switchModel("k", "4", FAST);
+    expect(r).toMatchObject({ ok: true, model: "Sonnet 5" });
+    expect(fake.keys).toEqual(["-N 2 Down", "s"]);
   });
 
   it("aborts rather than press s on a cursor that did not move", async () => {
@@ -261,6 +287,34 @@ describe("switching a session's model", () => {
     const mgr = await makeManager();
     mgr.sendSlashCommand = async () => ({ ok: true }); // never opens
     const r = await mgr.switchModel("k", "fable", FAST);
+    expect(r).toMatchObject({ ok: false, reason: "the model picker did not open" });
+  });
+});
+
+describe("listing the models a session can reach", () => {
+  it("reads the rows and closes the picker again", async () => {
+    // A listing is a read. Leaving the picker up would hold the pane for as
+    // long as it takes someone to answer, and the session can do nothing while
+    // it is open.
+    const mgr = await makeManager();
+    const r = await mgr.listModels("k", FAST);
+    expect(r.ok).toBe(true);
+    expect(r.rows.map((x: { label: string }) => x.label)).toEqual([
+      "Default (recommended)",
+      "Opus (1M context)",
+      "Fable",
+      "Sonnet",
+      "Haiku",
+    ]);
+    expect(r.rows[1].current).toBe(true);
+    expect(fake.keys).toEqual(["Escape"]);
+    expect(fake.phase).toBe("idle");
+  });
+
+  it("says why when the picker will not open", async () => {
+    const mgr = await makeManager();
+    mgr.sendSlashCommand = async () => ({ ok: true }); // never opens
+    const r = await mgr.listModels("k", FAST);
     expect(r).toMatchObject({ ok: false, reason: "the model picker did not open" });
   });
 });

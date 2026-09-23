@@ -20,6 +20,7 @@ import {
   type AutopilotStopReason,
 } from "../session/autopilot.js";
 import { formatDuration } from "../session/transcript-watcher.js";
+import { formatPickerRows, type PickerRow } from "../session/model-picker.js";
 import { readableTime, zoneLabel } from "../time.js";
 import { getLogger } from "../logger.js";
 import fs from "node:fs";
@@ -269,16 +270,38 @@ async function handlePick(
 }
 
 /**
- * `/model <name>` — put THIS session on another model, and only this one.
+ * How to answer any list this command prints.
+ *
+ * A number first, because it is the one form that cannot be ambiguous: claude
+ * names the new Opus `Opus (1M context)` with no version in it and the old one
+ * `Opus 5 (1M context)`, so "opus" reaches both and reads like a trap.
+ */
+const MODEL_HINT = "`/model <n>` to switch, or `/model <name>`";
+
+/** The rows in a block, where a chat will not re-flow the columns. */
+function modelList(rows: PickerRow[]): string {
+  return `\`\`\`\n${formatPickerRows(rows)}\n\`\`\``;
+}
+
+/**
+ * `/model <name|n>` — put THIS session on another model, and only this one.
  *
  * Typing `/model <name>` into claude itself would also write the machine-wide
  * default, so cork drives the picker instead and presses `s`. See
  * SessionManager.switchModel for the walk and why each step is there.
  *
- * With no argument this reports what the session is on. Cork does not offer a
- * list of its own: the models a session can reach depend on entitlements and
- * change with every release, so the only honest list is the one claude just
- * drew, which is what a failed match hands back.
+ * Every answer that is not a switch carries the list: with no argument, and
+ * when a name reached no row or several. Cork has no list of its own — what a
+ * session is offered depends on entitlements and moves with every release — so
+ * it reads claude's picker for it and closes it again. A number off that list
+ * is what comes back, which is why the list is never a dead end.
+ *
+ * The listing is deliberately NOT an interactive pick. Keeping the picker open
+ * to take a `/pick` would hold the pane for as long as it takes someone to
+ * read the message — minutes or hours — and the session can do nothing while
+ * it is up. Worse, `/pick` answers with Enter, and Enter on this picker is
+ * "set as default for new sessions", the very thing this command exists to
+ * avoid. So the picker is closed immediately and reopened for the answer.
  */
 async function handleModel(
   channel: Channel,
@@ -297,13 +320,26 @@ async function handleModel(
   }
 
   if (!requested) {
+    const list = await sessionManager.listModels(session.key);
+    if (list.ok) {
+      const current = list.rows.find((r) => r.current)?.label;
+      const head = current ? `🧠 On ${current}` : "🧠 On offer in this session";
+      await sendCmdReply(
+        channel,
+        message,
+        `${head}\n\n${modelList(list.rows)}\n${MODEL_HINT}`
+      );
+      return { handled: true };
+    }
+    // The picker would not open. The session still knows what it is on, and
+    // saying that beats saying nothing.
     const current = sessionManager.currentModel(session.key);
     await sendCmdReply(
       channel,
       message,
       current
-        ? `🧠 This session is on ${current}`
-        : "🧠 Could not read the model off the terminal — `/model <name>` to set one"
+        ? `🧠 This session is on ${current} — could not read the list (${list.reason})`
+        : `🧠 Could not read the model off the terminal — ${MODEL_HINT}`
     );
     return { handled: true };
   }
@@ -320,8 +356,8 @@ async function handleModel(
   }
 
   let reply = `⚠️ Model not switched — ${r.reason}`;
-  if (r.options?.length) {
-    reply += `\n\nOn offer in this session:\n${r.options.map((o) => `- ${o}`).join("\n")}`;
+  if (r.rows?.length) {
+    reply += `\n\n${modelList(r.rows)}\n${MODEL_HINT}`;
   }
   if (r.screen) {
     reply += `\n\nThe terminal is showing this — it may need you:\n\`\`\`\n${dialogExcerpt(r.screen)}\n\`\`\``;

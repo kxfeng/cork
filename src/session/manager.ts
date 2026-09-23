@@ -28,6 +28,8 @@ import {
   chooseModelRow,
   switchConfirmYes,
   lastModelNotice,
+  type PickerRow,
+  type PickerView,
 } from "./model-picker.js";
 import type { CorkConfig } from "../config/schema.js";
 import type { IncomingMessage } from "../channels/types.js";
@@ -246,6 +248,28 @@ export interface DialogAnswer {
   moves: number;
   /** For the log. */
   dialog: string;
+}
+
+/** What a `/model <name>` did, or why it did not. */
+export interface ModelResult {
+  ok: boolean;
+  /** claude's own name for the model it ended up on. */
+  model?: string;
+  /** The session was already on it, so nothing was pressed. */
+  already?: boolean;
+  reason?: string;
+  /**
+   * Every row the picker showed, when the request did not resolve to one.
+   *
+   * The whole list rather than the near misses: a name that reached two rows
+   * is answered by a number, and a number only means something against the
+   * numbering claude drew.
+   */
+  rows?: PickerRow[];
+  /** The rows a name reached, when it reached more than one. */
+  matched?: number[];
+  /** The pane, when claude is showing something cork will not answer. */
+  screen?: string;
 }
 
 const DIALOGS: { dialog: string; when: RegExp; want: RegExp }[] = [
@@ -1320,26 +1344,8 @@ export class SessionManager extends EventEmitter {
     requested: string,
     // Test seam, as on sendSlashCommand: the real waits are tens of seconds.
     timing: { drawMs?: number; settleMs?: number; pollMs?: number } = {}
-  ): Promise<{
-    ok: boolean;
-    model?: string;
-    already?: boolean;
-    reason?: string;
-    options?: string[];
-    screen?: string;
-  }> {
+  ): Promise<ModelResult> {
     const tmuxName = `${TMUX_PREFIX}${key}`;
-    const pollMs = timing.pollMs ?? PICKER_POLL_MS;
-    const press = (keys: string) =>
-      execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
-    const closePicker = () => {
-      try {
-        press("Escape");
-      } catch {
-        // Already gone, or the pane is. Nothing here can help either way.
-      }
-    };
-
     const width = this.paneWidth(tmuxName);
     if (width === null) return { ok: false, reason: "the session's terminal is not up" };
 
@@ -1351,6 +1357,69 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Every model this session can reach, read off the picker and nothing more.
+   *
+   * The list cannot be known any other way: what a session is offered depends
+   * on entitlements and moves with every release, so cork opens claude's own
+   * picker, reads it, and closes it again. Opening it is a write to the pane —
+   * hence the driving flag, so the watcher does not report cork's own keys —
+   * but it is closed on every path out, including the failures.
+   */
+  async listModels(
+    key: string,
+    timing: { drawMs?: number; pollMs?: number } = {}
+  ): Promise<{ ok: true; rows: PickerRow[] } | { ok: false; reason: string }> {
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    const width = this.paneWidth(tmuxName);
+    if (width === null) return { ok: false, reason: "the session's terminal is not up" };
+
+    this.beginDriving(key);
+    try {
+      const opened = await this.openModelPicker(key, tmuxName, width, timing);
+      if (!opened.ok) return { ok: false, reason: opened.reason };
+      try {
+        execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+      } catch {
+        // Already gone, or the pane is. The rows were read either way.
+      }
+      this.dialogHandled(key);
+      return { ok: true, rows: opened.view.rows };
+    } finally {
+      this.endDriving(key);
+    }
+  }
+
+  /**
+   * Type `/model` and wait for the picker to be fully drawn.
+   *
+   * Shared by the switch and the listing so there is one answer to "is it up
+   * yet": the picker replaces the screen, and a half-drawn frame parses as no
+   * picker at all rather than as a shorter list.
+   */
+  private async openModelPicker(
+    key: string,
+    tmuxName: string,
+    width: number,
+    timing: { drawMs?: number; pollMs?: number }
+  ): Promise<{ ok: true; view: PickerView } | { ok: false; reason: string }> {
+    const pollMs = timing.pollMs ?? PICKER_POLL_MS;
+    const opened = await this.sendSlashCommand(key, "/model");
+    if (!opened.ok) {
+      return { ok: false, reason: opened.reason ?? "could not type /model into the session" };
+    }
+
+    const drawDeadline = Date.now() + (timing.drawMs ?? PICKER_DRAW_MS);
+    for (;;) {
+      const view = parseModelPicker(capturePaneSafe(tmuxName), width);
+      if (view) return { ok: true, view };
+      if (Date.now() >= drawDeadline) {
+        return { ok: false, reason: "the model picker did not open" };
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+  }
+
   /** The picker walk itself. Split out so the caller owns the driving flag. */
   private async walkModelPicker(
     key: string,
@@ -1358,14 +1427,7 @@ export class SessionManager extends EventEmitter {
     width: number,
     requested: string,
     timing: { drawMs?: number; settleMs?: number; pollMs?: number }
-  ): Promise<{
-    ok: boolean;
-    model?: string;
-    already?: boolean;
-    reason?: string;
-    options?: string[];
-    screen?: string;
-  }> {
+  ): Promise<ModelResult> {
     const pollMs = timing.pollMs ?? PICKER_POLL_MS;
     const press = (keys: string) =>
       execSync(corkTmux(`send-keys -t "${tmuxName}" ${keys}`), { stdio: "pipe" });
@@ -1383,25 +1445,22 @@ export class SessionManager extends EventEmitter {
     // read as this switch having worked.
     const noticeBefore = lastModelNotice(capturePaneSafe(tmuxName))?.line ?? null;
 
-    const opened = await this.sendSlashCommand(key, "/model");
+    const opened = await this.openModelPicker(key, tmuxName, width, timing);
     if (!opened.ok) return { ok: false, reason: opened.reason };
-
-    // The picker replaces the screen; until it has, there is nothing to read.
-    const drawDeadline = Date.now() + (timing.drawMs ?? PICKER_DRAW_MS);
-    let view = null as ReturnType<typeof parseModelPicker>;
-    for (;;) {
-      view = parseModelPicker(capturePaneSafe(tmuxName), width);
-      if (view) break;
-      if (Date.now() >= drawDeadline) {
-        return { ok: false, reason: "the model picker did not open" };
-      }
-      await new Promise((r) => setTimeout(r, pollMs));
-    }
+    const view = opened.view;
 
     const choice = chooseModelRow(view.rows, requested);
     if (!choice.ok) {
       closePicker();
-      return { ok: false, reason: choice.reason, options: choice.options };
+      // The rows go back with the refusal: the caller shows the list so the
+      // answer to "then what can I have" is in the same message as the "no",
+      // and a number off that list is what comes back.
+      return {
+        ok: false,
+        reason: choice.reason,
+        rows: view.rows,
+        matched: choice.matched,
+      };
     }
 
     // Already there: close the picker rather than switch to the model the

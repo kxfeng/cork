@@ -14,9 +14,10 @@
  * a terminal.
  *
  * Nothing here guesses. A request that matches no row, or more than one, comes
- * back as a refusal carrying the rows that were actually on screen — the list
- * changes with entitlements and with every new model, and picking "the closest
- * one" would silently put a session on a model nobody asked for.
+ * back as a refusal — the list changes with entitlements and with every new
+ * model, and picking "the closest one" would silently put a session on a model
+ * nobody asked for. The refusal names the rows a name did reach, so the caller
+ * can print the list claude drew and take a number back.
  */
 
 import { readDialog, type Dialog } from "./dialog.js";
@@ -82,11 +83,40 @@ export function parseModelPicker(pane: string, width: number): PickerView | null
 
 export type Choice =
   | { ok: true; index: number; row: PickerRow }
-  | { ok: false; reason: string; options: string[] };
+  | { ok: false; reason: string; matched: number[] };
 
-/** How a row is offered back to the user when cork will not choose for them. */
-function optionsOf(rows: PickerRow[]): string[] {
-  return rows.map((r) => (r.modelName ? `${r.label} (${r.modelName})` : r.label));
+/**
+ * The rows as a person reads them, one per line, numbered as claude numbered
+ * them and ticked where claude ticked.
+ *
+ *     1  Default (recommended)  Opus 5.5 with 1M context
+ *   ✔ 6  Opus 5 (1M context)    Newer version available
+ *
+ * Both columns are kept because neither is enough on its own: claude names the
+ * NEW Opus `Opus (1M context)` with no version in it, and puts "5.5" only in
+ * the right column — while the OLD one is the row that reads `Opus 5`. A list
+ * of labels alone would invite picking exactly the wrong one.
+ *
+ * The label column is padded to the widest label so the two columns line up,
+ * the same way they do on claude's own screen.
+ */
+export function formatPickerRows(rows: PickerRow[]): string {
+  const nWidth = Math.max(...rows.map((r) => String(r.n).length), 1);
+  const labelWidth = Math.max(...rows.map((r) => r.label.length), 1);
+  return rows
+    .map((r) => {
+      const tick = r.current ? "✔" : " ";
+      const n = String(r.n).padStart(nWidth);
+      const label = r.modelName ? r.label.padEnd(labelWidth) : r.label;
+      return `${tick} ${n}  ${label}${r.modelName ? `  ${r.modelName}` : ""}`;
+    })
+    .join("\n");
+}
+
+/** "2", "2 and 6", "2, 5 and 6" — the numbers as a sentence names them. */
+function listNumbers(ns: number[]): string {
+  if (ns.length <= 1) return String(ns[0] ?? "");
+  return `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}`;
 }
 
 const norm = (s: string) => s.trim().toLowerCase();
@@ -95,7 +125,9 @@ const firstWord = (s: string) => norm(s).split(/[\s(]/)[0];
 /**
  * Which row the user meant.
  *
- * Matching runs widest-last so an exact name always beats a family word:
+ * A plain number is claude's own row number, answering the list cork printed.
+ * Everything else is a name, and matching runs widest-last so an exact name
+ * always beats a family word:
  * "Opus" and "Opus (1M context)" can both be on screen, and only the exact
  * label separates them. A family word matching both is an ambiguity, and an
  * ambiguity is reported, never resolved by position.
@@ -107,7 +139,18 @@ const firstWord = (s: string) => norm(s).split(/[\s(]/)[0];
 export function chooseModelRow(rows: PickerRow[], requested: string): Choice {
   const want = norm(requested);
   if (!want) {
-    return { ok: false, reason: "no model given", options: optionsOf(rows) };
+    return { ok: false, reason: "no model given", matched: [] };
+  }
+
+  // A number addresses the row claude itself numbered, which is how someone
+  // answers the list cork just showed them. It reaches Default too: the list
+  // showed that row, so refusing to select it would be refusing what was
+  // offered. A name still must not land there — see below.
+  if (/^\d+$/.test(want)) {
+    const n = Number(want);
+    const i = rows.findIndex((r) => r.n === n);
+    if (i === -1) return { ok: false, reason: `there is no option ${n} here`, matched: [] };
+    return { ok: true, index: i, row: rows[i] };
   }
 
   const isDefaultRow = (r: PickerRow) => firstWord(r.label) === "default";
@@ -120,16 +163,16 @@ export function chooseModelRow(rows: PickerRow[], requested: string): Choice {
   ];
 
   for (const match of tries) {
-    const hits = pool.map((r, i) => ({ r, i })).filter(({ r }) => match(r));
+    const hits = pool.filter(match);
     if (hits.length === 1) {
-      const { r } = hits[0];
-      return { ok: true, index: rows.indexOf(r), row: r };
+      return { ok: true, index: rows.indexOf(hits[0]), row: hits[0] };
     }
     if (hits.length > 1) {
+      const ns = hits.map((r) => r.n);
       return {
         ok: false,
-        reason: `"${requested}" matches more than one model`,
-        options: optionsOf(hits.map(({ r }) => r)),
+        reason: `"${requested}" matches ${listNumbers(ns)}`,
+        matched: ns,
       };
     }
   }
@@ -137,7 +180,7 @@ export function chooseModelRow(rows: PickerRow[], requested: string): Choice {
   return {
     ok: false,
     reason: `no model here is called "${requested}"`,
-    options: optionsOf(rows),
+    matched: [],
   };
 }
 

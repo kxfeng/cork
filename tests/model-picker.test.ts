@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   parseModelPicker,
   chooseModelRow,
+  formatPickerRows,
   switchConfirmYes,
   lastModelNotice,
 } from "../src/session/model-picker.js";
@@ -128,21 +129,38 @@ describe("choosing a row", () => {
     const c = chooseModelRow(twoFables, "fable");
     expect(c.ok).toBe(false);
     if (!c.ok) {
-      expect(c.reason).toMatch(/more than one/);
-      expect(c.options).toEqual([
-        "Fable (1M context) (Fable 5.1)",
-        "Fable (fast) (Fable 5.1)",
-      ]);
+      // The numbers claude printed, so the refusal can be answered with one.
+      expect(c.reason).toBe('"fable" matches 3 and 4');
+      expect(c.matched).toEqual([3, 4]);
     }
   });
 
-  it("refuses an unknown name and hands back what was on screen", () => {
+  it("refuses an unknown name", () => {
     const c = chooseModelRow(rows, "gpt");
     expect(c.ok).toBe(false);
     if (!c.ok) {
       expect(c.reason).toMatch(/no model here is called/);
-      expect(c.options).toContain("Haiku (Haiku 4.5)");
+      expect(c.matched).toEqual([]);
     }
+  });
+
+  it("takes the number claude printed", () => {
+    const c = chooseModelRow(rows, "3");
+    expect(c.ok && c.row.label).toBe("Fable");
+  });
+
+  it("reaches Default by number, though a family word must not", () => {
+    // The list showed row 1, so refusing to select it would be refusing what
+    // was offered. Only a NAME has to stay off it.
+    expect(chooseModelRow(rows, "1").ok && chooseModelRow(rows, "1")).toMatchObject({
+      row: { label: "Default (recommended)" },
+    });
+  });
+
+  it("refuses a number that is not on the list", () => {
+    const c = chooseModelRow(rows, "9");
+    expect(c.ok).toBe(false);
+    if (!c.ok) expect(c.reason).toBe("there is no option 9 here");
   });
 
   it("never lands a family request on the Default row", () => {
@@ -156,6 +174,38 @@ describe("choosing a row", () => {
   it("reaches Default only by name", () => {
     const c = chooseModelRow(rows, "default");
     expect(c.ok && c.row.label).toBe("Default (recommended)");
+  });
+});
+
+describe("printing the rows", () => {
+  const rows = parseModelPicker(PICKER, W)!.rows;
+
+  it("numbers them as claude did, ticks the current one, lines the columns up", () => {
+    expect(formatPickerRows(rows)).toBe(
+      [
+        "  1  Default (recommended)  Opus 5 with 1M context",
+        "  2  Opus (1M context)      Opus 5 with 1M context",
+        "  3  Fable                  Fable 5.1",
+        "✔ 4  Sonnet                 Sonnet 5",
+        "  5  Haiku                  Haiku 4.5",
+      ].join("\n")
+    );
+  });
+
+  it("keeps both columns, because neither names the model on its own", () => {
+    // The label says "Opus (1M context)" with no version in it and the right
+    // column is the only place "5.5" appears; on the old row it is the other
+    // way round. Dropping either column would invite picking the wrong one.
+    const opus55 = [
+      { n: 2, label: "Opus (1M context)", description: "Opus 5.5 with 1M context · Best", modelName: "Opus 5.5 with 1M context", current: false },
+      { n: 6, label: "Opus 5 (1M context)", description: "Newer version available · select Opus", modelName: "Newer version available", current: true },
+    ];
+    expect(formatPickerRows(opus55)).toBe(
+      [
+        "  2  Opus (1M context)    Opus 5.5 with 1M context",
+        "✔ 6  Opus 5 (1M context)  Newer version available",
+      ].join("\n")
+    );
   });
 });
 
