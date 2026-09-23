@@ -205,7 +205,7 @@ const REARM_BLOCKED_NOTICE_MS = 10 * 60_000;
  * live would be the exact fault this whole path exists to prevent.
  */
 const REARM_LOST_TEXT =
-  "❌ Autopilot stopped — could not re-arm the goal. Run `/autopilot start` again.";
+  "⚠️ Autopilot stopped — could not re-arm the goal. `/ap start` again";
 
 /** Nudges before cork tells the user this task looks stuck. Warned once. */
 const STUCK_AFTER_NUDGES = 3;
@@ -921,7 +921,7 @@ export class TranscriptWatcher {
     if (status === "set" || status === "progress") {
       if (rec.state === "starting") {
         this.updateRec({ state: "running", pendingSince: undefined });
-        this.say(`▶️ Autopilot started.${goalBlock(rec.goal)}`);
+        this.say(`✈️ Autopilot started${goalBlock(rec.goal)}`);
       } else if (rec.state === "stopping") {
         // The clear did not take, or never got typed. Give the deadline a
         // fresh minute from here rather than from before the outage.
@@ -948,10 +948,10 @@ export class TranscriptWatcher {
     this.stopRec(status === "met" ? "met" : status === "failed" ? "failed" : "user-stop");
     this.say(
       status === "met"
-        ? `✅ Autopilot complete.${this.runSummary()}`
+        ? `✈️ Autopilot complete${this.runSummary()}`
         : status === "failed"
-          ? `⚠️ Autopilot stopped — goal judged unachievable.${this.runSummary()}`
-          : `🛑 Autopilot stopped.${this.runSummary()}`
+          ? `⚠️ Autopilot stopped — goal judged unachievable${this.runSummary()}`
+          : `✈️ Autopilot stopped${this.runSummary()}`
     );
     this.log.info("reconciled: goal had already ended", { status });
   }
@@ -1094,7 +1094,7 @@ export class TranscriptWatcher {
           this.log.info("goal set", { wasStarting, wasRearming });
           if (wasStarting) {
             this.say(
-              `▶️ Autopilot started.\n\n\`\`\`\n${status.condition ?? ""}\n\`\`\``
+              `✈️ Autopilot started\n\n\`\`\`\n${status.condition ?? ""}\n\`\`\``
             );
           }
           break;
@@ -1105,8 +1105,8 @@ export class TranscriptWatcher {
           this.stopRec("user-stop");
           this.say(
             wasStopping
-              ? `🛑 Autopilot stopped.${this.runSummary()}`
-              : "🛑 Autopilot stopped — the goal was cleared in the terminal."
+              ? `✈️ Autopilot stopped${this.runSummary()}`
+              : "✈️ Autopilot stopped — the goal was cleared in the terminal"
           );
           break;
         case "met":
@@ -1120,8 +1120,8 @@ export class TranscriptWatcher {
           // would read as cork ignoring the request.
           this.say(
             wasStopping
-              ? `🛑 Autopilot stopped — the goal was met just as it was being cleared.${this.runSummary()}`
-              : `✅ Autopilot complete.${this.runSummary()}`
+              ? `✈️ Autopilot stopped — the goal was met just as it was being cleared${this.runSummary()}`
+              : `✈️ Autopilot complete${this.runSummary()}`
           );
           break;
         case "failed":
@@ -1133,7 +1133,7 @@ export class TranscriptWatcher {
           // is the one ending the user has to act on — but one line of it is
           // enough to decide whether to look.
           this.say(
-            `⚠️ Autopilot stopped — goal judged unachievable.${this.runSummary()}` +
+            `⚠️ Autopilot stopped — goal judged unachievable${this.runSummary()}` +
               (status.reason ? `\n\n${firstLine(status.reason, 200)}` : "")
           );
           break;
@@ -1157,8 +1157,8 @@ export class TranscriptWatcher {
     if (current?.state === "starting" && isPlainUserMessage(row)) {
       this.stopRec("start-failed", "the /goal arrived as an ordinary message");
       this.say(
-        "❌ Autopilot did not start — `/goal` was not taken as a command. " +
-          "Run `/autopilot start` again."
+        "⚠️ Autopilot did not start — `/goal` was not taken as a command. " +
+          "`/ap start` again"
       );
       return;
     }
@@ -1389,8 +1389,8 @@ export class TranscriptWatcher {
       this.log.warn("no goal within the deadline", { pendingSince: rec.pendingSince });
       this.stopRec("start-failed", "the goal never registered");
       this.say(
-        "❌ Autopilot did not start — no goal showed up. " +
-          "Run `/autopilot start` again."
+        "⚠️ Autopilot did not start — no goal showed up. " +
+          "`/ap start` again"
       );
       return;
     }
@@ -1420,7 +1420,7 @@ export class TranscriptWatcher {
     // which is plainly false in the case this whole commit is about, and
     // sends the user to the terminal to clear a goal that is not there.
     this.stopRec("user-stop", "/goal clear was typed and nothing came back");
-    this.say(`🛑 Autopilot stopped.${this.runSummary()}`);
+    this.say(`✈️ Autopilot stopped${this.runSummary()}`);
   }
 
   private tryRestart(rec: AutopilotRecord): void {
@@ -1432,7 +1432,7 @@ export class TranscriptWatcher {
       this.stopRec("unreachable");
       this.say(
         `⚠️ Autopilot stopped — could not bring the session back after ` +
-          `${MAX_RESTART_ATTEMPTS} attempts.`
+          `${MAX_RESTART_ATTEMPTS} attempts`
       );
       return;
     }
@@ -1549,7 +1549,7 @@ export class TranscriptWatcher {
     if (blocked < REARM_BLOCKED_NOTICE_MS) return;
     this.updateRec({ rearmNotified: true });
     this.log.warn("goal still not re-armed", { blocked: formatDuration(blocked) });
-    this.say("⚠️ Autopilot paused — the goal has not been re-armed yet.");
+    this.say("⚠️ Autopilot paused — the goal has not been re-armed yet");
   }
 
   /** Clear the re-arm bookkeeping, however it ended. */
@@ -1647,8 +1647,8 @@ export class TranscriptWatcher {
     if (this.unansweredNudges >= STUCK_AFTER_NUDGES && !rec.stuckWarned) {
       this.updateRec({ stuckWarned: true });
       this.say(
-        `⏳ Autopilot has had no response through ${this.unansweredNudges} ` +
-          `nudges — nothing has been written since. Check the terminal.`
+        `⚠️ Autopilot has had no response through ${this.unansweredNudges} ` +
+          `nudges — nothing has been written since. Check the terminal`
       );
     }
   }

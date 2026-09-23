@@ -163,7 +163,7 @@ describe("/autopilot <description>", () => {
     sent.length = 0;
     await handleCommand(channel, message("/autopilot status"), sessionManager);
 
-    expect(lastReply()).toBe("📋 **Autopilot**: drafting");
+    expect(lastReply()).toBe("✈️ Autopilot drafting");
   });
 
   it("tells the chat that the record changed, before the model sees it", async () => {
@@ -183,7 +183,7 @@ describe("/autopilot <description>", () => {
     expect(result.handled).toBe(false); // still answered as a question
     expect(loadAutopilot(KEY).state).toBe("drafting");
     expect(sent).toHaveLength(1);
-    expect(lastReply()).toBe("📝 Autopilot drafting.");
+    expect(lastReply()).toBe("✈️ Autopilot drafting");
   });
 
   it("starts the conversation when there is no description at all", async () => {
@@ -537,7 +537,7 @@ describe("/autopilot status", () => {
     const { handleCommand, autopilotPath } = await load();
     await handleCommand(channel, message("/autopilot status"), sessionManager);
 
-    expect(lastReply()).toContain("Autopilot is not running in this session");
+    expect(lastReply()).toContain("Autopilot is not running here");
     expect(fs.existsSync(autopilotPath(KEY))).toBe(false);
   });
 
@@ -557,6 +557,22 @@ describe("/autopilot status", () => {
     // The record keeps UTC; the reader is not in it.
     expect(r).toContain("2026-01-01 08:00 (UTC+8)");
     expect(r).toContain("ago");
+  });
+
+  it("leads with ✈️ while all is well and ⚠️ when someone should look", async () => {
+    const { handleCommand, saveAutopilot } = await load();
+    const first = async (rec: object) => {
+      saveAutopilot(KEY, { goal: "ship it", startedAt: "2026-01-01T00:00:00.000Z", ...rec } as never);
+      await handleCommand(channel, message("/autopilot status"), sessionManager);
+      return lastReply().split("\n")[0];
+    };
+    expect(await first({ state: "running" })).toBe("✈️ Autopilot running");
+    expect(await first({ state: "running", needsRearm: true })).toBe(
+      "⚠️ Autopilot running — goal not re-armed"
+    );
+    expect(await first({ state: "stopped", stopReason: "met" })).toBe("✈️ Autopilot stopped");
+    expect(await first({ state: "stopped", stopReason: "user-stop" })).toBe("✈️ Autopilot stopped");
+    expect(await first({ state: "stopped", stopReason: "unreachable" })).toBe("⚠️ Autopilot stopped");
   });
 
   it("keeps cork's own bookkeeping out of it", async () => {

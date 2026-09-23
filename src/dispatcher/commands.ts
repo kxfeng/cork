@@ -457,7 +457,7 @@ async function handleExit(
       reply = "ℹ️ Claude is not running here — the next message starts it again.";
       break;
     case "autopilot":
-      reply = "⚠️ Autopilot is running here — `/ap stop` first, or it brings the session straight back.";
+      reply = "⚠️ Autopilot is running here — `/ap stop` first, or it brings the session straight back";
       break;
     case "asking":
       reply = `⏳ Claude is asking before it exits${r.title ? ` (${r.title})` : ""} — answer it with \`/pick\`.`;
@@ -608,7 +608,7 @@ async function handleAutopilot(
     await sendCmdReply(
       channel,
       message,
-      "❌ Autopilot is already running here. Run `/autopilot stop` first."
+      "⚠️ Autopilot is already running here — `/ap stop` first"
     );
     return { handled: true };
   }
@@ -645,8 +645,8 @@ async function handleAutopilot(
     channel,
     message,
     archived
-      ? "📝 Autopilot drafting — previous run archived."
-      : "📝 Autopilot drafting."
+      ? "✈️ Autopilot drafting — previous run archived"
+      : "✈️ Autopilot drafting"
   );
   return { handled: false };
 }
@@ -656,7 +656,7 @@ function goalRefusal(problem: GoalProblem, key: string): string {
   // Refuse rather than send something truncated or mangled: a goal that is
   // wrong in a way nobody notices is worse than one that never started.
   return (
-    `❌ Autopilot did not start.\n\n${goalProblemMessage(problem)}` +
+    `⚠️ Autopilot did not start\n\n${goalProblemMessage(problem)}` +
     `\n\nGOAL.md: \`${goalFilePath(key)}\``
   );
 }
@@ -671,8 +671,8 @@ function goalRefusal(problem: GoalProblem, key: string): string {
  * whatever it is, it is on screen where the answer has to be given anyway.
  */
 const WAITING_REPLY =
-  "⏸️ Autopilot did not start — the session is waiting on something at the " +
-  "terminal. Deal with it, then `/autopilot start` again.";
+  "⚠️ Autopilot did not start — the session is waiting on something at the " +
+  "terminal. Deal with it, then `/ap start` again";
 
 /**
  * Type GOAL.md into the pane as a `/goal`, and hand the outcome to the watcher.
@@ -703,7 +703,7 @@ async function beginRun(
   const sent = await sessionManager.sendSlashCommand(key, `/goal ${condition}`);
   if (!sent.ok) {
     stopAutopilot(key, "start-failed", sent.reason);
-    return `❌ Autopilot did not start — could not set the goal: ${sent.reason}`;
+    return `⚠️ Autopilot did not start — could not set the goal: ${sent.reason}`;
   }
 
   // `/autopilot stop` arrived while the goal was being typed — which takes up
@@ -759,13 +759,13 @@ async function startAutopilot(
 ): Promise<string | null> {
   const rec = loadAutopilot(key);
   if (isRunning(rec)) {
-    return "ℹ️ Autopilot is already running here. `/autopilot status` shows it.";
+    return "⚠️ Autopilot is already running here — `/ap status` shows it";
   }
   if (pendingStarts.has(key)) {
     // Covers both halves of a start in flight — waiting for the model, and
     // typing the goal in afterwards — because a second start is the wrong
     // thing to do in either.
-    return "⏳ Autopilot is already starting here. `/autopilot stop` calls it off.";
+    return "⚠️ Autopilot is already starting here — `/ap stop` calls it off";
   }
 
   const activity = sessionManager.sessionActivity(key);
@@ -838,8 +838,8 @@ async function waitThenStart(
       await sendCmdReply(
         channel,
         message,
-        "⏳ Autopilot did not start — the model has been busy for a minute. " +
-          "It was asked to stop; try `/autopilot start` again once it has."
+        "⚠️ Autopilot did not start — the model has been busy for a minute. " +
+          "It was asked to stop; `/ap start` again once it has"
       );
       return;
     }
@@ -871,12 +871,12 @@ async function stopAutopilotRun(
   if (pending) {
     pending.cancelled = true;
     pendingStarts.delete(key);
-    return "🛑 Autopilot start cancelled — cork was waiting for the model to stop.";
+    return "✈️ Autopilot start cancelled — cork was waiting for the model to stop";
   }
 
   const rec = loadAutopilot(key);
   if (!isRunning(rec)) {
-    return "🛑 Autopilot is not running here.";
+    return "✈️ Autopilot is not running here";
   }
 
   // Typed, not waited on, and the record is written in the same breath.
@@ -916,8 +916,8 @@ function autopilotStatus(key: string): string {
   // session was before, which is true and leaves out the part that is moving.
   if (pendingStarts.has(key)) {
     return (
-      "📋 Autopilot is starting — waiting for the model to stop before " +
-      "setting the goal. `/autopilot stop` calls it off."
+      "✈️ Autopilot starting — waiting for the model to stop before " +
+      "setting the goal. `/ap stop` calls it off"
     );
   }
 
@@ -928,8 +928,8 @@ function autopilotStatus(key: string): string {
   // invites the question of which autopilot.
   if (rec.state === "idle") {
     return (
-      "📋 Autopilot is not running in this session. " +
-      "`/autopilot <what you want done>` starts one."
+      "✈️ Autopilot is not running here — " +
+      "`/ap <what you want done>` starts one"
     );
   }
 
@@ -941,12 +941,21 @@ function autopilotStatus(key: string): string {
   // invite a judgement they cannot support — three nudges is a healthy paced
   // task as often as it is a stuck one. The state already names what is
   // happening, and the log has the rest.
-  const lines = [`📋 **Autopilot**: ${rec.state}`];
-
-  // A run whose goal went with the terminal is not doing anything, whatever
-  // the state says. One line, no cause: what is blocking it changes minute to
-  // minute and is not something to act on — that the goal is missing is.
-  if (rec.needsRearm) lines.push("Goal: not re-armed");
+  // Same shape as every other autopilot notice: ✈️ when all is well, ⚠️ when
+  // someone should look. A run whose goal went with the terminal is not doing
+  // anything, whatever the state says — no cause given: what is blocking it
+  // changes minute to minute and is not something to act on; that the goal is
+  // missing is. An ending nobody asked for is the other case worth a look.
+  const attention =
+    !!rec.needsRearm ||
+    (rec.state === "stopped" &&
+      !!rec.stopReason &&
+      rec.stopReason !== "met" &&
+      rec.stopReason !== "user-stop");
+  const lines = [
+    `${attention ? "⚠️" : "✈️"} Autopilot ${rec.state}` +
+      (rec.needsRearm ? " — goal not re-armed" : ""),
+  ];
 
   if (rec.goal) lines.push(`Goal: ${preview(rec.goal)}`);
   if (rec.startedAt) lines.push(`Started: ${startedLine(rec)}`);
@@ -1017,7 +1026,7 @@ function preview(text: string, max = 200): string {
 function goalProblemMessage(problem: GoalProblem): string {
   switch (problem) {
     case "missing":
-      return "There is no GOAL.md for this session yet. Run `/autopilot <what you want done>` first.";
+      return "There is no GOAL.md for this session yet. Run `/ap <what you want done>` first.";
     case "empty":
       return "GOAL.md is empty — it has to state the completion condition.";
     case "self-referential":
