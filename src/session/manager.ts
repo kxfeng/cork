@@ -143,14 +143,76 @@ const QUIET_WAIT_MS = 45_000;
 const QUIET_POLL_MS = 500;
 
 /**
- * How many times to press Escape to bring the turn in progress to a stop.
+ * Escape, one press at a time, for as long as claude says it is mid-turn.
  *
- * One is not always enough: with editorMode "vim" the first press only leaves
- * INSERT mode — measured, one press left the model still streaming 12 seconds
- * later, three stopped it in 2.2. In the default mode one does it and the
- * extra two are no-ops.
+ * Three presses in a row used to be sent blind, and that opens the Rewind
+ * dialog. Claude reads two Escapes on an idle prompt within about 0.8s as
+ * "rewind" (measured on 2.1.280: open at 0.78s apart, not at 0.8s) — so on a
+ * busy pane the first press interrupted the turn and the other two landed on
+ * the prompt it left behind, opening a dialog one Enter away from restoring
+ * the code to before the goal. On an idle pane the three merely opened and
+ * closed it, which is why it went unnoticed until `/autopilot stop` was used
+ * on a model that was working.
+ *
+ * Hence: press only while the status is `busy` or `waiting`, one press, then
+ * wait for the status to change. It changes 0.15s after an interrupt (measured), so the
+ * usual count is exactly one. A second press is for editorMode "vim", where
+ * the first only leaves INSERT and the model keeps streaming; it comes after
+ * INTERRUPT_SETTLE_MS, well outside the 0.8s window, so no two presses can
+ * ever make a pair even if the registry lags behind the pane.
+ *
+ * `waiting` gets a press too. It is a dialog waiting on a person, and a
+ * `/goal clear` typed into one does not arrive: measured with a question from
+ * AskUserQuestion on screen, the Enter answered the question with its
+ * highlighted option and the goal stayed set. One Escape cancelled the
+ * question, ended the turn, and the clear typed after it went straight in.
+ * Escape IS an answer to a dialog — cancel, or "no" to a permission prompt —
+ * but everything that calls this is stopping a goal because the user asked,
+ * and cancel is the answer that goes with stopping. (The re-arm path, which
+ * cork starts on its own, still waits a dialog out instead.)
+ *
+ * Every other status gets nothing. `idle` has no turn to stop. `shell` is a
+ * finished turn with a background shell still running: a command typed there
+ * runs at once (measured, 0.56s), and Escape does not stop the shell — it
+ * only lands on the prompt, which is how Rewind gets opened. A status that
+ * cannot be read is not a reason to guess.
  */
-const ESCAPE_PRESSES = 3;
+const MAX_INTERRUPT_PRESSES = 3;
+const INTERRUPT_SETTLE_MS = 1_500;
+const INTERRUPT_POLL_MS = 100;
+
+/** What interruptTurn needs from the outside, separated so it can be tested. */
+export interface InterruptDeps {
+  status: () => string | null;
+  /** Send one Escape. False when the pane is gone. */
+  press: () => boolean;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+/** Stop the turn in progress, if there is one. Returns the presses sent. */
+export async function interruptTurn(deps: InterruptDeps): Promise<number> {
+  let presses = 0;
+  let lastPress = -Infinity;
+  while (presses < MAX_INTERRUPT_PRESSES) {
+    // Never two presses closer than the settle time, whatever the status did
+    // in between. Cancelling a dialog can put the model straight back to work,
+    // and a status that changes fast is no guarantee the prompt is not what
+    // the next press lands on.
+    while (deps.now() - lastPress < INTERRUPT_SETTLE_MS) {
+      await deps.sleep(INTERRUPT_POLL_MS);
+    }
+    const before = deps.status();
+    if (before !== "busy" && before !== "waiting") return presses;
+    if (!deps.press()) return presses;
+    presses++;
+    lastPress = deps.now();
+    while (deps.status() === before && deps.now() - lastPress < INTERRUPT_SETTLE_MS) {
+      await deps.sleep(INTERRUPT_POLL_MS);
+    }
+  }
+  return presses;
+}
 
 /**
  * What cork should press to get past a dialog claude is showing.
@@ -1490,11 +1552,12 @@ export class SessionManager extends EventEmitter {
       clearGoal: () => {
         // Interrupt first, same as `/autopilot stop` does: the model is working
         // on the goal, and a command typed into a busy pane queues behind it.
-        this.interruptPane(key);
         // Not waited on, exactly as the command handler does not wait: the
         // watcher records the attempt now, and the transcript is what says
         // whether the goal actually went.
-        void this.sendSlashCommand(key, "/goal clear").catch(() => {});
+        void this.interruptPane(key)
+          .then(() => this.sendSlashCommand(key, "/goal clear"))
+          .catch(() => {});
       },
       goalArmed: () => {
         // Only from a connected session: a pane still drawing its first frame
@@ -1559,18 +1622,28 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Bring the turn in progress to a stop, so a command typed next runs at once
-   * rather than queueing behind it. See stopAutopilotRun for why more than one.
+   * rather than queueing behind it. Presses nothing unless the model is
+   * mid-turn or a dialog is waiting; see interruptTurn for why that matters.
    */
-  interruptPane(key: string, presses = ESCAPE_PRESSES): void {
+  async interruptPane(key: string): Promise<void> {
     const tmuxName = `${TMUX_PREFIX}${key}`;
     if (!liveTmuxSessions().has(tmuxName)) return;
-    for (let i = 0; i < presses; i++) {
-      try {
-        execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
-      } catch {
-        return; // pane went away; nothing to interrupt
-      }
-    }
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return;
+    const presses = await interruptTurn({
+      status: () => claudeSessionStatus(meta.sessionId),
+      press: () => {
+        try {
+          execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+          return true;
+        } catch {
+          return false; // pane went away; nothing to interrupt
+        }
+      },
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+    });
+    logger.info("interrupted the pane", { key, presses });
   }
 
   /**

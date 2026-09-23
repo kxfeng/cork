@@ -45,7 +45,7 @@ const sessionManager = {
   sessionKeyFor: () => KEY,
   sessionActivity: () => activity,
   watchAutopilot: () => {},
-  interruptPane: () => {
+  interruptPane: async () => {
     interrupts++;
   },
   defaultWorkspace: () => os.tmpdir(),
@@ -489,6 +489,8 @@ describe("/autopilot stop", () => {
     saveAutopilot(KEY, { state: "running", goal: "do the thing" });
 
     await handleCommand(channel, message("/autopilot stop"), sessionManager);
+    // The clear is chained after the interrupt, off the chat's queue.
+    await new Promise((r) => setTimeout(r, 0));
 
     // The model is mid-turn by definition — it is working on the goal — so the
     // pane is interrupted before anything is typed into it.

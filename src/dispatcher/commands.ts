@@ -571,8 +571,10 @@ async function beginRun(
   // no record to stop, since it is written below, but the goal is in the pane
   // now and has to come back out.
   if (token?.cancelled) {
-    sessionManager.interruptPane(key);
-    void sessionManager.sendSlashCommand(key, "/goal clear").catch(() => {});
+    void sessionManager
+      .interruptPane(key)
+      .then(() => sessionManager.sendSlashCommand(key, "/goal clear"))
+      .catch(() => {});
     return null; // `/autopilot stop` already said what it did
   }
 
@@ -712,10 +714,8 @@ async function waitThenStart(
  * turn, and a command typed into the quiet that follows runs at once instead
  * of queueing behind an answer that may have a minute left in it.
  *
- * Three presses because one is not always enough: with editorMode "vim" the
- * first only leaves INSERT mode (measured: one press left the model streaming
- * 12 seconds later, three stopped it in 2.2). In the default mode one is
- * enough and the extra two do nothing.
+ * The interrupt presses Escape only while the model is mid-turn, one press
+ * at a time — see interruptTurn for the Rewind dialog blind presses opened.
  */
 async function stopAutopilotRun(
   sessionManager: SessionManager,
@@ -754,8 +754,14 @@ async function stopAutopilotRun(
   // cleared by hand — with the transcript side saying so and closing the run.
   // Writing `stopping` after that would reopen a run that is already over.
   // Written now, before anything can happen, there is no window at all.
-  sessionManager.interruptPane(key);
-  void sessionManager.sendSlashCommand(key, "/goal clear").catch(() => {});
+  //
+  // The clear follows the interrupt rather than racing it: typed while the
+  // turn is still ending, it lands behind the turn, and the dialog check it
+  // starts with would be reading a screen that is about to change.
+  void sessionManager
+    .interruptPane(key)
+    .then(() => sessionManager.sendSlashCommand(key, "/goal clear"))
+    .catch(() => {});
   updateAutopilot(key, {
     state: "stopping",
     pendingSince: Date.now(),
