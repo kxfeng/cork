@@ -21,6 +21,7 @@ import {
 } from "../session/autopilot.js";
 import { formatDuration } from "../session/transcript-watcher.js";
 import { formatPickerRows, type PickerRow } from "../session/model-picker.js";
+import { formatTokens, type CompactOutcome } from "../session/transcript.js";
 import { readableTime, zoneLabel } from "../time.js";
 import { getLogger } from "../logger.js";
 import fs from "node:fs";
@@ -88,6 +89,14 @@ export async function handleCommand(
 
   if (text === "/model" || text.startsWith("/model ")) {
     return handleModel(channel, message, sessionManager, text.slice(6).trim());
+  }
+
+  if (text === "/compact" || text.startsWith("/compact ")) {
+    return handleCompact(channel, message, sessionManager, text.slice(8).trim());
+  }
+
+  if (text === "/exit") {
+    return handleExit(channel, message, sessionManager);
   }
 
   if (isAutopilotCommand(text)) {
@@ -361,6 +370,100 @@ async function handleModel(
   }
   if (r.screen) {
     reply += `\n\nThe terminal is showing this — it may need you:\n\`\`\`\n${dialogExcerpt(r.screen)}\n\`\`\``;
+  }
+  await sendCmdReply(channel, message, reply);
+  return { handled: true };
+}
+
+/**
+ * `/compact [instructions]` — have claude summarise this conversation now.
+ *
+ * Typed into the pane (see SessionManager.compactSession for why not the
+ * channel), then reported twice: once when it is in, and again when claude
+ * has finished — which takes seconds for a small context and minutes for a
+ * large one. The second report is not awaited here; holding the chat's queue
+ * for the length of a summary would hold every other command with it.
+ *
+ * No dialog has been seen from `/compact` (measured); should one appear, the
+ * dialog watcher reports it like any other.
+ */
+async function handleCompact(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager,
+  instructions: string
+): Promise<CommandResult> {
+  const session = sessionManager.getSession(
+    message.channel,
+    message.chatId,
+    message.threadId
+  );
+  if (!session) {
+    await sendCmdReply(channel, message, "ℹ️ No session here yet — say something first.");
+    return { handled: true };
+  }
+
+  const sent = await sessionManager.compactSession(session.key, instructions);
+  if (!sent.ok) {
+    await sendCmdReply(channel, message, `⚠️ Not compacted — ${sent.reason}`);
+    return { handled: true };
+  }
+  await sendCmdReply(channel, message, "📦 Compacting…");
+
+  void sessionManager
+    .waitForCompact(session.key, sent.sentAt)
+    .then((o) => sendCmdReply(channel, message, compactReport(o)))
+    .catch((err) => logger.warn("compact report failed", { err: (err as Error).message }));
+  return { handled: true };
+}
+
+function compactReport(o: CompactOutcome | null): string {
+  if (!o) return "⚠️ No word from /compact after 10 minutes — have a look at the terminal.";
+  if (!o.compacted) return `⚠️ /compact did not compact: ${o.said || "(no output)"}`;
+  return (
+    `📦 Compacted — ${formatTokens(o.preTokens)} → ${formatTokens(o.postTokens)} tokens` +
+    ` in ${formatDuration(o.durationMs)}`
+  );
+}
+
+/**
+ * `/exit` — end this session's claude. The record stays, so the next message
+ * resumes the same conversation; this is a restart of one session, where
+ * `cork restart` is a restart of all of them.
+ */
+async function handleExit(
+  channel: Channel,
+  message: IncomingMessage,
+  sessionManager: SessionManager
+): Promise<CommandResult> {
+  const session = sessionManager.getSession(
+    message.channel,
+    message.chatId,
+    message.threadId
+  );
+  if (!session) {
+    await sendCmdReply(channel, message, "ℹ️ No session here yet — say something first.");
+    return { handled: true };
+  }
+
+  const r = await sessionManager.exitSession(session.key);
+  let reply: string;
+  switch (r.result) {
+    case "exited":
+      reply = "👋 Claude exited — the next message resumes this conversation.";
+      break;
+    case "not-running":
+      reply = "ℹ️ Claude is not running here — the next message starts it again.";
+      break;
+    case "autopilot":
+      reply = "⚠️ Autopilot is running here — `/ap stop` first, or it brings the session straight back.";
+      break;
+    case "asking":
+      reply = `⏳ Claude is asking before it exits${r.title ? ` (${r.title})` : ""} — answer it with \`/pick\`.`;
+      break;
+    case "failed":
+      reply = `⚠️ Not exited — ${r.reason}`;
+      break;
   }
   await sendCmdReply(channel, message, reply);
   return { handled: true };

@@ -81,7 +81,9 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/status`              | Show this chat's session state (workspace, last activity, …)  |
 | `/new`                 | Throw away the current Claude session and start a fresh one   |
 | `/workspace <path>`    | Re‑point this chat at a different working directory           |
-| `/model [name]`        | Show, or change, the model THIS session runs on — the default for new sessions is left alone |
+| `/model [name\|n]`     | List the models on offer, or put THIS session on one by name or number — the default for new sessions is left alone |
+| `/compact [instructions]` | Have Claude summarise this conversation now; cork reports the token counts when it is done |
+| `/exit`                | End this session's Claude. The next message resumes the same conversation |
 | `/pick <n>` / `/pick esc` | Answer a dialog Claude is showing (cork tells you when one appears) |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
 
@@ -161,7 +163,8 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
   "defaultWorkspace": "~/Workspace",
   "claude": {
     "permissionMode": "bypassPermissions",   // pass --dangerously-skip-permissions
-    "extraArgs": []                          // any extra flags forwarded to claude
+    "extraArgs": [],                         // any extra flags forwarded to claude
+    "idleStopHours": 4                       // stop a pane nothing has happened in for this long; 0 = never
   },
   "channels": {
     "lark": {
@@ -170,8 +173,7 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
       "domain": "feishu",                     // or "lark"
       "owners": ["ou_..."],                   // open_ids allowed to use the bot
       "ackEmoji": "👀",
-      "streamingIntervalMs": 1500,
-      "idleTimeoutMin": 30
+      "streamingIntervalMs": 1500
     }
   }
 }

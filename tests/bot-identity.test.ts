@@ -77,7 +77,6 @@ function channelWith(client: any): LarkChannel {
     domain: "feishu",
     owners: [],
     ackEmoji: "",
-    idleTimeoutMin: 0,
   });
   (ch as any).client = client;
   return ch;

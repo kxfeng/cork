@@ -21,6 +21,8 @@ import {
   transcriptPath,
   lastTranscriptModel,
   formatModelName,
+  readCompactOutcome,
+  type CompactOutcome,
 } from "./transcript.js";
 import { readDialog, goalArmed, type Dialog } from "./dialog.js";
 import {
@@ -37,6 +39,12 @@ import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { getLogger } from "../logger.js";
 import { TranscriptWatcher, type AutopilotHooks } from "./transcript-watcher.js";
+import {
+  IDLE_STOP_CHECK_MS,
+  idleLimitMs,
+  idleVerdict,
+  type IdleFacts,
+} from "./idle-stop.js";
 import {
   TMUX_PREFIX,
   corkTmux,
@@ -140,6 +148,21 @@ const TYPE_ATTEMPTS = 3;
 const PICKER_DRAW_MS = 15_000;
 const MODEL_SETTLE_MS = 30_000;
 const PICKER_POLL_MS = 300;
+
+/**
+ * How long a `/compact` gets before cork stops waiting to report on it.
+ * Measured at 6s for 47K tokens; a context near a million is summarised by a
+ * model reading all of it, so the ceiling is minutes, not seconds.
+ */
+const COMPACT_WAIT_MS = 10 * 60_000;
+const COMPACT_POLL_MS = 2_000;
+
+/**
+ * How long claude gets to leave after `/exit`. Measured at 4s with nothing
+ * running; with a background job it does not leave at all, it asks.
+ */
+const EXIT_WAIT_MS = 15_000;
+const EXIT_POLL_MS = 500;
 
 const QUIET_WAIT_MS = 45_000;
 const QUIET_POLL_MS = 500;
@@ -424,6 +447,15 @@ export function claudeSessionStatus(sessionId: string): string | null {
   return null;
 }
 
+/** A file's last write in ms, or 0 when it does not exist. */
+function fileMtime(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 /**
  * The pane's text, including enough scrollback to hold a long input.
  *
@@ -524,6 +556,8 @@ export class SessionManager extends EventEmitter {
    */
   private dialogDrivers = new Map<string, number>();
   private udsServer: UdsServer | null = null;
+  /** The sweep that stops panes left alone for too long — see startIdleStop. */
+  private idleTimer?: ReturnType<typeof setInterval>;
 
   /**
    * (channel, chatId, threadId) → session id.
@@ -1420,6 +1454,103 @@ export class SessionManager extends EventEmitter {
     }
   }
 
+  /**
+   * Type `/compact` (with any instructions after it) into the pane.
+   *
+   * Typed rather than sent over the channel: a channel message reaches claude
+   * with slash commands disabled, so there it would be a sentence, not a
+   * command.
+   *
+   * Refused while the model is mid-turn. A slash command typed into a turn is
+   * queued by the TUI, and a queued one has been seen delivered to the model
+   * as an ordinary message — the compaction would simply not happen, with a
+   * confused reply in its place.
+   *
+   * Returns when the command is in, not when the compaction is done — that can
+   * take minutes. `sentAt` is what waitForCompact reads from.
+   */
+  async compactSession(
+    key: string,
+    instructions: string
+  ): Promise<{ ok: true; sentAt: number } | { ok: false; reason: string }> {
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return { ok: false, reason: "no such session" };
+    if (claudeSessionStatus(meta.sessionId) === "busy") {
+      return { ok: false, reason: "the model is mid-turn — send /compact once it has finished" };
+    }
+    const sentAt = Date.now();
+    const r = await this.sendSlashCommand(key, instructions ? `/compact ${instructions}` : "/compact");
+    if (!r.ok) return { ok: false, reason: r.reason ?? "could not type /compact" };
+    return { ok: true, sentAt };
+  }
+
+  /** The outcome of the `/compact` typed at `sinceMs`, or null if none came in time. */
+  async waitForCompact(
+    key: string,
+    sinceMs: number,
+    timing: { waitMs?: number; pollMs?: number } = {}
+  ): Promise<CompactOutcome | null> {
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return null;
+    const deadline = Date.now() + (timing.waitMs ?? COMPACT_WAIT_MS);
+    for (;;) {
+      const outcome = readCompactOutcome(meta.workspace, meta.sessionId, sinceMs);
+      if (outcome) return outcome;
+      if (Date.now() >= deadline) return null;
+      await new Promise((r) => setTimeout(r, timing.pollMs ?? COMPACT_POLL_MS));
+    }
+  }
+
+  /**
+   * Type `/exit` and see whether claude left.
+   *
+   * Leaving is read off tmux, not the transcript: claude records the `/exit`
+   * row whether or not it goes — measured, with "Stay" chosen on the dialog
+   * below, the row was there and the process was not gone.
+   *
+   * Four ways it can end before anything is typed or after:
+   *   not-running  nothing to exit. Not started just to be stopped, which is
+   *                what sendSlashCommand would otherwise do.
+   *   autopilot    refused: the run's watcher restarts a dead pane, so the
+   *                exit would last until its next tick.
+   *   asking       claude put up a dialog instead of leaving. The one seen is
+   *                "Background work is running", raised when a background
+   *                shell would die with it. It is left for a person — the
+   *                dialog watcher reports it and `/pick` answers it.
+   *   exited       gone. The record stays; the next message resumes it.
+   */
+  async exitSession(
+    key: string,
+    timing: { waitMs?: number; pollMs?: number } = {}
+  ): Promise<
+    | { result: "exited" | "not-running" | "autopilot" }
+    | { result: "asking"; title: string }
+    | { result: "failed"; reason: string }
+  > {
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return { result: "failed", reason: "no such session" };
+    const tmuxName = `${TMUX_PREFIX}${key}`;
+    if (!liveTmuxSessions().has(tmuxName)) return { result: "not-running" };
+    if (isRunning(loadAutopilot(key))) return { result: "autopilot" };
+    if (claudeSessionStatus(meta.sessionId) === "busy") {
+      return { result: "failed", reason: "the model is mid-turn — send /exit once it has finished" };
+    }
+
+    const r = await this.sendSlashCommand(key, "/exit");
+    if (!r.ok) return { result: "failed", reason: r.reason ?? "could not type /exit" };
+
+    const deadline = Date.now() + (timing.waitMs ?? EXIT_WAIT_MS);
+    for (;;) {
+      if (!liveTmuxSessions().has(tmuxName)) return { result: "exited" };
+      if (Date.now() >= deadline) break;
+      await new Promise((r) => setTimeout(r, timing.pollMs ?? EXIT_POLL_MS));
+    }
+
+    const dialog = this.currentDialog(key);
+    if (dialog) return { result: "asking", title: dialog.title };
+    return { result: "failed", reason: "claude is still running after /exit" };
+  }
+
   /** The picker walk itself. Split out so the caller owns the driving flag. */
   private async walkModelPicker(
     key: string,
@@ -1842,6 +1973,87 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Start the sweep that stops panes nobody has used in `idleStopHours`.
+   *
+   * Silent by design: nothing is posted to the chat. The next message resumes
+   * the conversation on its own, so a notice would be one more line in every
+   * quiet chat announcing something nobody needs to act on. The log has it.
+   */
+  startIdleStop(): void {
+    const limit = idleLimitMs(this.config.claude.idleStopHours);
+    if (limit === null) {
+      logger.info("idle stop is off");
+      return;
+    }
+    if (this.idleTimer) return;
+    this.idleTimer = setInterval(() => {
+      try {
+        this.stopIdleSessions(Date.now(), limit);
+      } catch (err) {
+        logger.warn("idle sweep failed", { err: (err as Error).message });
+      }
+    }, IDLE_STOP_CHECK_MS);
+    // A sweep is never a reason to keep the process alive.
+    this.idleTimer.unref?.();
+    logger.info("idle stop is on", { hours: this.config.claude.idleStopHours });
+  }
+
+  /**
+   * One pass over every live pane: stop the ones idleVerdict says have been
+   * left alone. Chat sessions and local ones alike — a local session is
+   * started again from the browser the same way a chat one is by a message.
+   *
+   * Returns the keys it stopped, for the log and the tests.
+   */
+  stopIdleSessions(now: number, limitMs: number): string[] {
+    const stopped: string[] = [];
+    for (const tmuxName of liveTmuxSessions()) {
+      if (!tmuxName.startsWith(TMUX_PREFIX)) continue;
+      const key = tmuxName.slice(TMUX_PREFIX.length);
+      const session = this.sessions.get(key);
+      // Coming up right now: its channel has not even registered yet.
+      if (session?.state === "starting") continue;
+      const meta = session?.meta ?? loadSession(key);
+      if (!meta) continue;
+
+      const facts: IdleFacts = {
+        status: claudeSessionStatus(meta.sessionId),
+        autopilot: isRunning(loadAutopilot(key)),
+        lastInteractionAt: Math.max(
+          fileMtime(transcriptPath(meta.workspace, meta.sessionId)),
+          Date.parse(meta.lastActiveAt ?? "") || 0,
+          this.paneCreatedAt(tmuxName) ?? 0
+        ),
+        clientActivityAt: this.clientActivity(tmuxName),
+      };
+      const verdict = idleVerdict(facts, now, limitMs);
+      if (!verdict.stop) continue;
+
+      this.stopSessionByKey(key);
+      stopped.push(key);
+      logger.info("stopped an idle session", {
+        key,
+        idleMin: Math.round((now - facts.lastInteractionAt) / 60_000),
+      });
+    }
+    return stopped;
+  }
+
+  /** When tmux created this pane's session, or null when it is gone. */
+  private paneCreatedAt(tmuxName: string): number | null {
+    try {
+      const out = execSync(
+        corkTmux(`display-message -p -t "${tmuxName}" '#{session_created}'`),
+        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+      const s = Number(out);
+      return Number.isFinite(s) && s > 0 ? s * 1000 : null; // tmux reports seconds
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Drop a session entirely: kill the pane and forget cork's record of it. The
    * chat is left alone, and so is Claude's own session file — that transcript is
    * Claude's, not cork's, and stays on disk where `claude -r` can still reach
@@ -2068,6 +2280,8 @@ export class SessionManager extends EventEmitter {
   }
 
   async shutdown(): Promise<void> {
+    if (this.idleTimer) clearInterval(this.idleTimer);
+    this.idleTimer = undefined;
     // Stop each session's watcher (timer + fs handle) — their panes are torn
     // down wholesale by the single kill-server below, so we don't need a
     // per-session kill-session here.

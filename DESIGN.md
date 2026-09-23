@@ -473,8 +473,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
       "domain": "feishu",           // "feishu" or "lark", auto-detected
       "owners": ["ou_xxxx"],        // empty = allow all
       "ackEmoji": "OnIt",
-      "streamingIntervalMs": 500,
-      "idleTimeoutMin": 0           // 0 = never auto-terminate
+      "streamingIntervalMs": 500
     }
   }
 }

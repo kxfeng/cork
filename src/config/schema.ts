@@ -65,6 +65,13 @@ export interface ClaudeConfig {
    * advisory message and nothing else — claude decides when to compact.
    */
   contextWindow?: number;
+  /**
+   * Stop a session's pane once nothing has happened in it for this many hours.
+   * The record stays, so the next message resumes the same conversation. What
+   * counts as something happening is in session/idle-stop.ts. 0 (or less)
+   * turns it off.
+   */
+  idleStopHours?: number;
 }
 
 export interface ChannelsConfig {
@@ -94,7 +101,6 @@ export interface LarkChannelConfig extends ChannelToggle {
   domain: "feishu" | "lark";
   owners: string[];
   ackEmoji: string;
-  idleTimeoutMin: number;
 }
 
 export interface TelegramChannelConfig extends ChannelToggle {
@@ -117,6 +123,7 @@ export const DEFAULT_CONFIG: CorkConfig = {
     permissionMode: "bypassPermissions",
     extraArgs: [],
     autoCompactPercent: 75,
+    idleStopHours: 4,
   },
   channels: {},
   web: { port: 6780 },

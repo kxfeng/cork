@@ -94,6 +94,96 @@ export function readTranscriptTail(
   return rows;
 }
 
+/** What a `/compact` came to, read back from the transcript. */
+export type CompactOutcome =
+  | { compacted: true; preTokens: number; postTokens: number; durationMs: number }
+  /** The command ran and answered, but nothing was compacted — its words. */
+  | { compacted: false; said: string };
+
+/**
+ * The outcome of a `/compact` typed at `sinceMs` or later, or null while there
+ * is none yet.
+ *
+ * Two records settle it, both measured on a real run. Success writes a
+ * `compact_boundary` row carrying the numbers:
+ *
+ *   {"type":"system","subtype":"compact_boundary",
+ *    "compactMetadata":{"trigger":"manual","preTokens":46807,
+ *                       "postTokens":2866,"durationMs":6444}, …}
+ *
+ * and every run, compacted or not, writes the command and then what it said:
+ * `<command-name>/compact</command-name>` followed by a
+ * `<local-command-stdout>` row. So the boundary answers "it worked", and the
+ * output with no boundary before it answers "it ran and said this instead".
+ *
+ * Read in file order, not by timestamp: the command row carries the time it
+ * was typed but is written after the boundary.
+ *
+ * `trigger: "manual"` keeps an automatic compaction that happens to land in
+ * the same window from being reported as the one asked for.
+ */
+export function readCompactOutcome(
+  workspace: string,
+  sessionId: string,
+  sinceMs: number
+): CompactOutcome | null {
+  let boundary: { preTokens: number; postTokens: number; durationMs: number } | null = null;
+  let sawCommand = false;
+  let said: string | null = null;
+
+  for (const raw of readTranscriptTail(workspace, sessionId)) {
+    const row = raw as {
+      type?: string;
+      subtype?: string;
+      timestamp?: string;
+      compactMetadata?: {
+        trigger?: string;
+        preTokens?: number;
+        postTokens?: number;
+        durationMs?: number;
+      };
+      message?: { content?: unknown };
+    };
+    if ((Date.parse(row.timestamp ?? "") || 0) < sinceMs) continue;
+
+    if (row.type === "system" && row.subtype === "compact_boundary") {
+      const m = row.compactMetadata;
+      if (m?.trigger === "manual") {
+        boundary = {
+          preTokens: m.preTokens ?? 0,
+          postTokens: m.postTokens ?? 0,
+          durationMs: m.durationMs ?? 0,
+        };
+      }
+      continue;
+    }
+
+    if (row.type !== "user") continue;
+    const text = rowText(row.message?.content);
+    if (text.includes("<command-name>/compact</command-name>")) {
+      sawCommand = true;
+      continue;
+    }
+    if (sawCommand && said === null) {
+      const out = /<local-command-std(?:out|err)>([\s\S]*?)<\/local-command-std(?:out|err)>/.exec(text);
+      if (out) said = out[1].replace(/\x1b\[[0-9;]*m/g, "").trim();
+    }
+  }
+
+  if (boundary) return { compacted: true, ...boundary };
+  if (said !== null) return { compacted: false, said };
+  return null;
+}
+
+/** A user row's text, whether claude stored it as a string or as blocks. */
+function rowText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => (b && typeof b === "object" && "text" in b ? String((b as { text: unknown }).text) : ""))
+    .join("\n");
+}
+
 /**
  * The model that served this session's most recent turn, as claude wrote it.
  *
@@ -219,7 +309,7 @@ export function contextWindowFor(modelId: string | null): number {
   return 200_000;
 }
 
-function formatTokens(n: number): string {
+export function formatTokens(n: number): string {
   if (n >= 1_000_000) {
     return n % 1_000_000 === 0 ? `${n / 1_000_000}M` : `${(n / 1_000_000).toFixed(1)}M`;
   }

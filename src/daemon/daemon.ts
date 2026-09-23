@@ -111,6 +111,8 @@ export class CorkDaemon {
     if (resumed.length > 0) {
       logger.info("resumed autopilot runs", { count: resumed.length });
     }
+
+    this.router.sessionManager.startIdleStop();
   }
 
   async stop(): Promise<void> {
