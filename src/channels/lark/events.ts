@@ -5,6 +5,7 @@ import { getLogger } from "../../logger.js";
 import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
 import { mentionsSelf, stripLeadingSelfMention } from "./mentions.js";
+import { lookupName, NAME_TTL_MS } from "./names.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
@@ -21,12 +22,6 @@ const DEDUP_MAX_ENTRIES = 5000;
 // the only bound on how stale a title can get.
 const chatNameCache = new Map<string, { name: string; at: number }>();
 
-// User name cache: open_id -> { name, fetched at }. Sender names are stamped
-// into forwarded and quoted message text, so a member who changed their nickname
-// kept being attributed under the old one. Same TTL, same reason.
-const userNameCache = new Map<string, { name: string; at: number }>();
-
-const NAME_TTL_MS = 60 * 60 * 1000;
 
 // Startup time: drop messages that predate cork startup (reconnect replay batch).
 const startupTime = Date.now();
@@ -481,13 +476,16 @@ async function handleMessageEvent(
   };
 
   // Name resolver for sender names (cached)
-  const resolveName = async (openId: string): Promise<string> => {
-    const hit = userNameCache.get(openId);
-    if (hit && Date.now() - hit.at < NAME_TTL_MS) return hit.name;
-    const name = await ctx.channel.getUserName(openId);
-    userNameCache.set(openId, { name, at: Date.now() });
-    return name;
-  };
+  // Sender names are stamped into forwarded and quoted message text too, all
+  // through the one cache in names.ts.
+  const resolveName = (openId: string): Promise<string> =>
+    lookupName(ctx.channel, openId);
+
+  // The receive event marks a bot sender "bot" (not "app", which is what the
+  // REST API says) — measured. Anything else is left to the lookup to sort out.
+  const fromBot = sender.sender_type === "bot";
+  const senderKind =
+    fromBot ? "bot" : sender.sender_type === "user" ? "user" : undefined;
 
   // For interactive (card) messages the WebSocket event only carries a
   // degraded placeholder; fetch the full raw card body so it can be parsed
@@ -575,6 +573,7 @@ async function handleMessageEvent(
             messageId: parentId,
             msgType: parentMsg.msgType,
             content: parentMsg.content,
+            mentions: parentMsg.mentions,
           });
         }
         if (quotedContent.trim()) {
@@ -638,14 +637,16 @@ async function handleMessageEvent(
       : undefined,
     // Best-effort and cached; an unresolved name simply omits the attribute
     // rather than echoing the raw id back as if it were one.
-    senderName: (await resolveName(senderId)) || undefined,
+    senderName: (await lookupName(ctx.channel, senderId, senderKind)) || undefined,
     // Only for groups — see IncomingMessage.mentionsYou.
     mentionsYou: chatType === "group" ? mentioned : undefined,
     // Computed from the raw body, not from `text`: both derive from the same
     // source and neither consumes the other, so what the model sees keeps its
-    // mentions intact. Only simple text carries commands.
+    // mentions intact. Only simple text carries commands, and only a person's:
+    // see IncomingMessage.fromBot.
+    fromBot: fromBot || undefined,
     commandText:
-      msgType === "text"
+      msgType === "text" && !fromBot
         ? stripLeadingSelfMention(
             parseMessageContent(msgType, effectiveContent),
             mentions,

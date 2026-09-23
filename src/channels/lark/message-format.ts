@@ -23,6 +23,7 @@ import {
 } from "./content.js";
 import { convertCard, extractCardImageKeys } from "./card-converter.js";
 import { resolveMentions, type LarkMention } from "./mentions.js";
+import { nameMentions, type NameSource } from "./names.js";
 
 const logger = getLogger("lark-format");
 
@@ -49,6 +50,14 @@ export interface FormatChannel {
     createTime?: number;
     mentions?: LarkMention[];
   } | null>;
+  /**
+   * Optional — names for mentions Lark sent without one (a bot mentioning a
+   * bot). Without it such a mention is left as Lark gave it.
+   */
+  getUserName?: NameSource["getUserName"];
+  getBotName?: NameSource["getBotName"];
+  botOpenId?: string;
+  botName?: string;
 }
 
 /** A message unit to format — top-level message, sub-message, or quoted parent. */
@@ -203,6 +212,9 @@ export async function formatLeafContent(
   entryMessageId?: string
 ): Promise<string> {
   const { messageId, msgType, content } = msg;
+  const mentions = channel.getUserName
+    ? await nameMentions(msg.mentions, channel as NameSource)
+    : msg.mentions;
   // Media of a message nested in a merge_forward may be bound to either the
   // sub-message's own id or the outer forward's id (see downloadMedia for why).
   //
@@ -262,7 +274,7 @@ export async function formatLeafContent(
         card = card.split(`[image: ${k}]`).join(repl);
       }
     }
-    return resolveMentions(card, msg.mentions);
+    return resolveMentions(card, mentions);
   }
 
   // text / post / sticker / share_* / location / unknown — synchronous parse.
@@ -284,5 +296,5 @@ export async function formatLeafContent(
   }
 
   // Last, so a placeholder that survived media substitution is still named.
-  return resolveMentions(text, msg.mentions);
+  return resolveMentions(text, mentions);
 }

@@ -57,6 +57,13 @@ export interface IncomingMessage {
    * falls back to `text`.
    */
   commandText?: string;
+  /**
+   * Sent by a bot rather than a person. Such a message is never a command:
+   * cork's commands steer a session (`/exit`, `/new`, `/model`), and another
+   * bot in the group — cork's or anyone's — is a correspondent, not an operator.
+   * It reaches the model as text like any other message.
+   */
+  fromBot?: boolean;
 }
 
 export interface ReplyResult {

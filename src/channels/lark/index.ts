@@ -26,6 +26,7 @@ import {
   uploadImage,
   uploadFile,
   getUserName as larkGetUserName,
+  getBotName as larkGetBotName,
   type SubMessageItem,
   type FetchedMessage,
   type ThreadMessageItem,
@@ -460,6 +461,10 @@ export class LarkChannel implements Channel {
 
   async getUserName(openId: string): Promise<string> {
     return larkGetUserName(this.client, openId);
+  }
+
+  async getBotName(openId: string): Promise<string> {
+    return larkGetBotName(this.client, openId);
   }
 
   async downloadResource(

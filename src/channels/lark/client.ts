@@ -363,6 +363,31 @@ export async function getUserName(
   return "";
 }
 
+/**
+ * Another bot's name, by its open id.
+ *
+ * The contact API above cannot answer this: handed a bot's open id, it returns
+ * an empty list rather than an error. And a bot mentioning a bot is exactly
+ * when Lark leaves the mention's `name` empty, so this is the only source.
+ */
+export async function getBotName(
+  client: lark.Client,
+  openId: string
+): Promise<string> {
+  try {
+    const res = (await client.request({
+      method: "GET",
+      url: "/open-apis/bot/v3/bots/basic_batch",
+      params: { bot_ids: openId },
+    })) as { data?: { bots?: Record<string, { name?: string }> } };
+    const name = res?.data?.bots?.[openId]?.name;
+    if (name) return name;
+  } catch (err) {
+    logger.debug("failed to get bot name", { err, openId });
+  }
+  return "";
+}
+
 export interface FetchedMessage {
   messageId: string;
   msgType: string;

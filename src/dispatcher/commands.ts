@@ -61,6 +61,7 @@ export async function handleCommand(
   // would match nothing. That field is the same message with our own leading
   // mention removed; `message.text` keeps it, since the model should see what
   // was actually said.
+  if (message.fromBot) return { handled: false };
   const text = (message.commandText ?? message.text).trim();
 
   if (text === "/status") {

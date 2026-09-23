@@ -156,6 +156,21 @@ function extractPostText(content: Record<string, unknown>): string {
   return parts.join("\n").trim() || "[post]";
 }
 
+/**
+ * A post's `at` node as text. Lark leaves `user_name` empty when a bot
+ * mentions a bot; `user_id` then still holds the mention key (`@_user_1`),
+ * which is emitted as is so resolveMentions can name it from the mention
+ * table — the same route a plain-text message's mentions take.
+ */
+function postAt(item: Record<string, unknown>): string {
+  if (typeof item.user_name === "string" && item.user_name) {
+    return `@${item.user_name}`;
+  }
+  const id = typeof item.user_id === "string" ? item.user_id : "";
+  if (!id) return typeof item.user_name === "string" ? "@" : "";
+  return id.startsWith("@") ? id : `@${id}`;
+}
+
 function collectPostLines(blocks: unknown[], parts: string[]): void {
   for (const line of blocks) {
     if (!Array.isArray(line)) continue;
@@ -164,7 +179,12 @@ function collectPostLines(blocks: unknown[], parts: string[]): void {
       if (!node || typeof node !== "object") continue;
       const item = node as Record<string, unknown>;
       if (typeof item.text === "string") lineParts.push(item.text);
-      if (typeof item.user_name === "string") lineParts.push(`@${item.user_name}`);
+      if (item.tag === "at") {
+        const at = postAt(item);
+        if (at) lineParts.push(at);
+      } else if (typeof item.user_name === "string") {
+        lineParts.push(`@${item.user_name}`);
+      }
       if (item.tag === "a" && typeof item.href === "string") {
         lineParts.push(item.href);
       }
