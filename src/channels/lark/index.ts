@@ -389,14 +389,20 @@ export class LarkChannel implements Channel {
     // An id that cannot render as a mention is dropped rather than passed
     // through: `<at id=cli_…>` reaches the chat as literal markup, which reads
     // as a bug to everyone who sees it. See usableAtTargets.
-    const atTargets = usableAtTargets(opts?.atUserIds ?? []);
-    const postContent = await this.buildPost(
-      mentionPrefix(atTargets) + content
-    );
-    const messageId = await sendMessage(this.client, chatId, "post", postContent, {
-      replyToMessageId: opts?.replyToMessageId,
-      replyInThread: opts?.replyInThread,
-    });
+    //
+    // No text means the reply is its attachments alone (see Channel.sendReply);
+    // an `at` then has nothing to ride on and is dropped with it.
+    let messageId = "";
+    if (content.trim()) {
+      const atTargets = usableAtTargets(opts?.atUserIds ?? []);
+      const postContent = await this.buildPost(
+        mentionPrefix(atTargets) + content
+      );
+      messageId = await sendMessage(this.client, chatId, "post", postContent, {
+        replyToMessageId: opts?.replyToMessageId,
+        replyInThread: opts?.replyInThread,
+      });
+    }
 
     // Attachments follow the text, one message each — Lark has no way to inline
     // a file into a post. Sent after the text and never allowed to throw, so a
@@ -404,7 +410,7 @@ export class LarkChannel implements Channel {
     for (const filePath of opts?.files ?? []) {
       try {
         const { fileKey, fileName } = await uploadFile(this.client, filePath);
-        await sendMessage(
+        const fileMessageId = await sendMessage(
           this.client,
           chatId,
           "file",
@@ -414,6 +420,7 @@ export class LarkChannel implements Channel {
             replyInThread: opts?.replyInThread,
           }
         );
+        messageId ||= fileMessageId;
         logger.info("sent attachment", { fileName });
       } catch (err) {
         logger.warn("attachment failed, skipping", { filePath, err });

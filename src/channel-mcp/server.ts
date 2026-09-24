@@ -96,7 +96,9 @@ const mcp = new Server(
     // beats an abstraction when the point is to make the risk feel real.
     instructions:
       `Messages from ${platform} arrive as <channel source="cork-channel" ...>. ` +
-      "Reply using the cork-channel__reply tool. Reply text supports Markdown.\n\n" +
+      "Reply using the cork-channel__reply tool. Reply text supports Markdown, " +
+      "including local images: `![](/abs/path.png)` is uploaded and shown " +
+      "inline. Other files go in `files`.\n\n" +
       "Answer what is addressed to you. A group also shows you messages meant " +
       "for someone else — reading one of those and staying out of it is the " +
       "right call, not a failure to respond. And when an exchange has stopped " +
@@ -129,8 +131,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "The reply text. Markdown is supported. A local image referenced " +
               "as `![](/abs/path.png)` is uploaded and inlined where it appears; " +
               "references inside code blocks, remote URLs, and paths that do not " +
-              "exist are left as literal text. Empty means you have chosen not " +
-              "to answer: no message reaches the chat, and the turn ends there. " +
+              "exist are left as literal text. Empty with no `files` means you " +
+              "have chosen not to answer: no message reaches the chat, and the " +
+              "turn ends there. (Empty with `files` sends just the files.) " +
               "Use it for a message addressed to someone else, or an exchange " +
               "with nothing left in it — it says the same thing as silence and " +
               "costs a great deal less.",

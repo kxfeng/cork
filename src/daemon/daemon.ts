@@ -292,7 +292,10 @@ export class CorkDaemon {
       return;
     }
 
-    if (!content?.trim()) {
+    // Empty text with attachments is a reply of attachments alone — only both
+    // empty is the model choosing not to answer. Treating a files-only reply as
+    // silence dropped the files without a word.
+    if (!content?.trim() && !msg.files?.length) {
       // The model did call the reply tool, it just had nothing to send — it
       // read a message meant for someone else, or let an exchange end. That
       // still counts as answering, so the acks come off. Not logged: it is a

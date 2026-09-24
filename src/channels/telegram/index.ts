@@ -86,7 +86,8 @@ export class TelegramChannel implements Channel {
     content: string,
     opts?: SendReplyOptions
   ): Promise<ReplyResult> {
-    const chunks = chunkText(content, MAX_CHUNK);
+    // Empty text: the reply is its attachments alone (see Channel.sendReply).
+    const chunks = content.trim() ? chunkText(content, MAX_CHUNK) : [];
     let lastId = "";
     for (let i = 0; i < chunks.length; i++) {
       // Thread only the first chunk under the original message (reply_to), so a

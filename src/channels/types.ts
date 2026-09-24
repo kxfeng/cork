@@ -116,6 +116,8 @@ export interface Channel {
   readonly name: string;
   start(dispatcher: Dispatcher): Promise<void>;
   stop(): Promise<void>;
+  /** `content` may be empty when `opts.files` is not: the reply is then the
+   * attachments alone, and no text message is sent. */
   sendReply(
     chatId: string,
     content: string,
