@@ -234,7 +234,7 @@ function rejectionNotice(owners: string[], senderId: string): string {
     return "⚠️ This bot only responds to authorized users.";
   }
   // Owners are granted by editing the config and nothing else, so that is the
-  // fix to hand over — `cork lark allow` would only let them chat.
+  // fix to hand over.
   return (
     "⚠️ No owners are configured, so this bot cannot verify anyone.\n" +
     `Your ID: ${senderId}\n` +

@@ -133,7 +133,7 @@ A local directory that serves as the working directory for a Claude Code session
 Two lists, both of Feishu `open_id`s in `config.jsonc`:
 
 - **`channels.lark.owners`** — may talk to the bot **and** run its chat commands. Auto-detected during `cork setup`; afterwards changed only by editing the file. Nothing in chat or on the CLI grants ownership.
-- **`channels.lark.allows`** — may talk to the bot, but not command it: a `/…` from them reaches the model as plain text. Grown by `/allow @someone` (owners, in chat — written in place with `jsonc-parser`, comments kept, live at once) or `cork lark allow <open_id>` (needs `cork restart`). Other bots belong here.
+- **`channels.lark.allows`** — may talk to the bot, but not command it: a `/…` from them reaches the model as plain text. Grown only by `/allow @someone` (owners, in chat, private or group — written in place with `jsonc-parser`, comments kept, live at once). Only an @mention, never a typed id: Lark fills in the mention's id from a person picked in its UI, while a pasted `ou_…` could name anyone. There is no CLI for it — a separate process could not update the running daemon anyway. Other bots belong here.
 - Whether a message may run a command depends on nothing but `owners` — not on the sender being a person or a bot.
 - Everyone else is refused, `/mention-off` or not: identity is checked before addressing.
 - The model sees which is which: every message carries `role="owner"` or `role="guest"`, and the instructions say a guest's request that changes the machine, a repository, configuration or credentials, reveals secrets, or publishes outside the chat needs the owner's go-ahead in the chat first. This only tells the model whose authority counts — a session runs with permissions bypassed, so a persuaded model can still act; real isolation would need a separate, restricted session.
@@ -500,7 +500,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
       "appSecret": "xxxx",
       "domain": "feishu",           // "feishu" or "lark", auto-detected
       "owners": ["ou_xxxx"],        // talk + command; edited by hand only; empty = refuse everyone
-      "allows": ["ou_yyyy"],        // talk only; edited by /allow, cork lark allow
+      "allows": ["ou_yyyy"],        // talk only; edited by /allow @someone
       "ackEmoji": "OnIt",
       "streamingIntervalMs": 500
     }

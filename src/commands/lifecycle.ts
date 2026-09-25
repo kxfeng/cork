@@ -67,7 +67,7 @@ export async function showStatus(): Promise<void> {
     console.log(
       lark.owners.length > 0
         ? `Owners: ${lark.owners.length}`
-        : "Owners: none — the bot refuses everyone (cork lark allow <ou_…>)"
+        : "Owners: none — the bot refuses everyone (add open ids to channels.lark.owners in ~/.cork/config.jsonc)"
     );
   }
 

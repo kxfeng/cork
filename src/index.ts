@@ -120,27 +120,6 @@ program
     });
   });
 
-const lark = program
-  .command("lark")
-  .description("Manage who may talk to the Lark bot (owners are edited in config.jsonc)");
-
-lark
-  .command("allow <openIds...>")
-  .description("Let Lark open ids (ou_…) talk to the bot, without running commands")
-  .action(async (openIds: string[]) => {
-    const { larkAllow } = await import("./commands/lark.js");
-    await larkAllow(openIds);
-  });
-
-lark
-  .command("disallow <openIds...>")
-  .alias("deny")
-  .description("Remove Lark open ids from the allows list")
-  .action(async (openIds: string[]) => {
-    const { larkDisallow } = await import("./commands/lark.js");
-    await larkDisallow(openIds);
-  });
-
 const telegram = program
   .command("telegram")
   .description("Manage the Telegram channel allowlist");

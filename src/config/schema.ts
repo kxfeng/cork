@@ -108,7 +108,8 @@ export interface LarkChannelConfig extends ChannelToggle {
   /**
    * Open ids that may talk to the bot but not command it — their `/…` reaches
    * the model as plain text. Grown by `/allow @someone` in chat or
-   * `cork lark allow <open_id>`. Other bots belong here rather than in owners.
+   * nothing else — an @mention names a real person, a typed id could name
+   * anyone. Other bots belong here rather than in owners.
    */
   allows?: string[];
   ackEmoji: string;

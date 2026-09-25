@@ -71,8 +71,6 @@ tmux attach -t cork_lark:<chatId>
 | `cork restart`    | `stop` + `start`                                              |
 | `cork status`     | Show daemon state, socket, and how many sessions are live     |
 | `cork session list` | List live sessions: chat, workspace, Claude context, `tmux attach` command |
-| `cork lark allow <open_id…>` | Let people or bots talk to the bot without running commands (the `allows` list). Owners are edited in `config.jsonc` only |
-| `cork lark disallow <open_id…>` | Take them off the `allows` list |
 
 ### In‑chat slash commands
 
@@ -182,7 +180,7 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
       "appSecret": "...",
       "domain": "feishu",                     // or "lark"
       "owners": ["ou_..."],                   // may talk to the bot and run its commands; edit here only
-      "allows": ["ou_..."],                   // may talk to it, not command it; /allow and cork lark allow edit this
+      "allows": ["ou_..."],                   // may talk to it, not command it; /allow @someone edits this
       "ackEmoji": "👀",
       "streamingIntervalMs": 1500
     }
