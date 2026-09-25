@@ -175,13 +175,16 @@ function collectPostLines(blocks: unknown[], parts: string[]): void {
   for (const line of blocks) {
     if (!Array.isArray(line)) continue;
     const lineParts: string[] = [];
+    let lastWasAt = false;
     for (const node of line) {
       if (!node || typeof node !== "object") continue;
       const item = node as Record<string, unknown>;
+      const isAt = item.tag === "at";
       if (typeof item.text === "string") lineParts.push(item.text);
-      if (item.tag === "at") {
+      if (isAt) {
         const at = postAt(item);
-        if (at) lineParts.push(at);
+        // Two mentions back to back get a space, as in resolveMentions.
+        if (at) lineParts.push(lastWasAt ? ` ${at}` : at);
       } else if (typeof item.user_name === "string") {
         lineParts.push(`@${item.user_name}`);
       }
@@ -193,6 +196,7 @@ function collectPostLines(blocks: unknown[], parts: string[]): void {
       if (item.tag === "img" && typeof item.image_key === "string") {
         lineParts.push(`[image: ${item.image_key}]`);
       }
+      lastWasAt = isAt;
     }
     if (lineParts.length > 0) parts.push(lineParts.join(""));
   }

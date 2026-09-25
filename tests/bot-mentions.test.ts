@@ -102,6 +102,18 @@ describe("a post's at node", () => {
     expect(parseMessageContent("post", POST)).toBe("@_user_1\n/model");
   });
 
+  it("separates at nodes that sit side by side", () => {
+    const post = JSON.stringify({
+      content: [[
+        { tag: "text", text: "hi" },
+        { tag: "at", user_id: "@_user_1", user_name: "CoKo" },
+        { tag: "at", user_id: "@_user_2", user_name: "Ann" },
+        { tag: "text", text: "!" },
+      ]],
+    });
+    expect(parseMessageContent("post", post)).toBe("hi@CoKo @Ann!");
+  });
+
   it("still reads a named one by its name", () => {
     const named = JSON.stringify({
       content: [[{ tag: "at", user_id: "@_user_1", user_name: "CoKo" }]],

@@ -42,6 +42,19 @@ describe("resolveMentions", () => {
     expect(out).toBe("@XiaoK @CoKo look at this");
   });
 
+  it("separates mentions typed back to back, and nothing else", () => {
+    // Lark puts no space between them: the real message read
+    // "测试@_user_2@_user_3 @_user_4". Text against a mention is left alone.
+    const out = resolveMentions("测试@_user_2@_user_3 @_user_4 @_user_1@_user_10", [
+      pushMention("@_user_1", "ou_a", "A"),
+      pushMention("@_user_2", SELF_OPEN, "XiaoK"),
+      pushMention("@_user_3", "ou_coko", "CoKo"),
+      pushMention("@_user_4", "ou_x", "Xiongfeng Ke"),
+      pushMention("@_user_10", "ou_j", "J"),
+    ]);
+    expect(out).toBe("测试@XiaoK @CoKo @Xiongfeng Ke @A @J");
+  });
+
   it("keeps a mid-sentence mention in place rather than deleting it", () => {
     // The regression that started this: stripping every key turned
     // "…@了谁吗？@CoKo @XiaoK 测试" into "…@了谁吗？  测试" — two spaces and

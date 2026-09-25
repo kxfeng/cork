@@ -87,13 +87,23 @@ export function resolveMentions(
     (a, b) => (b.key as string).length - (a.key as string).length
   );
 
-  let out = text;
+  // Lark puts no space between two mentions typed back to back, so
+  // "@_user_2@_user_3" would come out as "@XiaoK@CoKo" — one name, to a reader.
+  // Only mention-against-mention is separated: "测试@XiaoK" is ordinary Chinese
+  // and stays as written.
+  if (ordered.length === 0) return text.trim();
+  const keys = ordered.map((m) => escapeRegExp(m.key as string)).join("|");
+  let out = text.replace(new RegExp(`(${keys})(?=${keys})`, "g"), "$1 ");
   for (const m of ordered) {
     // An unnamed mention keeps its key: better an opaque address than a
     // silently deleted one.
     out = out.split(m.key as string).join(`@${m.name}`);
   }
   return out.trim();
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
