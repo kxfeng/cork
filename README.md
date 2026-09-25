@@ -214,14 +214,25 @@ Attach the tmux session and look at the screen — usually a stuck dialog cork's
 
 ## Development
 
+To run the global `cork` from a checkout — to hack on it, or to track `main`
+ahead of the pnpm install above — use `pnpm boot`, both to set it up and to
+upgrade:
+
 ```bash
-git clone https://github.com/kxfeng/cork.git
-cd cork
-pnpm install
+git clone https://github.com/kxfeng/cork.git && cd cork && pnpm boot   # first time
+git pull && pnpm boot && cork restart                                # upgrade
+```
+
+`pnpm boot` installs dependencies (which builds `dist/`) and links the global
+`cork` to this checkout; running it again is harmless. The build compiles,
+copies the skill and web assets, and removes anything in `dist/` whose source
+is gone. A running cork executes straight out of `dist/`, so it keeps working
+while this rebuilds and picks up the new code on `cork restart`.
+
+```bash
 pnpm run dev            # tsx, no rebuild needed
 pnpm run test           # vitest
-pnpm run build          # tsc → dist/
-pnpm link --global      # use your local checkout as the global `cork`
+pnpm run build          # the same build pnpm install runs
 ```
 
 PRs welcome. Two areas that especially need work:

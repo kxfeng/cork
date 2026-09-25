@@ -8,11 +8,11 @@
     "cork": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node scripts/copy-assets.js",
+    "build": "tsc && node scripts/copy-assets.js && node scripts/prune-dist.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "tsc",
+    "prepare": "pnpm run build",
     "boot": "pnpm install && pnpm link --global",
     "postinstall": "node scripts/postinstall.js"
   },
