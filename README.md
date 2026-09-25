@@ -24,7 +24,7 @@ Today only the Lark/Feishu adapter ships. The session/router layer is channel‑
 ## Requirements
 
 - **macOS or Linux** — the background daemon is managed by `launchd` on macOS and by the `systemd --user` instance on Linux (Ubuntu/Debian and any systemd distro). On Linux, run `loginctl enable-linger $USER` once so the daemon survives logout and starts at boot; without it the daemon lives only as long as a login session.
-- **Node.js 22+**
+- **Node.js 22+** and **pnpm** — `npm install -g pnpm`, then `pnpm setup` once
 - **`tmux`** on `PATH`
 - **`claude`** CLI on `PATH` (Claude Code installed and signed in)
 - A Feishu (`feishu.cn`) or Lark (`larksuite.com`) account that can register a personal bot
