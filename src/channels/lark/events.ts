@@ -213,11 +213,16 @@ function mentionRefs(
 }
 
 /**
- * Whether a sender may talk to the bot at all: an owner, or someone on the
- * allows list. Only owners may also command it — see IncomingMessage.fromOwner.
+ * Whether a sender may talk to the bot in this chat at all: an owner, someone
+ * on the allows list, or someone `/allow` let into this chat. Only owners may
+ * also command it — see IncomingMessage.fromOwner.
  */
-function isAdmitted(senderId: string, config: LarkChannelConfig): boolean {
-  return isOwner(senderId, config.owners) || (config.allows ?? []).includes(senderId);
+function isAdmitted(senderId: string, chatAllows: string[], config: LarkChannelConfig): boolean {
+  return (
+    isOwner(senderId, config.owners) ||
+    (config.allows ?? []).includes(senderId) ||
+    chatAllows.includes(senderId)
+  );
 }
 
 /**
@@ -368,7 +373,7 @@ async function handleMessageEvent(
   const botOpenId = await ctx.channel.ensureBotOpenId();
   const selfIds = [botOpenId, ctx.channel.botAppId].filter((v): v is string => !!v);
   const ownerCheck = isOwner(senderId, ctx.config.owners);
-  const admitted = isAdmitted(senderId, ctx.config);
+  const admitted = isAdmitted(senderId, ctx.dispatcher.getAllows?.("lark", chatId) ?? [], ctx.config);
   // mentionsSelf, not a local matcher: the @-gate and the text rendering
   // must agree on what "mentions me" means across both of Lark's id shapes.
   const mentioned = mentionsSelf(mentions, selfIds);

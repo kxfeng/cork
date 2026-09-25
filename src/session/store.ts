@@ -53,6 +53,12 @@ export interface SessionMeta {
   claudeSessionStarted: boolean;
   // Chat settings (previously in separate chat_setting_ files)
   mentionRequired: boolean;
+  /**
+   * Open ids that may talk to the bot in this chat without commanding it,
+   * grown by `/allow @someone`. Kept on the chat's main session — a thread's
+   * own record never holds one — and carried across `/new`.
+   */
+  allows?: string[];
 }
 
 /**

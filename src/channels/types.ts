@@ -72,7 +72,7 @@ export interface IncomingMessage {
   mentions?: MentionRef[];
 }
 
-/** What updateAllows did, by id: which changed and which were already so. */
+/** What SessionManager.updateAllows did, by id: which changed and which were already so. */
 export interface AllowsChange {
   added: string[];
   removed: string[];
@@ -123,6 +123,8 @@ export interface Dispatcher {
     reactionId: string,
     threadId?: string
   ): void;
+  /** Who `/allow` let into this chat: they may talk to the bot, not command it. */
+  getAllows?(channel: string, chatId: string): string[];
   /** Whether a group chat currently requires an @bot mention. */
   getMentionRequired?(channel: string, chatId: string): boolean;
   /** Set a group chat's @bot mention requirement. */
@@ -143,9 +145,10 @@ export interface Channel {
   botIdentity?():
     | { name: string; openId: string; owner?: { name: string; openId: string } }
     | undefined;
-  /** Grow or shrink the list of senders who may talk to the bot without
-   * commanding it, persisting the change. Absent where the channel has none. */
-  updateAllows?(add: string[], remove: string[]): AllowsChange;
+  /** Whether this sender may talk to the bot in every chat already — an owner,
+   * or on the channel-wide allows list. Absent where the channel has no allows,
+   * and `/allow` is refused there. */
+  admitsEverywhere?(id: string): boolean;
   /** `content` may be empty when `opts.files` is not: the reply is then the
    * attachments alone, and no text message is sent. */
   sendReply(

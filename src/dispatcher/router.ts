@@ -80,6 +80,10 @@ export class MessageRouter implements Dispatcher {
     return this.sessionManager.sessionExists(channel, chatId, threadId);
   }
 
+  getAllows(channel: string, chatId: string): string[] {
+    return this.sessionManager.getAllows(channel, chatId);
+  }
+
   getMentionRequired(channel: string, chatId: string): boolean {
     return this.sessionManager.getMentionRequired(channel, chatId);
   }

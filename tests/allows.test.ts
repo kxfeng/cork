@@ -5,20 +5,21 @@ import path from "node:path";
 
 /**
  * Owners and allows: owners may talk to the bot and command it, allows may
- * only talk to it. `/allow @someone` grows the allows list from chat, in place
- * in config.jsonc, taking effect on the next message.
+ * only talk to it. The channel-wide allows list is edited by hand; `/allow
+ * @someone` lets them into the chat it was sent in, kept on that chat's cork
+ * session and live on the next message.
  */
 
 let dir: string;
 const CONFIG = `{
-  // hand-written, and meant to stay that way
   "defaultWorkspace": "~/Workspace",
   "channels": {
     "lark": {
-      "appId": "cli_x", // the app
+      "appId": "cli_x",
       "appSecret": "s",
       "domain": "feishu",
       "owners": ["ou_owner"],
+      "allows": ["ou_global"],
       "ackEmoji": "OnIt"
     }
   }
@@ -37,55 +38,95 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-const readConfig = () => fs.readFileSync(path.join(dir, "config.jsonc"), "utf-8");
-
-async function larkChannel() {
+async function setup() {
   const { loadConfig } = await import("../src/config/loader.js");
   const { LarkChannel } = await import("../src/channels/lark/index.js");
-  const cfg = loadConfig().channels.lark!;
-  return { ch: new LarkChannel(cfg), cfg };
+  const { SessionManager } = await import("../src/session/manager.js");
+  const config = loadConfig();
+  const ch = new LarkChannel(config.channels.lark!);
+  const mgr = new SessionManager(config);
+  return { ch, mgr, admitted: (id: string) => ch.admitsEverywhere(id) };
 }
 
-describe("editConfigValue", () => {
-  it("changes one key and leaves the comments and the rest alone", async () => {
-    const { editConfigValue, loadConfig } = await import("../src/config/loader.js");
-    editConfigValue(["channels", "lark", "allows"], ["ou_coko"]);
-    const out = readConfig();
-    expect(out).toContain("// hand-written, and meant to stay that way");
-    expect(out).toContain('"appId": "cli_x", // the app');
-    expect(loadConfig().channels.lark?.allows).toEqual(["ou_coko"]);
-    expect(fs.statSync(path.join(dir, "config.jsonc")).mode & 0o777).toBe(0o600);
+const msg = (chatId: string, threadId?: string) =>
+  ({
+    channel: "lark",
+    chatId,
+    threadId,
+    chatType: "group",
+    chatName: "Group",
+    messageId: "om_1",
+    text: "/allow",
+  }) as never;
+
+describe("admitsEverywhere", () => {
+  it("is owners and the channel-wide allows list", async () => {
+    const { ch } = await setup();
+    expect(ch.admitsEverywhere("ou_owner")).toBe(true);
+    expect(ch.admitsEverywhere("ou_global")).toBe(true);
+    expect(ch.admitsEverywhere("ou_coko")).toBe(false);
   });
 });
 
-describe("updateAllows", () => {
-  it("adds, skips owners and repeats, and is live without a restart", async () => {
-    const { ch, cfg } = await larkChannel();
-    const change = ch.updateAllows(["ou_coko", "ou_owner", "ou_coko"], []);
-    expect(change).toEqual({ added: ["ou_coko"], removed: [], unchanged: ["ou_owner", "ou_coko"] });
-    expect(cfg.allows).toEqual(["ou_coko"]); // the object the event handler reads
-    expect(readConfig()).toContain('"allows"');
-    expect(readConfig()).toContain("// the app");
+describe("SessionManager.updateAllows", () => {
+  it("adds to the chat, skipping repeats and anyone admitted everywhere", async () => {
+    const { mgr, admitted } = await setup();
+    const change = mgr.updateAllows(msg("oc_1"), ["ou_coko", "ou_owner", "ou_global", "ou_coko"], [], admitted);
+    expect(change).toEqual({
+      added: ["ou_coko"],
+      removed: [],
+      unchanged: ["ou_owner", "ou_global", "ou_coko"],
+    });
+    expect(mgr.getAllows("lark", "oc_1")).toEqual(["ou_coko"]);
+    expect(mgr.getAllows("lark", "oc_2")).toEqual([]);
   });
 
-  it("removes, and leaves the file untouched when nothing changed", async () => {
-    const { ch } = await larkChannel();
-    ch.updateAllows(["ou_coko"], []);
-    const before = readConfig();
-    expect(ch.updateAllows([], ["ou_nobody"]).unchanged).toEqual(["ou_nobody"]);
-    expect(readConfig()).toBe(before);
-    expect(ch.updateAllows([], ["ou_coko"]).removed).toEqual(["ou_coko"]);
+  it("is persisted on the chat's session, and read back by a fresh manager", async () => {
+    const { mgr, admitted } = await setup();
+    mgr.updateAllows(msg("oc_1"), ["ou_coko"], [], admitted);
+    const { SessionManager } = await import("../src/session/manager.js");
+    const again = new SessionManager({ defaultWorkspace: "~/Workspace" } as never);
+    expect(again.getAllows("lark", "oc_1")).toEqual(["ou_coko"]);
+  });
+
+  it("goes on the main session when sent from a thread, so the whole chat has it", async () => {
+    const { mgr, admitted } = await setup();
+    mgr.updateAllows(msg("oc_1", "omt_1"), ["ou_coko"], [], admitted);
+    expect(mgr.getAllows("lark", "oc_1")).toEqual(["ou_coko"]);
+    expect(mgr.sessionExists("lark", "oc_1", "omt_1")).toBe(false);
+  });
+
+  it("survives /new", async () => {
+    const { mgr, admitted } = await setup();
+    mgr.updateAllows(msg("oc_1"), ["ou_coko"], [], admitted);
+    mgr.createNewSession("lark", "oc_1");
+    expect(mgr.getAllows("lark", "oc_1")).toEqual(["ou_coko"]);
+  });
+
+  it("goes with a forgotten session", async () => {
+    const { mgr, admitted } = await setup();
+    mgr.updateAllows(msg("oc_1"), ["ou_coko"], [], admitted);
+    mgr.forgetSessionByKey(mgr.sessionKeyFor("lark", "oc_1")!);
+    expect(mgr.getAllows("lark", "oc_1")).toEqual([]);
+  });
+
+  it("removes, and cannot remove what the channel-wide list grants", async () => {
+    const { mgr, admitted } = await setup();
+    mgr.updateAllows(msg("oc_1"), ["ou_coko"], [], admitted);
+    const change = mgr.updateAllows(msg("oc_1"), [], ["ou_coko", "ou_global"], admitted);
+    expect(change).toEqual({ added: [], removed: ["ou_coko"], unchanged: ["ou_global"] });
+    expect(mgr.getAllows("lark", "oc_1")).toEqual([]);
   });
 });
 
 describe("/allow and /disallow", () => {
-  async function run(text: string, mentions: unknown[], channelOver: object = {}) {
+  async function run(text: string, mentions: unknown[], channelOver: object = {}, chatId = "oc_1") {
     const { handleCommand } = await import("../src/dispatcher/commands.js");
     const replies: string[] = [];
-    const { ch } = await larkChannel();
+    const { ch, mgr } = await setup();
     const channel = {
       name: "lark",
-      updateAllows: ch.updateAllows.bind(ch),
+      admitsEverywhere: ch.admitsEverywhere.bind(ch),
       sendReply: async (_c: string, t: string) => {
         replies.push(t);
         return { messageId: "om_r" };
@@ -94,20 +135,29 @@ describe("/allow and /disallow", () => {
     };
     const r = await handleCommand(
       channel as never,
-      { chatId: "oc_1", messageId: "om_1", text, fromOwner: true, mentions } as never,
-      {} as never
+      {
+        channel: "lark",
+        chatId,
+        chatType: "group",
+        messageId: "om_1",
+        text,
+        fromOwner: true,
+        mentions,
+      } as never,
+      mgr
     );
-    return { r, replies };
+    return { r, replies, mgr };
   }
 
   const SELF = { name: "XiaoK", id: "ou_self", self: true };
   const COKO = { name: "CoKo", id: "ou_coko" };
   const ANN = { name: "Ann (QA)", id: "ou_ann" };
 
-  it("allows everyone mentioned but itself, answered by cork", async () => {
-    const { r, replies } = await run("/allow", [SELF, COKO, ANN]);
+  it("allows everyone mentioned but itself into this chat, answered by cork", async () => {
+    const { r, replies, mgr } = await run("/allow", [SELF, COKO, ANN]);
     expect(r).toEqual({ handled: true });
     expect(replies).toEqual(["Allowed: CoKo (ou_coko), Ann (QA) (ou_ann)"]);
+    expect(mgr.getAllows("lark", "oc_1")).toEqual(["ou_coko", "ou_ann"]);
   });
 
   it("says who was already allowed", async () => {
@@ -119,17 +169,13 @@ describe("/allow and /disallow", () => {
   it("answers a mix of new and existing in one line, owners counting as allowed", async () => {
     await run("/allow", [COKO]);
     const { replies } = await run("/allow", [ANN, COKO, { name: "Boss", id: "ou_owner" }]);
-    expect(replies).toEqual([
-      "Allowed: Ann (QA) (ou_ann) · already: CoKo, Boss",
-    ]);
+    expect(replies).toEqual(["Allowed: Ann (QA) (ou_ann) · already: CoKo, Boss"]);
   });
 
   it("answers a mixed /disallow the same way", async () => {
     await run("/allow", [COKO]);
     const { replies } = await run("/disallow", [COKO, ANN]);
-    expect(replies).toEqual([
-      "Disallowed: CoKo (ou_coko) · already: Ann (QA)",
-    ]);
+    expect(replies).toEqual(["Disallowed: CoKo (ou_coko) · already: Ann (QA)"]);
   });
 
   it("says who was already disallowed", async () => {
@@ -143,13 +189,20 @@ describe("/allow and /disallow", () => {
     expect(replies).toEqual(["Disallowed: CoKo (ou_coko)"]);
   });
 
+  it("keeps each chat to itself", async () => {
+    await run("/allow", [COKO], {}, "oc_1");
+    const { replies, mgr } = await run("/allow", [COKO], {}, "oc_2");
+    expect(replies).toEqual(["Allowed: CoKo (ou_coko)"]);
+    expect(mgr.getAllows("lark", "oc_2")).toEqual(["ou_coko"]);
+  });
+
   it("asks who, when nobody but itself was mentioned", async () => {
     const { replies } = await run("/allow", [SELF]);
     expect(replies).toEqual(["Nothing to allow — mention who to add"]);
   });
 
   it("is refused where the channel keeps no allows list", async () => {
-    const { replies } = await run("/allow", [COKO], { updateAllows: undefined });
+    const { replies } = await run("/allow", [COKO], { admitsEverywhere: undefined });
     expect(replies[0]).toContain("not supported");
   });
 

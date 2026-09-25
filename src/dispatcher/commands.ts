@@ -101,11 +101,11 @@ export async function handleCommand(
   }
 
   if (text === "/allow" || text.startsWith("/allow ")) {
-    return handleAllow(channel, message, "allow");
+    return handleAllow(channel, message, sessionManager, "allow");
   }
 
   if (text === "/disallow" || text.startsWith("/disallow ")) {
-    return handleAllow(channel, message, "disallow");
+    return handleAllow(channel, message, sessionManager, "disallow");
   }
 
   if (isAutopilotCommand(text)) {
@@ -117,8 +117,8 @@ export async function handleCommand(
 }
 
 /**
- * `/allow @A @B` and `/disallow @A`: who may talk to the bot without
- * commanding it. Answered by cork alone — it is a list edit, and a model turn
+ * `/allow @A @B` and `/disallow @A`: who may talk to the bot in this chat
+ * without commanding it. Answered by cork alone — it is a list edit, and a model turn
  * would only make it slow.
  *
  * The targets are the message's own @mentions, this bot's excluded. Only an
@@ -128,11 +128,12 @@ export async function handleCommand(
 async function handleAllow(
   channel: Channel,
   message: IncomingMessage,
+  sessionManager: SessionManager,
   verb: "allow" | "disallow"
 ): Promise<CommandResult> {
   const targets = (message.mentions ?? []).filter((m) => !m.self);
   const reply = (t: string) => sendCmdReply(channel, message, t).then(() => ({ handled: true }));
-  if (!channel.updateAllows) return reply(`⚠️ /${verb} is not supported on this channel`);
+  if (!channel.admitsEverywhere) return reply(`⚠️ /${verb} is not supported on this channel`);
   if (targets.length === 0) {
     return reply(
       verb === "allow"
@@ -141,8 +142,11 @@ async function handleAllow(
     );
   }
   const ids = targets.map((t) => t.id);
+  const admitted = channel.admitsEverywhere.bind(channel);
   const change =
-    verb === "allow" ? channel.updateAllows(ids, []) : channel.updateAllows([], ids);
+    verb === "allow"
+      ? sessionManager.updateAllows(message, ids, [], admitted)
+      : sessionManager.updateAllows(message, [], ids, admitted);
   // One line. Whoever changed is named with their id, so the right person can
   // be checked; whoever was already so gets just a name — nothing changed for
   // them, but leaving them out would read as someone mentioned and missed.

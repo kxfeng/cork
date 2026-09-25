@@ -86,10 +86,10 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/exit`                | End this session's Claude. The next message resumes the same conversation |
 | `/pick <n>` / `/pick esc` | Answer a dialog Claude is showing (cork tells you when one appears) |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
-| `/allow @someone …` / `/disallow @someone …` | Add the people or bots you @mention to the `allows` list, or take them off — cork answers at once, no restart |
+| `/allow @someone …` / `/disallow @someone …` | Let the people or bots you @mention talk to the bot in this chat, or take that back — cork answers at once, no restart |
 
-Only **owners** can run these. Someone on the **allows** list can talk to the
-bot, but a `/…` from them reaches Claude as plain text, and Claude sees them as
+Only **owners** can run these. Someone allowed — in this chat by `/allow`, or in
+every chat by the `allows` list in the config — can talk to the bot, but a `/…` from them reaches Claude as plain text, and Claude sees them as
 a `guest`: it is told to weigh what a guest's request would actually do, and to
 ask the owner in the chat first when that is risky — changing things on the
 owner's behalf, running a guest's code, or exposing private information. That is
@@ -188,7 +188,7 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
       "appSecret": "...",
       "domain": "feishu",                     // or "lark"
       "owners": ["ou_..."],                   // may talk to the bot and run its commands; edit here only
-      "allows": ["ou_..."],                   // may talk to it, not command it; /allow @someone edits this
+      "allows": ["ou_..."],                   // may talk to it in every chat, not command it; edit here only
       "ackEmoji": "👀",
       "streamingIntervalMs": 1500
     }

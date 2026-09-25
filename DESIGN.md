@@ -133,7 +133,8 @@ A local directory that serves as the working directory for a Claude Code session
 Two lists, both of Feishu `open_id`s in `config.jsonc`:
 
 - **`channels.lark.owners`** — may talk to the bot **and** run its chat commands. Auto-detected during `cork setup`; afterwards changed only by editing the file. Nothing in chat or on the CLI grants ownership.
-- **`channels.lark.allows`** — may talk to the bot, but not command it: a `/…` from them reaches the model as plain text. Grown only by `/allow @someone` (owners, in chat, private or group — written in place with `jsonc-parser`, comments kept, live at once). Only an @mention, never a typed id: Lark fills in the mention's id from a person picked in its UI, while a pasted `ou_…` could name anyone. There is no CLI for it — a separate process could not update the running daemon anyway. Other bots belong here.
+- **`channels.lark.allows`** — may talk to the bot in every chat, but not command it: a `/…` from them reaches the model as plain text. Edited by hand only, for the rare someone who should reach a personal agent anywhere.
+- **Per-chat allows** — the same, one chat at a time, and what `/allow @someone` grows (owners, in chat, private or group). Kept as `allows` on the chat's cork session (`session.json` of its main session, which its threads read too), so it lives and dies with the chat: carried across `/new`, gone with `/forget` or a disbanded chat. Live on the next message. Someone on `owners` or `allows` counts as already allowed, and `/disallow` cannot take away what those grant. Only an @mention, never a typed id: Lark fills in the mention's id from a person picked in its UI, while a pasted `ou_…` could name anyone. There is no CLI for it — a separate process could not update the running daemon anyway.
 - Whether a message may run a command depends on nothing but `owners` — not on the sender being a person or a bot.
 - Everyone else is refused, `/mention-off` or not: identity is checked before addressing.
 - The model sees which is which: every message carries `role="owner"` or `role="guest"`, and the instructions say a guest's request that changes the machine, a repository, configuration or credentials, reveals secrets, or publishes outside the chat needs the owner's go-ahead in the chat first. This only tells the model whose authority counts — a session runs with permissions bypassed, so a persuaded model can still act; real isolation would need a separate, restricted session.
@@ -203,7 +204,7 @@ An MCP server that runs inside Claude Code, bridging Claude Code ↔ Cork daemon
 - `CORK_CHANNEL_NAME` — which platform the session replies to
 - `CORK_BOT_NAME` / `CORK_BOT_OPEN_ID` — this bot's own name and open id, written into the instructions ("You are XiaoK on Lark, open id ou_…") so the model can tell which @ is aimed at it. Omitted while the id is unknown
 
-**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), `role` (`owner`, or `guest` for someone on `allows`), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
+**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), `role` (`owner`, or `guest` for someone allowed), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
 
 **MCP Tool:**
 ```typescript
@@ -378,8 +379,8 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 | `/status` | Show session info (chat type, mention setting, workspace, session state, tmux name) |
 | `/mention-off` | Disable @bot requirement in group chat (requires @bot) |
 | `/mention-on` | Re-enable @bot requirement in group chat (requires @bot) |
-| `/allow @A @B` | Add everyone the message @mentions (this bot excepted) to `allows`. Replies in one line: `Allowed: A (ou_…) · already: B`, or `Already allowed: B` |
-| `/disallow @A` | Remove them from `allows`. Replies `Disallowed: A (ou_…) · already: B`, or `Already disallowed: B` |
+| `/allow @A @B` | Allow everyone the message @mentions (this bot excepted) into this chat. Replies in one line: `Allowed: A (ou_…) · already: B`, or `Already allowed: B` |
+| `/disallow @A` | Take that back for this chat. Replies `Disallowed: A (ou_…) · already: B`, or `Already disallowed: B` |
 | `/autopilot [description]` | Draft an autopilot run — marks the session and hands the request to the model. The description is optional; a bare `/autopilot` has the model work the job out with the user |
 | `/autopilot start` | Type the whole of GOAL.md into the pane as `/goal …` and start watching |
 | `/autopilot stop` | Clear the goal and stop watching |
@@ -500,7 +501,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
       "appSecret": "xxxx",
       "domain": "feishu",           // "feishu" or "lark", auto-detected
       "owners": ["ou_xxxx"],        // talk + command; edited by hand only; empty = refuse everyone
-      "allows": ["ou_yyyy"],        // talk only; edited by /allow @someone
+      "allows": ["ou_yyyy"],        // talk only, every chat; edited by hand only
       "ackEmoji": "OnIt",
       "streamingIntervalMs": 500
     }

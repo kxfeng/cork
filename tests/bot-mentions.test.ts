@@ -137,11 +137,11 @@ describe("a post's at node", () => {
 });
 
 describe("a message from an allowed bot", () => {
-  function makeCtx() {
+  function makeCtx(config: object = { allows: [COKO] }, chatAllows: Record<string, string[]> = {}) {
     const dispatched: Array<Record<string, unknown>> = [];
     const { src } = names();
     const ctx = {
-      config: { owners: [OWNER], allows: [COKO], ackEmoji: "" },
+      config: { owners: [OWNER], ackEmoji: "", ...config },
       channel: {
         ...src,
         markEventReceived: () => {},
@@ -159,6 +159,7 @@ describe("a message from an allowed bot", () => {
           return { ok: true };
         },
         getMentionRequired: () => true,
+        getAllows: (_c: string, chatId: string) => chatAllows[chatId] ?? [],
       },
     } as never;
     const fn = createEventDispatcher(ctx).handles.get("im.message.receive_v1") as (
@@ -167,10 +168,17 @@ describe("a message from an allowed bot", () => {
     return { fn, dispatched };
   }
 
-  const event = (tag: string, senderType: string, from: string, type: string, content: string) => ({
+  const event = (
+    tag: string,
+    senderType: string,
+    from: string,
+    type: string,
+    content: string,
+    chatId = "oc_bm"
+  ) => ({
     message: {
       message_id: `om_bm_${tag}`,
-      chat_id: "oc_bm",
+      chat_id: chatId,
       chat_type: "group",
       message_type: type,
       create_time: String(Date.now()),
@@ -218,5 +226,23 @@ describe("a message from an allowed bot", () => {
   it("is passed over by the command handler", async () => {
     const r = await handleCommand({} as never, { text: "/exit", fromOwner: false } as never, {} as never);
     expect(r).toEqual({ handled: false });
+  });
+
+  it("gets in where it was allowed for that chat alone, and nowhere else", async () => {
+    const text = JSON.stringify({ text: "@_user_1 hi" });
+    const { fn, dispatched } = makeCtx({}, { oc_bm: [COKO] });
+    await fn(event("here", "bot", COKO, "text", text));
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ fromOwner: false });
+    await fn(event("there", "bot", COKO, "text", text, "oc_other"));
+    expect(dispatched).toHaveLength(1);
+  });
+
+  it("gets in everywhere when on the global allows list", async () => {
+    const text = JSON.stringify({ text: "@_user_1 hi" });
+    const { fn, dispatched } = makeCtx();
+    await fn(event("a", "bot", COKO, "text", text));
+    await fn(event("b", "bot", COKO, "text", text, "oc_other"));
+    expect(dispatched).toHaveLength(2);
   });
 });

@@ -34,7 +34,7 @@ import {
   type PickerView,
 } from "./model-picker.js";
 import type { CorkConfig } from "../config/schema.js";
-import type { IncomingMessage, MentionRef } from "../channels/types.js";
+import type { AllowsChange, IncomingMessage, MentionRef } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { getLogger } from "../logger.js";
@@ -762,6 +762,62 @@ export class SessionManager extends EventEmitter {
     const session = this.sessions.get(key);
     if (session) return session.meta.mentionRequired ?? true;
     return loadSession(key)?.mentionRequired ?? true;
+  }
+
+  /**
+   * Who `/allow` let into a chat, threads included. Read from the chat's main
+   * session like mentionRequired; empty for a chat with no record yet.
+   */
+  getAllows(channel: string, chatId: string): string[] {
+    const key = this.keyFor(channel, chatId);
+    if (!key) return [];
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    return meta?.allows ?? [];
+  }
+
+  /**
+   * Add to and remove from a chat's allows, on the main session's meta — live
+   * on the next message, no restart. A chat with no session yet gets its
+   * record now, without starting Claude. Anyone `admitted` already (an owner,
+   * or on the channel-wide list) counts as already allowed: a second entry
+   * would only outlive their removal from there, and removing them here
+   * cannot take away what that list grants.
+   */
+  updateAllows(
+    message: IncomingMessage,
+    add: string[],
+    remove: string[],
+    admitted: (id: string) => boolean
+  ): AllowsChange {
+    const session = this.ensureSession({ ...message, threadId: undefined });
+    const allows = [...(session.meta.allows ?? [])];
+    const change: AllowsChange = { added: [], removed: [], unchanged: [] };
+    for (const id of add) {
+      if (allows.includes(id) || admitted(id)) change.unchanged.push(id);
+      else {
+        allows.push(id);
+        change.added.push(id);
+      }
+    }
+    for (const id of remove) {
+      const i = allows.indexOf(id);
+      if (i < 0) change.unchanged.push(id);
+      else {
+        allows.splice(i, 1);
+        change.removed.push(id);
+      }
+    }
+    if (change.added.length || change.removed.length) {
+      if (allows.length) session.meta.allows = allows;
+      else delete session.meta.allows;
+      saveSession(session.key, session.meta);
+      logger.info("allows updated", {
+        key: session.key,
+        added: change.added,
+        removed: change.removed,
+      });
+    }
+    return change;
   }
 
   /**
@@ -2253,6 +2309,8 @@ export class SessionManager extends EventEmitter {
       lastMessagePreview: "",
       claudeSessionStarted: false,
       mentionRequired: true,
+      // Who may talk here is about the chat, not the conversation.
+      ...(previous?.allows?.length ? { allows: previous.allows } : {}),
     };
 
     saveSession(key, meta);
