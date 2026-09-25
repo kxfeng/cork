@@ -528,3 +528,67 @@ describe("TranscriptWatcher retry scheduling", () => {
     expect(injectCalls).toHaveLength(0);
   });
 });
+
+// --- API errors only a person can clear ---
+
+describe("TranscriptWatcher API error notices", () => {
+  const OUT_OF_CREDITS =
+    "You're out of usage credits. Run /usage-credits to keep using Fable 5.1 or /model to switch models.";
+  // Shaped as CLI 2.1.282 wrote it: a synthetic assistant row carrying the code.
+  const errorRow = (apiError: string | undefined, text: string) =>
+    JSON.stringify({
+      type: "assistant",
+      isApiErrorMessage: true,
+      ...(apiError ? { apiError } : {}),
+      error: "rate_limit",
+      apiErrorStatus: 429,
+      message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text }] },
+    });
+
+  const endsTurn: Array<boolean | undefined> = [];
+  function watcher(): TranscriptWatcher {
+    return new TranscriptWatcher({
+      workspace: "/tmp/test-cork-watcher",
+      sessionId: "test-sid",
+      sessionKey: "test_key",
+      inject,
+      notify: (text, opts) => {
+        notices.push(text);
+        endsTurn.push(opts?.endsTurn);
+      },
+      now,
+    });
+  }
+  beforeEach(() => {
+    endsTurn.length = 0;
+  });
+
+  it("tells the chat, in claude's own words, and settles the turn", () => {
+    const w = watcher();
+    // No turn_duration after it: the row alone is enough.
+    w.ingest(`${errorRow("model_requires_usage_credits", OUT_OF_CREDITS)}\n`);
+    expect(notices).toEqual([`⚠️ Claude stopped: ${OUT_OF_CREDITS}`]);
+    expect(endsTurn).toEqual([true]);
+  });
+
+  it("says it once per half hour however often it recurs", () => {
+    const w = watcher();
+    const row = `${errorRow("model_requires_usage_credits", OUT_OF_CREDITS)}\n`;
+    w.ingest(row);
+    advance(10 * 60_000);
+    w.ingest(`${typedUserRow("hello")}\n${row}`);
+    expect(notices).toHaveLength(1);
+    advance(21 * 60_000);
+    w.ingest(row);
+    expect(notices).toHaveLength(2);
+  });
+
+  it("keeps quiet about errors that clear on their own, or carry no code", () => {
+    const w = watcher();
+    w.ingest(
+      `${errorRow("rate_limit", "API Error: 429 rate limited")}\n` +
+        `${errorRow(undefined, "Login expired · Please run /login")}\n`
+    );
+    expect(notices).toEqual([]);
+  });
+});

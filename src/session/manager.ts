@@ -38,7 +38,7 @@ import type { IncomingMessage, MentionRef } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { getLogger } from "../logger.js";
-import { TranscriptWatcher, type AutopilotHooks } from "./transcript-watcher.js";
+import { TranscriptWatcher, type AutopilotHooks, type NotifyOptions } from "./transcript-watcher.js";
 import {
   IDLE_STOP_CHECK_MS,
   idleLimitMs,
@@ -2612,7 +2612,7 @@ export class SessionManager extends EventEmitter {
         driving: () => this.isDrivingDialog(key),
         clientActivity: () => this.clientActivity(`${TMUX_PREFIX}${key}`),
       },
-      notify: (text: string) => this.emit("notify", key, text),
+      notify: (text: string, opts?: NotifyOptions) => this.emit("notify", key, text, opts),
       autopilot: this.autopilotHooks(key),
     });
     session.transcriptWatcher.start();

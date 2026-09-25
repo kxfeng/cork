@@ -414,6 +414,19 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 
 Note: MCP tool calls are request-response, not streaming. Lark users see ack emoji during processing, then the complete reply appears at once.
 
+### 6.2a API errors that need a person
+
+Claude code writes an API error into the transcript as a synthetic assistant
+row (`isApiErrorMessage: true`, and on recent versions an `apiError` code). Most
+clear on their own — 429, 500, timeouts — and are left alone; a turn cut
+mid-response is retried by the transcript watcher. The ones only a person can
+clear are listed by code in `NOTIFY_API_ERRORS` (today
+`model_requires_usage_credits`): the watcher posts `⚠️ Claude stopped: <claude's
+text>` to the chat, at most once per code per session per 30 minutes, and takes
+the turn's acks off — an errored turn sends no reply and runs no Stop hook. It
+keys on the row alone, not its place in the turn, and covers autopilot runs,
+where every nudge used to meet the same error unseen.
+
 ### 6.3 Per-Chat Queue
 
 Messages from the same chat are processed serially (FIFO). Different chats run in parallel.

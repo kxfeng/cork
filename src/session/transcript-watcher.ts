@@ -71,6 +71,18 @@ const STOP_HOOK_PREFIX = "Stop hook feedback:";
  */
 const MID_STREAM_MARKER = "mid-response";
 
+/**
+ * API errors that stop claude until a person acts, keyed by the row's
+ * `apiError` code: each is told to the chat. Nothing else is — a 429, a 500 or
+ * a timeout clears on its own, and autopilot's nudges ride those out quietly.
+ * Grow this as new ones turn up; a code, not the text, so a reworded message
+ * still matches.
+ */
+export const NOTIFY_API_ERRORS: readonly string[] = ["model_requires_usage_credits"];
+
+/** One notice per error code per session in this long, however often it recurs. */
+export const API_ERROR_NOTICE_COOLDOWN_MS = 30 * 60_000;
+
 const RETRY_MESSAGE_TEXT =
   "Your task was interrupted mid-stream by an API error. " +
   "Please continue your in-progress task.";
@@ -507,11 +519,33 @@ export interface AutopilotHooks {
   compactPercent(): number;
 }
 
+export interface NotifyOptions {
+  /** The turn is over without a reply: take the acks off as a reply would. */
+  endsTurn?: boolean;
+}
+
+/** The text blocks of an assistant row, joined. */
+function rowText(row: TranscriptRow): string {
+  const content = row.message?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (b): b is { type: string; text: string } =>
+        !!b && typeof b === "object" && (b as { type?: string }).type === "text" &&
+        typeof (b as { text?: unknown }).text === "string"
+    )
+    .map((b) => b.text)
+    .join("\n")
+    .trim();
+}
+
 interface TranscriptRow {
   type?: string;
   subtype?: string;
   isMeta?: boolean;
   isApiErrorMessage?: boolean;
+  /** Claude code's code for the error on an `isApiErrorMessage` row. */
+  apiError?: string;
   message?: {
     content?: unknown;
     /** Present on assistant rows; the window is derived from it. */
@@ -556,7 +590,7 @@ export interface TranscriptWatcherOptions {
    * an API error is the one that matters. Falls back to the autopilot hook when
    * absent so tests that only build hooks keep working.
    */
-  notify?: (text: string) => void;
+  notify?: (text: string, opts?: NotifyOptions) => void;
   /**
    * How to see whether claude is showing a dialog, and whether cork is the one
    * working it.
@@ -592,7 +626,7 @@ export class TranscriptWatcher {
   private readonly path: string;
   private readonly sessionKey: string;
   private readonly inject: InjectFn;
-  private readonly notifyFn?: (text: string) => void;
+  private readonly notifyFn?: (text: string, opts?: NotifyOptions) => void;
   private readonly now: () => number;
   private readonly log: Logger;
 
@@ -624,6 +658,8 @@ export class TranscriptWatcher {
   /** When the transcript last grew. Seeded at start, so a daemon restart gives
    *  the session a full stall window before anyone pushes it. */
   private lastRowAt = 0;
+  /** When each notifiable API error was last told to the chat. */
+  private apiErrorNoticeAt = new Map<string, number>();
   private lastNudgeAt = 0;
   /** When the goal was last checked — by the evaluator, or by cork asking. */
   /**
@@ -803,6 +839,10 @@ export class TranscriptWatcher {
     const ours = isWatcherInjection(row);
     if (!ours) this.lastRowAt = this.now();
 
+    // Before autopilot takes the row: a run is exactly where this used to go
+    // unseen, every nudge meeting the same error in silence.
+    this.checkApiError(row);
+
     // Autopilot owns this session while it runs, and its rules replace the
     // mid-stream retry rather than joining it — see the module comment. That
     // ownership starts the moment `/goal` is typed, not when it registers:
@@ -963,11 +1003,30 @@ export class TranscriptWatcher {
    * reached the user and when — a run whose only trace was one "watching a new
    * autopilot run" line is how this gap was found.
    */
-  private say(text: string): void {
+  private say(text: string, opts?: NotifyOptions): void {
     this.log.info("telling the chat", { text: firstLine(text, 120) });
-    const notify = this.notifyFn ?? this.hooks?.notify.bind(this.hooks);
-    if (notify) notify(text);
+    if (this.notifyFn) this.notifyFn(text, opts);
+    else if (this.hooks) this.hooks.notify(text);
     else this.log.warn("nothing to notify through", { text: firstLine(text, 80) });
+  }
+
+  /**
+   * Tell the chat about an API error only a person can clear — see
+   * NOTIFY_API_ERRORS. Keyed on the row alone, not on where it falls in a
+   * turn, so a change in how claude code closes an errored turn cannot hide it.
+   */
+  private checkApiError(row: TranscriptRow): void {
+    if (row.type !== "assistant") return;
+    if (!(row.isApiErrorMessage ?? row.message?.isApiErrorMessage)) return;
+    const code = row.apiError;
+    if (!code || !NOTIFY_API_ERRORS.includes(code)) return;
+    const last = this.apiErrorNoticeAt.get(code);
+    if (last !== undefined && this.now() - last < API_ERROR_NOTICE_COOLDOWN_MS) return;
+    this.apiErrorNoticeAt.set(code, this.now());
+    const text = rowText(row) || code;
+    this.log.warn("claude stopped on an API error", { apiError: code });
+    // The turn ended on it and no reply is coming, so the acks come off too.
+    this.say(`⚠️ Claude stopped: ${text}`, { endsTurn: true });
   }
 
   private updateRec(patch: Partial<AutopilotRecord>): void {

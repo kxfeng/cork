@@ -80,9 +80,12 @@ export class CorkDaemon {
     // Things cork itself has to say — an autopilot run finished, stalled, or could
     // not be restarted. Unlike "error" these are not failures, so they carry no
     // warning sign of their own.
-    this.router.sessionManager.on("notify", (sessionKey: string, text: string) => {
-      this.handleSessionNotice(sessionKey, text);
-    });
+    this.router.sessionManager.on(
+      "notify",
+      (sessionKey: string, text: string, opts?: { endsTurn?: boolean }) => {
+        this.handleSessionNotice(sessionKey, text, opts?.endsTurn);
+      }
+    );
 
     // Start channels (Lark WebSocket, etc.)
     for (const channel of this.channels) {
@@ -350,8 +353,14 @@ export class CorkDaemon {
   }
 
   /** A notice from cork about this session, posted as-is. */
-  private handleSessionNotice(sessionKey: string, text: string): void {
+  private handleSessionNotice(sessionKey: string, text: string, endsTurn = false): void {
     this.postToSessionChat(sessionKey, text);
+    if (!endsTurn) return;
+    // A turn that ended on an error sends no reply and runs no Stop hook, so
+    // nothing else would ever take its acks off.
+    const session = this.router.sessionManager.getSessionByKey(sessionKey);
+    const channel = session && this.findChannel(session.meta);
+    if (session && channel) this.clearAcks(sessionKey, session.meta.chatId, channel);
   }
 
   private postToSessionChat(sessionKey: string, text: string): void {
