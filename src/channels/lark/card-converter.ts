@@ -45,12 +45,12 @@ const EMOJI_MAP: Record<string, string> = {
 };
 
 const CHART_TYPE_NAMES: Record<string, string> = {
-  bar: '柱状图',
-  line: '折线图',
-  pie: '饼图',
-  area: '面积图',
-  radar: '雷达图',
-  scatter: '散点图',
+  bar: 'bar chart',
+  line: 'line chart',
+  pie: 'pie chart',
+  area: 'area chart',
+  radar: 'radar chart',
+  scatter: 'scatter chart',
 };
 
 // --- helpers ---
@@ -127,7 +127,7 @@ const elementConverters = new Map<string, ElementConverterFn>([
   ['person_list', (c, _elem, prop) => c.convertPersonList(prop)],
   ['avatar', (c, _elem, prop, id) => c.convertAvatar(prop, id)],
   ['at', (c, _elem, prop) => c.convertAt(prop)],
-  ['at_all', () => '@所有人'],
+  ['at_all', () => '@all'],
   ['button', (c, _elem, prop, id) => c.convertButton(prop, id)],
   ['actions', (c, _elem, prop) => c.convertActions(prop)],
   ['action', (c, _elem, prop) => c.convertActions(prop)],
@@ -180,7 +180,7 @@ export class CardConverter {
   convert(input: RawCardContent): ConvertCardResult {
     const card = safeParse(input.json_card) as Obj | undefined;
     if (!card) {
-      return { content: '<card>\n[无法解析卡片内容]\n</card>', schema: 0 };
+      return { content: '<card>\n[unparsable card content]\n</card>', schema: 0 };
     }
     if (input.json_attachment) {
       this.attachment = safeParse(input.json_attachment) as Obj | undefined;
@@ -394,7 +394,7 @@ export class CardConverter {
   }
 
   convertLink(prop: Obj): string {
-    const content = (prop.content as string) || '链接';
+    const content = (prop.content as string) || 'link';
     let url = '';
     const urlObj = prop.url as Obj | undefined;
     if (urlObj && typeof urlObj === 'object') {
@@ -545,8 +545,8 @@ export class CardConverter {
 
   convertUnknown(prop: Obj | undefined, tag: string): string {
     if (!prop) {
-      if (this.mode === MODE.Detailed) return `[未知内容](tag:${tag})`;
-      return '[未知内容]';
+      if (this.mode === MODE.Detailed) return `[unknown content](tag:${tag})`;
+      return '[unknown content]';
     }
 
     const paths = ['content', 'text', 'title', 'label', 'placeholder'] as const;
@@ -562,8 +562,8 @@ export class CardConverter {
       return this.convertElements(elements, 0);
     }
 
-    if (this.mode === MODE.Detailed) return `[未知内容](tag:${tag})`;
-    return '[未知内容]';
+    if (this.mode === MODE.Detailed) return `[unknown content](tag:${tag})`;
+    return '[unknown content]';
   }
 
   convertColumnSet(prop: Obj, depth: number): string {
@@ -598,7 +598,7 @@ export class CardConverter {
   convertCollapsiblePanel(prop: Obj, _id: string): string {
     const expanded = prop.expanded === true;
 
-    let title = '详情';
+    let title = 'Details';
     const header = prop.header as Obj | undefined;
     if (header && typeof header === 'object') {
       const titleElem = header.title;
@@ -669,7 +669,7 @@ export class CardConverter {
     if (textElem && typeof textElem === 'object') {
       buttonText = this.extractTextContent(textElem);
     }
-    if (!buttonText) buttonText = '按钮';
+    if (!buttonText) buttonText = 'button';
 
     const disabled = prop.disabled === true;
     if (disabled && this.mode === MODE.Concise) {
@@ -763,7 +763,7 @@ export class CardConverter {
     }
 
     if (optionTexts.length === 0) {
-      let placeholder = '请选择';
+      let placeholder = 'Select';
       const phElem = prop.placeholder as Obj | undefined;
       if (phElem && typeof phElem === 'object') {
         const ph = this.extractTextContent(phElem);
@@ -803,7 +803,7 @@ export class CardConverter {
       const opt = options[i] as Obj | undefined;
       if (!opt || typeof opt !== 'object') continue;
       const value = (opt.value as string) || '';
-      let text = `🖼️图${i + 1}`;
+      let text = `🖼️ image ${i + 1}`;
       if (selectedValues.has(value)) text = '✓' + text;
       optTexts.push(text);
     }
@@ -869,7 +869,7 @@ export class CardConverter {
     if (value) value = normalizeTimeFormat(value);
 
     if (!value) {
-      let placeholder = '选择';
+      let placeholder = 'Select';
       const phElem = prop.placeholder as Obj | undefined;
       if (phElem && typeof phElem === 'object') {
         const ph = this.extractTextContent(phElem);
@@ -944,7 +944,7 @@ export class CardConverter {
       return `@${personName}`;
     }
 
-    if (this.mode === MODE.Detailed) return `@用户(open_id:${userID})`;
+    if (this.mode === MODE.Detailed) return `@user(open_id:${userID})`;
     return `@${userID}`;
   }
 
@@ -969,7 +969,7 @@ export class CardConverter {
       return `@${personName}`;
     }
 
-    if (this.mode === MODE.Detailed) return `@用户(open_id:${userID})`;
+    if (this.mode === MODE.Detailed) return `@user(open_id:${userID})`;
     return `@${userID}`;
   }
 
@@ -982,7 +982,7 @@ export class CardConverter {
       if (typeof person !== 'object' || person == null) continue;
       const pm = person as Obj;
       const personID = (pm.id as string) || '';
-      const name = '用户';
+      const name = 'user';
       if (this.mode === MODE.Detailed && personID) {
         names.push(`@${name}(id:${personID})`);
       } else {
@@ -1030,14 +1030,14 @@ export class CardConverter {
     }
 
     if (this.mode === MODE.Detailed) {
-      if (actualUserID) return `@用户(user_id:${actualUserID})`;
-      return `@用户(open_id:${userID})`;
+      if (actualUserID) return `@user(user_id:${actualUserID})`;
+      return `@user(open_id:${userID})`;
     }
     return `@${userID}`;
   }
 
   convertImage(prop: Obj, _id: string): string {
-    let alt = '图片';
+    let alt = 'image';
     const altElem = prop.alt as Obj | undefined;
     if (altElem && typeof altElem === 'object') {
       const altText = this.extractTextContent(altElem);
@@ -1086,7 +1086,7 @@ export class CardConverter {
     const imgList = prop.imgList as unknown[] | undefined;
     if (!Array.isArray(imgList) || imgList.length === 0) return '';
 
-    let result = `🖼️ ${imgList.length}张图片`;
+    let result = `🖼️ ${imgList.length} images`;
 
     if (this.mode === MODE.Detailed) {
       const keys: string[] = [];
@@ -1103,7 +1103,7 @@ export class CardConverter {
   }
 
   convertChart(prop: Obj, _id: string): string {
-    let title = '图表';
+    let title = 'Chart';
     let chartType = '';
     const chartSpec = prop.chartSpec as Obj | undefined;
     if (chartSpec && typeof chartSpec === 'object') {
@@ -1122,7 +1122,7 @@ export class CardConverter {
 
     const summary = this.extractChartSummary(prop, chartType);
     let result = `📊 ${title}`;
-    if (summary) result += `\n数据摘要: ${summary}`;
+    if (summary) result += `\nData summary: ${summary}`;
     return result;
   }
 
@@ -1183,11 +1183,11 @@ export class CardConverter {
   }
 
   private extractGenericSummary(values: unknown[]): string {
-    return `${values.length}个数据点`;
+    return `${values.length} data points`;
   }
 
   convertAudio(prop: Obj, _id: string): string {
-    let result = '🎵 音频';
+    let result = '🎵 Audio';
     if (this.mode === MODE.Detailed) {
       const fileID = (prop.fileID as string) || (prop.audioID as string) || '';
       if (fileID) result += `(key:${fileID})`;
@@ -1196,7 +1196,7 @@ export class CardConverter {
   }
 
   convertVideo(prop: Obj, _id: string): string {
-    let result = '🎬 视频';
+    let result = '🎬 Video';
     if (this.mode === MODE.Detailed) {
       const fileID = (prop.fileID as string) || (prop.videoID as string) || '';
       if (fileID) result += `(key:${fileID})`;

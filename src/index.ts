@@ -122,22 +122,23 @@ program
 
 const lark = program
   .command("lark")
-  .description("Manage the Lark channel allowlist");
+  .description("Manage who may talk to the Lark bot (owners are edited in config.jsonc)");
 
 lark
-  .command("allow <openId>")
-  .description("Add a Lark open id (ou_…) to the allowlist")
-  .action(async (openId: string) => {
+  .command("allow <openIds...>")
+  .description("Let Lark open ids (ou_…) talk to the bot, without running commands")
+  .action(async (openIds: string[]) => {
     const { larkAllow } = await import("./commands/lark.js");
-    await larkAllow(openId);
+    await larkAllow(openIds);
   });
 
 lark
-  .command("deny <openId>")
-  .description("Remove a Lark open id from the allowlist")
-  .action(async (openId: string) => {
-    const { larkDeny } = await import("./commands/lark.js");
-    await larkDeny(openId);
+  .command("disallow <openIds...>")
+  .alias("deny")
+  .description("Remove Lark open ids from the allows list")
+  .action(async (openIds: string[]) => {
+    const { larkDisallow } = await import("./commands/lark.js");
+    await larkDisallow(openIds);
   });
 
 const telegram = program

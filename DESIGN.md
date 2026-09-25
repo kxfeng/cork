@@ -130,11 +130,13 @@ A local directory that serves as the working directory for a Claude Code session
 
 ### 2.4 Owner & Access Control
 
-Only designated owners can interact with the bot.
+Two lists, both of Feishu `open_id`s in `config.jsonc`:
 
-- Identified by Feishu `open_id`, configured in `config.jsonc` under `channels.lark.owners`
-- Auto-detected during `cork setup` via QR code or manual flow
-- If `owners` is empty, all users are allowed
+- **`channels.lark.owners`** — may talk to the bot **and** run its chat commands. Auto-detected during `cork setup`; afterwards changed only by editing the file. Nothing in chat or on the CLI grants ownership.
+- **`channels.lark.allows`** — may talk to the bot, but not command it: a `/…` from them reaches the model as plain text. Grown by `/allow @someone` (owners, in chat — written in place with `jsonc-parser`, comments kept, live at once) or `cork lark allow <open_id>` (needs `cork restart`). Other bots belong here.
+- Whether a message may run a command depends on nothing but `owners` — not on the sender being a person or a bot.
+- Everyone else is refused, `/mention-off` or not: identity is checked before addressing.
+- If `owners` is empty, the bot refuses everyone and tells them how to add themselves to `owners`.
 
 **Private chat (P2P):**
 - Only owner messages are processed; non-owner messages are silently ignored
@@ -145,6 +147,12 @@ Only designated owners can interact with the bot.
 - `/mention-off` command disables the `@bot` requirement (owner messages processed without mention)
 - `/mention-on` re-enables the requirement
 - Mention setting (`mentionRequired`) is persisted on the session metadata file (see §7.3)
+
+### 2.5 Language
+
+Everything cork itself writes — chat replies, notices, the text it renders for
+the model — is in English. Keep new strings English; the bilingual prompts of
+`cork setup` are the one exception, kept as they are.
 
 ## 3. Communication Protocol
 
@@ -191,6 +199,10 @@ An MCP server that runs inside Claude Code, bridging Claude Code ↔ Cork daemon
 **Environment variables (set by cork when launching tmux):**
 - `CORK_SESSION_KEY` — session key for registration (passed via the tmux shell command, inherited by Claude Code → MCP subprocess)
 - `CORK_SOCKET` — UDS path (default: `~/.cork/cork.sock`, set inside `mcp-config.json`)
+- `CORK_CHANNEL_NAME` — which platform the session replies to
+- `CORK_BOT_NAME` / `CORK_BOT_OPEN_ID` — this bot's own name and open id, written into the instructions ("You are XiaoK on Lark, open id ou_…") so the model can tell which @ is aimed at it. Omitted while the id is unknown
+
+**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
 
 **MCP Tool:**
 ```typescript
@@ -365,6 +377,8 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 | `/status` | Show session info (chat type, mention setting, workspace, session state, tmux name) |
 | `/mention-off` | Disable @bot requirement in group chat (requires @bot) |
 | `/mention-on` | Re-enable @bot requirement in group chat (requires @bot) |
+| `/allow @A @B` | Add everyone the message @mentions (this bot excepted) to `allows`. Replies in one line: `Allowed: A (ou_…) · already: B`, or `Already allowed: B` |
+| `/disallow @A` | Remove them from `allows`. Replies `Disallowed: A (ou_…) · already: B`, or `Already disallowed: B` |
 | `/autopilot [description]` | Draft an autopilot run — marks the session and hands the request to the model. The description is optional; a bare `/autopilot` has the model work the job out with the user |
 | `/autopilot start` | Type the whole of GOAL.md into the pane as `/goal …` and start watching |
 | `/autopilot stop` | Clear the goal and stop watching |
@@ -471,7 +485,8 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
       "appId": "cli_xxxx",
       "appSecret": "xxxx",
       "domain": "feishu",           // "feishu" or "lark", auto-detected
-      "owners": ["ou_xxxx"],        // empty = allow all
+      "owners": ["ou_xxxx"],        // talk + command; edited by hand only; empty = refuse everyone
+      "allows": ["ou_yyyy"],        // talk only; edited by /allow, cork lark allow
       "ackEmoji": "OnIt",
       "streamingIntervalMs": 500
     }

@@ -69,6 +69,11 @@ describe("an @mention the model asked for", () => {
     expect(out.opts?.atUserIds).toEqual(["ou_alice"]);
   });
 
+  it("reaches the channel as a list when the model names several", async () => {
+    const out = await send(reply({ at: ["ou_alice", "ou_bob"] }));
+    expect(out.opts?.atUserIds).toEqual(["ou_alice", "ou_bob"]);
+  });
+
   it("is absent when the model did not ask for one", async () => {
     // Not an empty array: a reply that mentions nobody must not look like a
     // reply whose mentions were all filtered out.

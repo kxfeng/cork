@@ -58,12 +58,32 @@ export interface IncomingMessage {
    */
   commandText?: string;
   /**
-   * Sent by a bot rather than a person. Such a message is never a command:
-   * cork's commands steer a session (`/exit`, `/new`, `/model`), and another
-   * bot in the group — cork's or anyone's — is a correspondent, not an operator.
-   * It reaches the model as text like any other message.
+   * Whether the sender may run chat commands. Only owners may: an allowed
+   * sender — person or bot — is a correspondent, not an operator, and their
+   * `/exit` reaches the model as text. Absent on channels with no such split,
+   * where every admitted sender may command.
    */
-  fromBot?: boolean;
+  fromOwner?: boolean;
+  /**
+   * Who this message @mentioned, in order, with open ids — what lets the model
+   * @ them back, and lets `/allow @someone` name its targets. Only this
+   * message's own mentions, not those inside a quote or a forward.
+   */
+  mentions?: MentionRef[];
+}
+
+/** What updateAllows did, by id: which changed and which were already so. */
+export interface AllowsChange {
+  added: string[];
+  removed: string[];
+  unchanged: string[];
+}
+
+export interface MentionRef {
+  name: string;
+  id: string;
+  /** This bot. */
+  self?: boolean;
 }
 
 export interface ReplyResult {
@@ -116,6 +136,12 @@ export interface Channel {
   readonly name: string;
   start(dispatcher: Dispatcher): Promise<void>;
   stop(): Promise<void>;
+  /** The bot's own name and id on this channel, once known. Handed to each
+   * new session so the model can tell which @ in a message is aimed at it. */
+  botIdentity?(): { name: string; openId: string } | undefined;
+  /** Grow or shrink the list of senders who may talk to the bot without
+   * commanding it, persisting the change. Absent where the channel has none. */
+  updateAllows?(add: string[], remove: string[]): AllowsChange;
   /** `content` may be empty when `opts.files` is not: the reply is then the
    * attachments alone, and no text message is sent. */
   sendReply(

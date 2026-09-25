@@ -99,7 +99,18 @@ export interface LarkChannelConfig extends ChannelToggle {
   appId: string;
   appSecret: string;
   domain: "feishu" | "lark";
+  /**
+   * Open ids that may talk to the bot AND run its chat commands (`/new`,
+   * `/exit`, `/allow`, …). Added only by editing this file: nothing in chat or
+   * on the CLI grants it, so one mistaken command cannot hand anyone control.
+   */
   owners: string[];
+  /**
+   * Open ids that may talk to the bot but not command it — their `/…` reaches
+   * the model as plain text. Grown by `/allow @someone` in chat or
+   * `cork lark allow <open_id>`. Other bots belong here rather than in owners.
+   */
+  allows?: string[];
   ackEmoji: string;
 }
 

@@ -38,6 +38,12 @@ export class CorkDaemon {
     ensureDirs();
     logger.info("starting cork daemon");
 
+    // Before anything can launch a pane — an inbound message or an autopilot
+    // resume — so every session is told who the bot is when it starts. Looked
+    // up at launch time, which also covers an identity resolved late.
+    this.router.sessionManager.identify = (channel) =>
+      this.findChannel({ channel })?.botIdentity?.();
+
     // Refresh ~/.cork/mcp-config.json so it always points at the channel
     // MCP shipped with the currently running cork install.
     this.router.sessionManager.writeMcpConfig();
@@ -324,7 +330,9 @@ export class CorkDaemon {
         // Passed on as given. Whether an id can actually carry a mention is a
         // per-channel question — Lark accepts only its open ids — so the
         // channel decides, not the daemon.
-        ...(msg.at ? { atUserIds: [msg.at] } : {}),
+        ...(msg.at?.length
+          ? { atUserIds: Array.isArray(msg.at) ? msg.at : [msg.at] }
+          : {}),
       })
       .then(() => {
         // Everything acked so far, not just the oldest one: see

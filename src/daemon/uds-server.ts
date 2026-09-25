@@ -26,8 +26,9 @@ export interface ReplyMessage extends UdsMessage {
   files?: string[];
   /** Message to quote, chosen by the model. Ignored in a thread session. */
   replyToMessageId?: string;
-  /** Open id to @mention at the head of the reply, chosen by the model. */
-  at?: string;
+  /** Open ids to @mention at the head of the reply, chosen by the model. A
+   * lone string comes from a bridge that predates lists. */
+  at?: string | string[];
 }
 
 interface ChannelConnection {

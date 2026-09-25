@@ -1,11 +1,11 @@
 import * as lark from "@larksuiteoapi/node-sdk";
-import type { Dispatcher, IncomingMessage } from "../types.js";
+import type { Dispatcher, IncomingMessage, MentionRef } from "../types.js";
 import type { LarkChannelConfig } from "../../config/schema.js";
 import { getLogger } from "../../logger.js";
 import { formatMergeForward, formatThreadSeed } from "./merge-forward.js";
 import { parseMessageContent } from "./content.js";
 import { mentionsSelf, stripLeadingSelfMention } from "./mentions.js";
-import { lookupName, NAME_TTL_MS } from "./names.js";
+import { lookupName, nameMentions, NAME_TTL_MS } from "./names.js";
 import { formatLeafContent, wrapAsMessage, formatTime } from "./message-format.js";
 
 const logger = getLogger("lark-events");
@@ -195,6 +195,31 @@ function isOwner(senderId: string, owners: string[]): boolean {
   return owners.includes(senderId);
 }
 
+/** This message's mentions as the model and the commands see them. */
+function mentionRefs(
+  mentions: Array<{ id?: unknown; name?: string }>,
+  selfIds: string[]
+): MentionRef[] | undefined {
+  const out: MentionRef[] = [];
+  const seen = new Set<string>();
+  for (const m of mentions) {
+    const id =
+      typeof m.id === "string" ? m.id : (m.id as { open_id?: string } | undefined)?.open_id;
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({ name: m.name || id, id, ...(selfIds.includes(id) ? { self: true } : {}) });
+  }
+  return out.length ? out : undefined;
+}
+
+/**
+ * Whether a sender may talk to the bot at all: an owner, or someone on the
+ * allows list. Only owners may also command it — see IncomingMessage.fromOwner.
+ */
+function isAdmitted(senderId: string, config: LarkChannelConfig): boolean {
+  return isOwner(senderId, config.owners) || (config.allows ?? []).includes(senderId);
+}
+
 /**
  * What to tell someone the bot will not serve.
  *
@@ -208,10 +233,12 @@ function rejectionNotice(owners: string[], senderId: string): string {
   if (owners.length > 0) {
     return "⚠️ This bot only responds to authorized users.";
   }
+  // Owners are granted by editing the config and nothing else, so that is the
+  // fix to hand over — `cork lark allow` would only let them chat.
   return (
-    "⚠️ No authorized users are configured, so this bot cannot verify anyone.\n" +
+    "⚠️ No owners are configured, so this bot cannot verify anyone.\n" +
     `Your ID: ${senderId}\n` +
-    `If you are the owner, run:  cork lark allow ${senderId}`
+    "If you are the owner, add it to channels.lark.owners in ~/.cork/config.jsonc, then run:  cork restart"
   );
 }
 
@@ -341,6 +368,7 @@ async function handleMessageEvent(
   const botOpenId = await ctx.channel.ensureBotOpenId();
   const selfIds = [botOpenId, ctx.channel.botAppId].filter((v): v is string => !!v);
   const ownerCheck = isOwner(senderId, ctx.config.owners);
+  const admitted = isAdmitted(senderId, ctx.config);
   // mentionsSelf, not a local matcher: the @-gate and the text rendering
   // must agree on what "mentions me" means across both of Lark's id shapes.
   const mentioned = mentionsSelf(mentions, selfIds);
@@ -350,7 +378,7 @@ async function handleMessageEvent(
   // you use this bot" and "was this meant for me" — and keeping them in that
   // order means the thread lookup below is only paid for on behalf of someone
   // entitled to it.
-  if (!ownerCheck) {
+  if (!admitted) {
     let noticeSent = false;
     // A DM is addressed to the bot by existing, so it always deserves an
     // answer. In a group, only a message that named the bot does: replying to
@@ -483,9 +511,12 @@ async function handleMessageEvent(
 
   // The receive event marks a bot sender "bot" (not "app", which is what the
   // REST API says) — measured. Anything else is left to the lookup to sort out.
-  const fromBot = sender.sender_type === "bot";
   const senderKind =
-    fromBot ? "bot" : sender.sender_type === "user" ? "user" : undefined;
+    sender.sender_type === "bot" ? "bot" : sender.sender_type === "user" ? "user" : undefined;
+
+  // Named once here, so the text, the `mentions` list and the formatter below
+  // all read the same names — and the lookups are paid once.
+  const namedMentions = (await nameMentions(mentions, ctx.channel)) ?? [];
 
   // For interactive (card) messages the WebSocket event only carries a
   // degraded placeholder; fetch the full raw card body so it can be parsed
@@ -522,7 +553,7 @@ async function handleMessageEvent(
       messageId,
       msgType,
       content: effectiveContent,
-      mentions,
+      mentions: namedMentions,
     });
   }
 
@@ -642,11 +673,12 @@ async function handleMessageEvent(
     mentionsYou: chatType === "group" ? mentioned : undefined,
     // Computed from the raw body, not from `text`: both derive from the same
     // source and neither consumes the other, so what the model sees keeps its
-    // mentions intact. Only simple text carries commands, and only a person's:
-    // see IncomingMessage.fromBot.
-    fromBot: fromBot || undefined,
+    // mentions intact. Only simple text carries commands, and only an owner's:
+    // see IncomingMessage.fromOwner.
+    fromOwner: ownerCheck,
+    mentions: mentionRefs(namedMentions, selfIds),
     commandText:
-      msgType === "text" && !fromBot
+      msgType === "text" && ownerCheck
         ? stripLeadingSelfMention(
             parseMessageContent(msgType, effectiveContent),
             mentions,

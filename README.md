@@ -71,6 +71,8 @@ tmux attach -t cork_lark:<chatId>
 | `cork restart`    | `stop` + `start`                                              |
 | `cork status`     | Show daemon state, socket, and how many sessions are live     |
 | `cork session list` | List live sessions: chat, workspace, Claude context, `tmux attach` command |
+| `cork lark allow <open_id…>` | Let people or bots talk to the bot without running commands (the `allows` list). Owners are edited in `config.jsonc` only |
+| `cork lark disallow <open_id…>` | Take them off the `allows` list |
 
 ### In‑chat slash commands
 
@@ -86,6 +88,11 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/exit`                | End this session's Claude. The next message resumes the same conversation |
 | `/pick <n>` / `/pick esc` | Answer a dialog Claude is showing (cork tells you when one appears) |
 | `/mention-on` / `/mention-off` | Toggle whether `@bot` is required for the bot to react in groups |
+| `/allow @someone …` / `/disallow @someone …` | Add the people or bots you @mention to the `allows` list, or take them off — cork answers at once, no restart |
+
+Only **owners** can run these. Someone on the **allows** list can talk to the
+bot, but a `/…` from them reaches Claude as plain text. Everyone else is turned
+away — including in a group with `/mention-off`.
 
 ### Your own slash commands
 
@@ -171,7 +178,8 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
       "appId": "...",
       "appSecret": "...",
       "domain": "feishu",                     // or "lark"
-      "owners": ["ou_..."],                   // open_ids allowed to use the bot
+      "owners": ["ou_..."],                   // may talk to the bot and run its commands; edit here only
+      "allows": ["ou_..."],                   // may talk to it, not command it; /allow and cork lark allow edit this
       "ackEmoji": "👀",
       "streamingIntervalMs": 1500
     }

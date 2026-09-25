@@ -34,7 +34,7 @@ import {
   type PickerView,
 } from "./model-picker.js";
 import type { CorkConfig } from "../config/schema.js";
-import type { IncomingMessage } from "../channels/types.js";
+import type { IncomingMessage, MentionRef } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
 import { getLogger } from "../logger.js";
@@ -448,6 +448,26 @@ export function claudeSessionStatus(sessionId: string): string | null {
 }
 
 /** A file's last write in ms, or 0 when it does not exist. */
+/** A value safe inside single quotes on a shell command line. */
+function shellQuoted(v: string): string {
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * `mentions` as the channel tag carries it: `CoKo=ou_93…; 张三(测试)=ou_11…`.
+ *
+ * Kept out of the message text, where `@张三(测试)(ou_…)` would leave the model
+ * guessing which parentheses are the name. An open id has a fixed shape, so
+ * each entry splits unambiguously at its last `=` whatever the name holds.
+ * Quotes and line breaks are the only things taken out of a name: the value
+ * sits inside a quoted attribute.
+ */
+export function formatMentions(mentions: MentionRef[]): string {
+  return mentions
+    .map((m) => `${m.name.replace(/["\r\n]/g, " ").trim() || m.id}=${m.id}`)
+    .join("; ");
+}
+
 function fileMtime(file: string): number {
   try {
     return fs.statSync(file).mtimeMs;
@@ -573,6 +593,13 @@ export class SessionManager extends EventEmitter {
   constructor(private config: CorkConfig) {
     super();
   }
+
+  /**
+   * The bot's name and open id on a channel, set by the daemon once channels
+   * are up. Read at every pane launch, so a session started after a late
+   * identity resolution still gets it.
+   */
+  identify?: (channel: string) => { name: string; openId: string } | undefined;
 
   private static indexKey(
     channel: string,
@@ -886,6 +913,9 @@ export class SessionManager extends EventEmitter {
         ...(message.mentionsYou === undefined
           ? {}
           : { mentionYou: String(message.mentionsYou) }),
+        ...(message.mentions?.length
+          ? { mentions: formatMentions(message.mentions) }
+          : {}),
       },
     };
 
@@ -2323,7 +2353,7 @@ export class SessionManager extends EventEmitter {
     this.emit(
       "error",
       key,
-      "Claude Code 会话已被自动清理(默认闲置超过 30 天),已为你新建一个会话继续。"
+      "The Claude Code session was cleaned up (idle over 30 days by default) — continuing in a new one."
     );
     meta.sessionId = uuidv4();
     meta.claudeSessionStarted = false;
@@ -2391,6 +2421,13 @@ export class SessionManager extends EventEmitter {
    * public docs, so treat it as best-effort: if a future claude stops honouring
    * it, sessions fall back to compacting at `window - 13000` and keep working.
    */
+  /** CORK_BOT_NAME / CORK_BOT_OPEN_ID for the channel MCP, or nothing. */
+  private identityEnv(channel: string): string {
+    const me = this.identify?.(channel);
+    if (!me?.openId || !me.name) return "";
+    return `CORK_BOT_NAME=${shellQuoted(me.name)} CORK_BOT_OPEN_ID=${shellQuoted(me.openId)} `;
+  }
+
   private autoCompactEnv(): string {
     const pct = this.config.claude.autoCompactPercent;
     if (pct === undefined) return "";
@@ -2430,6 +2467,7 @@ export class SessionManager extends EventEmitter {
       `LANG='${locale}' LC_CTYPE='${locale}' ` +
       `CORK_SESSION_KEY='${key}' ` +
       `CORK_CHANNEL_NAME='${meta.channel ?? "lark"}' ` +
+      this.identityEnv(meta.channel ?? "lark") +
       this.autoCompactEnv() +
       `claude ${claudeArgs.join(" ")}`;
 

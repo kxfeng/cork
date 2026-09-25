@@ -1,8 +1,9 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Resolver } from "node:dns/promises";
 import { getLogger } from "../../logger.js";
-import { loadConfig, saveConfig } from "../../config/loader.js";
+import { editConfigValue, loadConfig, saveConfig } from "../../config/loader.js";
 import type {
+  AllowsChange,
   Channel,
   Dispatcher,
   ReplyResult,
@@ -472,6 +473,42 @@ export class LarkChannel implements Channel {
 
   async getBotName(openId: string): Promise<string> {
     return larkGetBotName(this.client, openId);
+  }
+
+  botIdentity(): { name: string; openId: string } | undefined {
+    return this.botOpenId ? { name: this.botName, openId: this.botOpenId } : undefined;
+  }
+
+  /**
+   * Add to and remove from `channels.lark.allows`, on disk and in the config
+   * the event handler reads — so it takes effect on the next message, with no
+   * restart. An owner counts as already allowed: owners may talk to the bot
+   * already, and a second entry would only outlive their removal from owners.
+   */
+  updateAllows(add: string[], remove: string[]): AllowsChange {
+    const allows = [...(this.config.allows ?? [])];
+    const change: AllowsChange = { added: [], removed: [], unchanged: [] };
+    for (const id of add) {
+      if (allows.includes(id) || this.config.owners.includes(id)) change.unchanged.push(id);
+      else {
+        allows.push(id);
+        change.added.push(id);
+      }
+    }
+    for (const id of remove) {
+      const i = allows.indexOf(id);
+      if (i < 0) change.unchanged.push(id);
+      else {
+        allows.splice(i, 1);
+        change.removed.push(id);
+      }
+    }
+    if (change.added.length || change.removed.length) {
+      editConfigValue(["channels", "lark", "allows"], allows);
+      this.config.allows = allows;
+      logger.info("allows updated", { added: change.added, removed: change.removed });
+    }
+    return change;
   }
 
   async downloadResource(

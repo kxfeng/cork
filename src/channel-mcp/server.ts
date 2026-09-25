@@ -62,6 +62,18 @@ log("subprocess_started", { sockPath });
 const channelName = process.env.CORK_CHANNEL_NAME || "lark";
 const platform = channelName.charAt(0).toUpperCase() + channelName.slice(1);
 
+// Who this bot is, so the model can tell which @ in a message is addressed to
+// it. Left out entirely when the daemon did not know yet: an empty id would
+// match nothing and say so with confidence.
+const botName = process.env.CORK_BOT_NAME || "";
+const botOpenId = process.env.CORK_BOT_OPEN_ID || "";
+const identity =
+  botName && botOpenId
+    ? `You are ${botName} on ${platform}, open id ${botOpenId}. In a tag's ` +
+      "`mentions`, the entry with that id is you; the others are who else " +
+      "the message addressed.\n\n"
+    : "";
+
 // Create the MCP server with channel capability.
 //
 // Deliberately not `claude/channel/permission`. Declaring it has Claude Code
@@ -95,6 +107,7 @@ const mcp = new Server(
     // "answering automatically" is for concreteness; a named thing to picture
     // beats an abstraction when the point is to make the risk feel real.
     instructions:
+      identity +
       `Messages from ${platform} arrive as <channel source="cork-channel" ...>. ` +
       "Reply using the cork-channel__reply tool. Reply text supports Markdown, " +
       "including local images: `![](/abs/path.png)` is uploaded and shown " +
@@ -159,18 +172,20 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "out of the main chat.",
           },
           at: {
-            type: "string",
+            type: "array",
+            items: { type: "string" },
             description:
-              "The `senderId` of someone to @mention at the head of the reply, " +
-              "copied from the `<channel>` tag of a message they sent. A quote " +
+              "Open ids of people or bots to @mention at the head of the reply, " +
+              "copied from a `<channel>` tag: its `senderId`, or an id in its " +
+              "`mentions` (`Name=ou_…; …` — everyone that message @mentioned). " +
+              "A quote " +
               "alone is easy to miss in a busy group; an @ notifies them and " +
               "names them in plain sight, so it is worth adding when answering " +
               "one person among several. Skip it in a direct message, where " +
               "there is nobody to distinguish from, and skip it when nothing " +
               "is being addressed to anyone in particular — an @ on every " +
-              "message stops meaning anything. Only a `senderId` that appeared " +
-              "on a channel tag works; a name on its own cannot be turned into " +
-              "one.",
+              "message stops meaning anything. Only an id that appeared on a " +
+              "channel tag works; a name on its own cannot be turned into one.",
           },
         },
         required: ["text"],
@@ -185,14 +200,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       text: string;
       files?: string[];
       replyToMessageId?: string;
-      at?: string;
+      // A bare string is what the tool took before it took several.
+      at?: string | string[];
     };
+    const atIds = (Array.isArray(at) ? at : at ? [at] : []).filter(
+      (v) => typeof v === "string" && v
+    );
     log("reply_tool_called", {
       contentLen: text.length,
       files: files?.length ?? 0,
       // Logged as a flag, not a value: enough to tell a dropped parameter from
       // one the model never sent, without putting a member's id in the log.
-      at: !!at,
+      at: atIds.length,
       udsConnected: udsClient.connected,
     });
     try {
@@ -202,7 +221,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         content: text,
         ...(files?.length ? { files } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}),
-        ...(at ? { at } : {}),
+        ...(atIds.length ? { at: atIds } : {}),
       });
       log("reply_sent_to_uds");
       return { content: [{ type: "text" as const, text: "sent" }] };

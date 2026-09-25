@@ -264,7 +264,9 @@ describe("an empty allowlist", () => {
     );
     expect(replies).toHaveLength(1);
     expect(replies[0]).toContain(OWNER);
-    expect(replies[0]).toContain(`cork lark allow ${OWNER}`);
+    // Owners are granted by editing the config — `cork lark allow` would only
+    // let them chat, not command.
+    expect(replies[0]).toContain("channels.lark.owners");
   });
 });
 

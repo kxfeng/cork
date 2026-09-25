@@ -164,7 +164,7 @@ export function getDomainBaseUrl(domain: "feishu" | "lark"): string {
  * Mask sensitive content that may trigger Feishu's content audit (code 230028).
  * Replaces emails, phone numbers, and other PII patterns.
  */
-const MASKED_NOTICE = "\n\n---\n⚠️ 部分内容已脱敏处理（Lark DLP）";
+const MASKED_NOTICE = "\n\n---\n⚠️ Some content was masked (Lark DLP)";
 
 function maskSensitiveContent(text: string): string {
   const masked = text

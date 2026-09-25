@@ -41,6 +41,28 @@ export function saveConfig(config: CorkConfig): void {
   fs.chmodSync(paths.configFile, 0o600);
 }
 
+/**
+ * Set one value in config.jsonc in place, leaving everything else — comments,
+ * key order, indentation — exactly as the user wrote it.
+ *
+ * For values cork changes at runtime (the Lark allows list). saveConfig
+ * rewrites the whole file from the parsed object, which drops every comment
+ * and touches the secrets for the sake of one key; this edits only the node
+ * at `jsonPath`, creating it and its parents when missing.
+ */
+export function editConfigValue(jsonPath: (string | number)[], value: unknown): void {
+  const raw = fs.existsSync(paths.configFile)
+    ? fs.readFileSync(paths.configFile, "utf-8")
+    : "{}";
+  const edits = jsonc.modify(raw, jsonPath, value, {
+    formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" },
+  });
+  const next = jsonc.applyEdits(raw, edits);
+  fs.mkdirSync(path.dirname(paths.configFile), { recursive: true });
+  fs.writeFileSync(paths.configFile, next, { encoding: "utf-8", mode: 0o600 });
+  fs.chmodSync(paths.configFile, 0o600);
+}
+
 export function resolveWorkspacePath(workspace: string): string {
   if (workspace.startsWith("~")) {
     const home = process.env.HOME || process.env.USERPROFILE || "";

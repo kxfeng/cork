@@ -124,12 +124,12 @@ describe("a post's at node", () => {
   });
 });
 
-describe("a message from another bot", () => {
+describe("a message from an allowed bot", () => {
   function makeCtx() {
     const dispatched: Array<Record<string, unknown>> = [];
     const { src } = names();
     const ctx = {
-      config: { owners: [OWNER, COKO], ackEmoji: "" },
+      config: { owners: [OWNER], allows: [COKO], ackEmoji: "" },
       channel: {
         ...src,
         markEventReceived: () => {},
@@ -181,26 +181,30 @@ describe("a message from another bot", () => {
     expect(dispatched[0]).toMatchObject({
       text: "@XiaoK\n/model",
       senderName: "CoKo",
-      fromBot: true,
+      fromOwner: false,
       commandText: undefined,
+      mentions: [{ name: "XiaoK", id: SELF, self: true }],
     });
   });
 
   it("is not a command even as plain text", async () => {
     const { fn, dispatched } = makeCtx();
     await fn(event("text", "bot", COKO, "text", JSON.stringify({ text: "@_user_1 /exit" })));
-    expect(dispatched[0]).toMatchObject({ fromBot: true, commandText: undefined });
+    expect(dispatched[0]).toMatchObject({ fromOwner: false, commandText: undefined });
   });
 
-  it("leaves a person's command alone", async () => {
+  it("leaves an owner's command alone", async () => {
     const { fn, dispatched } = makeCtx();
     await fn(event("human", "user", OWNER, "text", JSON.stringify({ text: "@_user_1 /exit" })));
-    expect(dispatched[0]).toMatchObject({ commandText: "/exit", senderName: "Xiongfeng Ke" });
-    expect(dispatched[0].fromBot).toBeUndefined();
+    expect(dispatched[0]).toMatchObject({
+      commandText: "/exit",
+      senderName: "Xiongfeng Ke",
+      fromOwner: true,
+    });
   });
 
   it("is passed over by the command handler", async () => {
-    const r = await handleCommand({} as never, { text: "/exit", fromBot: true } as never, {} as never);
+    const r = await handleCommand({} as never, { text: "/exit", fromOwner: false } as never, {} as never);
     expect(r).toEqual({ handled: false });
   });
 });

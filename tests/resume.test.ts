@@ -94,7 +94,7 @@ describe("resolveResume", () => {
     expect(m.sessionId).not.toBe("old-session-id"); // new id minted
     expect(m.claudeSessionStarted).toBe(false);
     expect(errors).toHaveLength(1);
-    expect(errors[0]).toContain("已被自动清理");
+    expect(errors[0]).toContain("was cleaned up");
 
     // and it persisted the new meta
     const saved = JSON.parse(

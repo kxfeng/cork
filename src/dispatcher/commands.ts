@@ -61,7 +61,7 @@ export async function handleCommand(
   // would match nothing. That field is the same message with our own leading
   // mention removed; `message.text` keeps it, since the model should see what
   // was actually said.
-  if (message.fromBot) return { handled: false };
+  if (message.fromOwner === false) return { handled: false };
   const text = (message.commandText ?? message.text).trim();
 
   if (text === "/status") {
@@ -100,12 +100,64 @@ export async function handleCommand(
     return handleExit(channel, message, sessionManager);
   }
 
+  if (text === "/allow" || text.startsWith("/allow ")) {
+    return handleAllow(channel, message, "allow");
+  }
+
+  if (text === "/disallow" || text.startsWith("/disallow ")) {
+    return handleAllow(channel, message, "disallow");
+  }
+
   if (isAutopilotCommand(text)) {
     return handleAutopilot(channel, message, sessionManager, text);
   }
 
   // Built-ins are matched above, so a user script can never shadow one.
   return handleScript(channel, message, sessionManager, text);
+}
+
+/**
+ * `/allow @A @B` and `/disallow @A`: who may talk to the bot without
+ * commanding it. Answered by cork alone — it is a list edit, and a model turn
+ * would only make it slow.
+ *
+ * The targets are the message's own @mentions, this bot's excluded. Only an
+ * owner gets here (see handleCommand), and nothing here can make anyone an
+ * owner.
+ */
+async function handleAllow(
+  channel: Channel,
+  message: IncomingMessage,
+  verb: "allow" | "disallow"
+): Promise<CommandResult> {
+  const targets = (message.mentions ?? []).filter((m) => !m.self);
+  const reply = (t: string) => sendCmdReply(channel, message, t).then(() => ({ handled: true }));
+  if (!channel.updateAllows) return reply(`⚠️ /${verb} is not supported on this channel`);
+  if (targets.length === 0) {
+    return reply(
+      verb === "allow"
+        ? "Nothing to allow — mention who to add"
+        : "Nothing to disallow — mention who to remove"
+    );
+  }
+  const ids = targets.map((t) => t.id);
+  const change =
+    verb === "allow" ? channel.updateAllows(ids, []) : channel.updateAllows([], ids);
+  // One line. Whoever changed is named with their id, so the right person can
+  // be checked; whoever was already so gets just a name — nothing changed for
+  // them, but leaving them out would read as someone mentioned and missed.
+  const nameOf = (id: string) => targets.find((t) => t.id === id)?.name ?? id;
+  const withIds = (list: string[]) => list.map((id) => `${nameOf(id)} (${id})`).join(", ");
+  const names = (list: string[]) => list.map(nameOf).join(", ");
+  const changed = verb === "allow" ? change.added : change.removed;
+  const done = verb === "allow" ? "Allowed" : "Disallowed";
+  if (changed.length === 0) {
+    return reply(`Already ${done.toLowerCase()}: ${names(change.unchanged)}`);
+  }
+  return reply(
+    `${done}: ${withIds(changed)}` +
+      (change.unchanged.length ? ` · already: ${names(change.unchanged)}` : "")
+  );
 }
 
 /**
