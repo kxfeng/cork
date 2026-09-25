@@ -186,6 +186,18 @@ describe("the role attribute", () => {
     // A channel with no owner/guest split (Telegram) admits owners only.
     expect(channelMeta(base).role).toBe("owner");
   });
+
+  it("carries the guest reminder on a guest's message and nowhere else", async () => {
+    // The instructions a resumed session holds may predate the guest rule
+    // entirely, so this attribute is the only place that message says it.
+    const { channelMeta } = await import("../src/session/manager.js");
+    const base = { chatId: "oc_1", senderId: "ou_x", messageId: "om_1" } as never;
+    expect(channelMeta({ ...(base as object), fromOwner: false } as never).note).toBe(
+      "guest: risky actions need the owner's OK"
+    );
+    expect(channelMeta({ ...(base as object), fromOwner: true } as never).note).toBeUndefined();
+    expect(channelMeta(base).note).toBeUndefined();
+  });
 });
 
 describe("the bot's identity", () => {
@@ -197,5 +209,89 @@ describe("the bot's identity", () => {
     expect(mgr.identityEnv("lark")).toBe(
       "CORK_BOT_NAME='Xiao'\\''K' CORK_BOT_OPEN_ID='ou_self' "
     );
+  });
+
+  it("carries the primary owner, by name when one is cached", async () => {
+    const { SessionManager } = await import("../src/session/manager.js");
+    const mgr = new SessionManager({ claude: {} } as never) as any;
+    mgr.identify = () => ({
+      name: "CoKo",
+      openId: "ou_self",
+      owner: { name: "O'Brien", openId: "ou_owner" },
+    });
+    expect(mgr.identityEnv("lark")).toBe(
+      "CORK_BOT_NAME='CoKo' CORK_BOT_OPEN_ID='ou_self' " +
+        "CORK_OWNER_NAME='O'\\''Brien' CORK_OWNER_OPEN_ID='ou_owner' "
+    );
+  });
+
+  it("passes the owner's id alone rather than an empty name", async () => {
+    // Nothing has looked the owner up yet — an id still says who to ask.
+    const { SessionManager } = await import("../src/session/manager.js");
+    const mgr = new SessionManager({ claude: {} } as never) as any;
+    mgr.identify = () => ({
+      name: "CoKo",
+      openId: "ou_self",
+      owner: { name: "", openId: "ou_owner" },
+    });
+    expect(mgr.identityEnv("lark")).toBe(
+      "CORK_BOT_NAME='CoKo' CORK_BOT_OPEN_ID='ou_self' CORK_OWNER_OPEN_ID='ou_owner' "
+    );
+  });
+
+  it("says nothing about an owner when there is none", async () => {
+    const { SessionManager } = await import("../src/session/manager.js");
+    const mgr = new SessionManager({ claude: {} } as never) as any;
+    mgr.identify = () => ({ name: "CoKo", openId: "ou_self" });
+    expect(mgr.identityEnv("lark")).toBe(
+      "CORK_BOT_NAME='CoKo' CORK_BOT_OPEN_ID='ou_self' "
+    );
+  });
+});
+
+describe("the primary owner a session is told about", () => {
+  it("is the first entry in owners, named from the cache alone", async () => {
+    const { LarkChannel } = await import("../src/channels/lark/index.js");
+    const { clearNameCache } = await import("../src/channels/lark/names.js");
+    clearNameCache();
+    const ch = new LarkChannel({
+      appId: "cli_test",
+      appSecret: "secret",
+      domain: "feishu",
+      owners: ["ou_owner", "ou_second"],
+      ackEmoji: "",
+    } as never) as any;
+    ch.botOpenId = "ou_self";
+    ch.botName = "CoKo";
+
+    // Cold cache: the id travels on its own, and no request is made for it.
+    expect(ch.botIdentity()).toEqual({
+      name: "CoKo",
+      openId: "ou_self",
+      owner: { name: "", openId: "ou_owner" },
+    });
+
+    // Once a message from the owner has been named, the name comes along.
+    const { lookupName } = await import("../src/channels/lark/names.js");
+    await lookupName({ getUserName: async () => "Xiongfeng Ke" }, "ou_owner", "user");
+    expect(ch.botIdentity().owner).toEqual({ name: "Xiongfeng Ke", openId: "ou_owner" });
+  });
+
+  it("is absent while the bot's own id is unknown, and when owners is empty", async () => {
+    const { LarkChannel } = await import("../src/channels/lark/index.js");
+    const cfg = {
+      appId: "cli_test",
+      appSecret: "secret",
+      domain: "feishu",
+      owners: ["ou_owner"],
+      ackEmoji: "",
+    };
+    const unresolved = new LarkChannel(cfg as never) as any;
+    expect(unresolved.botIdentity()).toBeUndefined();
+
+    const ownerless = new LarkChannel({ ...cfg, owners: [] } as never) as any;
+    ownerless.botOpenId = "ou_self";
+    ownerless.botName = "CoKo";
+    expect(ownerless.botIdentity()).toEqual({ name: "CoKo", openId: "ou_self" });
   });
 });

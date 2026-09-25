@@ -470,6 +470,15 @@ export function channelMeta(message: IncomingMessage): Record<string, string> {
     // as either. "guest" rather than the config's "allows": the word has to
     // tell the model how to treat the speaker, not how they got in.
     role: message.fromOwner === false ? "guest" : "owner",
+    // Only on a guest's message, and only as a reminder: the rule itself is in
+    // the channel instructions. Those are injected once per session and a
+    // resumed one keeps the copy it started with, so a rule that arrived after
+    // a session began reaches it nowhere else. On an owner's message it would
+    // be noise, and noise on every message is how an attribute stops being
+    // read at all.
+    ...(message.fromOwner === false
+      ? { note: "guest: risky actions need the owner's OK" }
+      : {}),
   };
 }
 
@@ -615,11 +624,13 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * The bot's name and open id on a channel, set by the daemon once channels
-   * are up. Read at every pane launch, so a session started after a late
-   * identity resolution still gets it.
+   * The bot's name and open id on a channel, plus the primary owner it works
+   * for; set by the daemon once channels are up. Read at every pane launch, so
+   * a session started after a late identity resolution still gets it.
    */
-  identify?: (channel: string) => { name: string; openId: string } | undefined;
+  identify?: (
+    channel: string
+  ) => { name: string; openId: string; owner?: { name: string; openId: string } } | undefined;
 
   private static indexKey(
     channel: string,
@@ -2428,11 +2439,24 @@ export class SessionManager extends EventEmitter {
    * public docs, so treat it as best-effort: if a future claude stops honouring
    * it, sessions fall back to compacting at `window - 13000` and keep working.
    */
-  /** CORK_BOT_NAME / CORK_BOT_OPEN_ID for the channel MCP, or nothing. */
+  /**
+   * CORK_BOT_NAME / CORK_BOT_OPEN_ID for the channel MCP, followed by
+   * CORK_OWNER_NAME / CORK_OWNER_OPEN_ID when a primary owner is configured —
+   * or nothing at all while the bot's own identity is unknown.
+   *
+   * The owner's name is left out on its own when nothing has resolved it yet,
+   * rather than passed empty: the MCP server writes the sentence from whatever
+   * reaches it, and an id alone still says who to ask.
+   */
   private identityEnv(channel: string): string {
     const me = this.identify?.(channel);
     if (!me?.openId || !me.name) return "";
-    return `CORK_BOT_NAME=${shellQuoted(me.name)} CORK_BOT_OPEN_ID=${shellQuoted(me.openId)} `;
+    let env = `CORK_BOT_NAME=${shellQuoted(me.name)} CORK_BOT_OPEN_ID=${shellQuoted(me.openId)} `;
+    if (me.owner?.openId) {
+      if (me.owner.name) env += `CORK_OWNER_NAME=${shellQuoted(me.owner.name)} `;
+      env += `CORK_OWNER_OPEN_ID=${shellQuoted(me.owner.openId)} `;
+    }
+    return env;
   }
 
   private autoCompactEnv(): string {

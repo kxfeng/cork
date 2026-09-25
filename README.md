@@ -90,10 +90,18 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 
 Only **owners** can run these. Someone on the **allows** list can talk to the
 bot, but a `/…` from them reaches Claude as plain text, and Claude sees them as
-a `guest`: it is told to get the owner's go-ahead before acting on a guest's
-request to change the machine, a repo, config or credentials. That is guidance
-to the model, not a sandbox — the session still runs with permissions bypassed.
-Everyone else is turned away — including in a group with `/mention-off`.
+a `guest`: it is told to weigh what a guest's request would actually do, and to
+ask the owner in the chat first when that is risky — changing things on the
+owner's behalf, running a guest's code, or exposing private information. That is
+guidance to the model, not a sandbox — the session still runs with permissions
+bypassed. Everyone else is turned away — including in a group with
+`/mention-off`.
+
+Those words are a general principle, and deliberately so. To hold a guest to
+something more specific — files that are never to be read out, hosts never to be
+named — write it in your own `~/.claude/CLAUDE.md`: every session loads that
+file at startup, a resumed one included, so a rule added there applies at once
+rather than from the next new session onwards.
 
 ### Your own slash commands
 

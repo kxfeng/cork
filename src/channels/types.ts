@@ -136,9 +136,13 @@ export interface Channel {
   readonly name: string;
   start(dispatcher: Dispatcher): Promise<void>;
   stop(): Promise<void>;
-  /** The bot's own name and id on this channel, once known. Handed to each
-   * new session so the model can tell which @ in a message is aimed at it. */
-  botIdentity?(): { name: string; openId: string } | undefined;
+  /** The bot's own name and id on this channel, once known, plus the primary
+   * owner it works for. Handed to each new session so the model can tell which
+   * @ in a message is aimed at it, and whose go-ahead a guest's request needs.
+   * `owner.name` is "" when nothing has looked that id up yet. */
+  botIdentity?():
+    | { name: string; openId: string; owner?: { name: string; openId: string } }
+    | undefined;
   /** Grow or shrink the list of senders who may talk to the bot without
    * commanding it, persisting the change. Absent where the channel has none. */
   updateAllows?(add: string[], remove: string[]): AllowsChange;

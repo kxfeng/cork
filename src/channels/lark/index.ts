@@ -38,6 +38,7 @@ import {
   mentionPrefix,
 } from "./card.js";
 import { usableAtTargets } from "./mentions.js";
+import { cachedName } from "./names.js";
 import { scanImages, escapeSkipped, buildSegments } from "./markdown.js";
 import { createEventDispatcher, clearStaleBuffers } from "./events.js";
 
@@ -475,8 +476,24 @@ export class LarkChannel implements Channel {
     return larkGetBotName(this.client, openId);
   }
 
-  botIdentity(): { name: string; openId: string } | undefined {
-    return this.botOpenId ? { name: this.botName, openId: this.botOpenId } : undefined;
+  /**
+   * Who the bot is, and who it works for.
+   *
+   * `owner` is `owners[0]` — the config's first entry, the one the bot can
+   * name when it has to say whose go-ahead it is waiting for. Its name comes
+   * from the name cache only: this is called while a session starts, so it
+   * cannot wait on a lookup, and an id alone still identifies the owner.
+   */
+  botIdentity():
+    | { name: string; openId: string; owner?: { name: string; openId: string } }
+    | undefined {
+    if (!this.botOpenId) return undefined;
+    const ownerId = this.config.owners[0];
+    return {
+      name: this.botName,
+      openId: this.botOpenId,
+      ...(ownerId ? { owner: { name: cachedName(ownerId), openId: ownerId } } : {}),
+    };
   }
 
   /**

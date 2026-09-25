@@ -34,6 +34,28 @@ export function clearNameCache(): void {
   cache.clear();
 }
 
+/**
+ * The name already in the cache for an open id, or "" — never a request.
+ *
+ * For callers that cannot wait and cannot fail: the pane's environment is
+ * built while a session starts, and a lookup there would put a network call in
+ * front of every start. Age is not checked, unlike `lookupName`: a display
+ * name from an hour ago still names the same person, and the alternative here
+ * is no name at all.
+ *
+ * Without a `kind` every key the cache may hold the id under is tried, since
+ * whoever cached it knew something this caller does not.
+ */
+export function cachedName(openId: string, kind?: NameKind): string {
+  if (!openId) return "";
+  const keys = kind ? [`${kind}:${openId}`] : [`user:${openId}`, `any:${openId}`, `bot:${openId}`];
+  for (const key of keys) {
+    const hit = cache.get(key);
+    if (hit?.name) return hit.name;
+  }
+  return "";
+}
+
 /** The name for an open id, or "" when no API knows it. */
 export async function lookupName(
   src: NameSource,
