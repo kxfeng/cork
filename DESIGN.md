@@ -136,6 +136,7 @@ Two lists, both of Feishu `open_id`s in `config.jsonc`:
 - **`channels.lark.allows`** — may talk to the bot, but not command it: a `/…` from them reaches the model as plain text. Grown by `/allow @someone` (owners, in chat — written in place with `jsonc-parser`, comments kept, live at once) or `cork lark allow <open_id>` (needs `cork restart`). Other bots belong here.
 - Whether a message may run a command depends on nothing but `owners` — not on the sender being a person or a bot.
 - Everyone else is refused, `/mention-off` or not: identity is checked before addressing.
+- The model sees which is which: every message carries `role="owner"` or `role="guest"`, and the instructions say a guest's request that changes the machine, a repository, configuration or credentials, reveals secrets, or publishes outside the chat needs the owner's go-ahead in the chat first. This only tells the model whose authority counts — a session runs with permissions bypassed, so a persuaded model can still act; real isolation would need a separate, restricted session.
 - If `owners` is empty, the bot refuses everyone and tells them how to add themselves to `owners`.
 
 **Private chat (P2P):**
@@ -202,7 +203,7 @@ An MCP server that runs inside Claude Code, bridging Claude Code ↔ Cork daemon
 - `CORK_CHANNEL_NAME` — which platform the session replies to
 - `CORK_BOT_NAME` / `CORK_BOT_OPEN_ID` — this bot's own name and open id, written into the instructions ("You are XiaoK on Lark, open id ou_…") so the model can tell which @ is aimed at it. Omitted while the id is unknown
 
-**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
+**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), `role` (`owner`, or `guest` for someone on `allows`), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
 
 **MCP Tool:**
 ```typescript

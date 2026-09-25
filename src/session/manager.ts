@@ -453,6 +453,26 @@ function shellQuoted(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
 }
 
+/** The attributes of the `<channel>` tag the model reads a message in. */
+export function channelMeta(message: IncomingMessage): Record<string, string> {
+  return {
+    chatId: message.chatId,
+    senderId: message.senderId,
+    messageId: message.messageId,
+    // Omitted rather than blank when unresolved — an empty attribute would
+    // read as "this message has no sender".
+    ...(message.senderName ? { sender: message.senderName } : {}),
+    ...(message.mentionsYou === undefined
+      ? {}
+      : { mentionYou: String(message.mentionsYou) }),
+    ...(message.mentions?.length ? { mentions: formatMentions(message.mentions) } : {}),
+    // On every message, owners' included, so a missing attribute is never read
+    // as either. "guest" rather than the config's "allows": the word has to
+    // tell the model how to treat the speaker, not how they got in.
+    role: message.fromOwner === false ? "guest" : "owner",
+  };
+}
+
 /**
  * `mentions` as the channel tag carries it: `CoKo=ou_93…; 张三(测试)=ou_11…`.
  *
@@ -903,20 +923,7 @@ export class SessionManager extends EventEmitter {
     const udsMsg: QueuedMessage = {
       chatId: message.chatId,
       content: message.text,
-      meta: {
-        chatId: message.chatId,
-        senderId: message.senderId,
-        messageId: message.messageId,
-        // Omitted rather than blank when unresolved — an empty attribute would
-        // read as "this message has no sender".
-        ...(message.senderName ? { sender: message.senderName } : {}),
-        ...(message.mentionsYou === undefined
-          ? {}
-          : { mentionYou: String(message.mentionsYou) }),
-        ...(message.mentions?.length
-          ? { mentions: formatMentions(message.mentions) }
-          : {}),
-      },
+      meta: channelMeta(message),
     };
 
     switch (session.state) {

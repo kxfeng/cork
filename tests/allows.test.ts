@@ -177,6 +177,17 @@ describe("the mentions attribute", () => {
   });
 });
 
+describe("the role attribute", () => {
+  it("names a guest as one, and everyone else as the owner", async () => {
+    const { channelMeta } = await import("../src/session/manager.js");
+    const base = { chatId: "oc_1", senderId: "ou_x", messageId: "om_1" } as never;
+    expect(channelMeta({ ...(base as object), fromOwner: false } as never).role).toBe("guest");
+    expect(channelMeta({ ...(base as object), fromOwner: true } as never).role).toBe("owner");
+    // A channel with no owner/guest split (Telegram) admits owners only.
+    expect(channelMeta(base).role).toBe("owner");
+  });
+});
+
 describe("the bot's identity", () => {
   it("reaches the pane quoted, and is left out while unknown", async () => {
     const { SessionManager } = await import("../src/session/manager.js");

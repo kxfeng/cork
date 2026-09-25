@@ -91,8 +91,11 @@ Send these from Lark — they are handled by the daemon, not by Claude:
 | `/allow @someone …` / `/disallow @someone …` | Add the people or bots you @mention to the `allows` list, or take them off — cork answers at once, no restart |
 
 Only **owners** can run these. Someone on the **allows** list can talk to the
-bot, but a `/…` from them reaches Claude as plain text. Everyone else is turned
-away — including in a group with `/mention-off`.
+bot, but a `/…` from them reaches Claude as plain text, and Claude sees them as
+a `guest`: it is told to get the owner's go-ahead before acting on a guest's
+request to change the machine, a repo, config or credentials. That is guidance
+to the model, not a sandbox — the session still runs with permissions bypassed.
+Everyone else is turned away — including in a group with `/mention-off`.
 
 ### Your own slash commands
 
