@@ -317,7 +317,11 @@ cork start --foreground # Run in foreground (interactive, for debugging)
 **launchd configuration:**
 - `KeepAlive: true` — auto-restart on crash
 - `RunAtLoad: true` — auto-start on login
-- Preserves `PATH` and `HOME` environment variables
+- `HOME`, and a minimal `PATH` (see below)
+
+**PATH.** Every pane inherits the daemon's environment — tmux, claude, and each command claude runs — and launchd/systemd start the daemon from a bare one. The daemon therefore asks the user's login shell for PATH each time it starts (`login-path.ts`): `<shell> -ilc` printing PATH between markers, the shell being `$SHELL`, else the account's shell, else `/bin/sh`, with a 5 s timeout; on failure it keeps the inherited PATH and logs a warning. The unit / plist carries only enough to start cork — the directory of the node that ran `cork start`, and the system dirs — and `ExecStart` is the `cork` found on the login shell's PATH.
+
+It used to copy the PATH of whoever ran `cork start`/`cork restart` into the unit, which made the daemon's PATH depend on how it was started: `systemd-run cork restart` wrote systemd's bare PATH, and the next daemon could not find claude. Now a terminal, systemd-run, cron or a Claude session all produce the same daemon, and a change to the shell's rc files takes effect on `cork restart`.
 
 ### 4.3 `cork stop`
 

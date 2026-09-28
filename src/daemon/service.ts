@@ -2,6 +2,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { paths } from "../config/paths.js";
+import { minimalPath, resolveLoginPath } from "./login-path.js";
 
 /**
  * Where the cork daemon's "run me in the background, keep me alive, start me at
@@ -34,10 +35,16 @@ export type DaemonState = {
 };
 
 /** Absolute path to the cork executable, for an ExecStart / ProgramArguments that
- *  the service manager launches with no shell PATH resolution of its own. */
+ *  the service manager launches with no shell PATH resolution of its own. Looked
+ *  up on the login shell's PATH rather than the caller's, so a caller with a bare
+ *  environment (systemd-run, cron) still finds the same shim a terminal would. */
 function corkBin(): string {
+  const PATH = resolveLoginPath() ?? process.env.PATH ?? "";
   try {
-    return execSync("which cork", { encoding: "utf-8" }).trim();
+    return execSync("command -v cork", {
+      encoding: "utf-8",
+      env: { ...process.env, PATH },
+    }).trim();
   } catch {
     return process.argv[1];
   }
@@ -78,7 +85,7 @@ export function otherCorkProcesses(): { pid: number; command: string }[] {
 
 // ─────────────────────────────── macOS: launchd ───────────────────────────────
 
-function generatePlist(): string {
+export function generatePlist(): string {
   const bin = corkBin();
 
   // launchd starts the daemon from a bare environment — it never sources the
@@ -116,7 +123,7 @@ function generatePlist(): string {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${process.env.PATH || "/usr/bin:/bin:/usr/local/bin"}</string>
+    <string>${minimalPath()}</string>
     <key>HOME</key>
     <string>${process.env.HOME || ""}</string>
 ${extraCaEnv}  </dict>
@@ -191,14 +198,14 @@ function systemdUserOk(): boolean {
   }
 }
 
-function generateUnit(): string {
+export function generateUnit(): string {
   const bin = corkBin();
-  // systemd --user starts from a minimal environment; give the daemon (and every
-  // tool it shells out to — node, claude, tmux) the PATH of the shell that ran
-  // `cork start`, plus HOME, and NODE_EXTRA_CA_CERTS when set. Values are quoted so
-  // a PATH with an unusual entry cannot break the line.
+  // Only enough PATH to start cork: the daemon asks the login shell for the real
+  // one when it starts (see login-path.ts), so nothing here depends on the shell
+  // that ran `cork start`. HOME, and NODE_EXTRA_CA_CERTS when set. Values are
+  // quoted so an unusual entry cannot break the line.
   const env: string[] = [
-    `Environment="PATH=${process.env.PATH || "/usr/bin:/bin:/usr/local/bin"}"`,
+    `Environment="PATH=${minimalPath()}"`,
     `Environment="HOME=${process.env.HOME || ""}"`,
   ];
   if (process.env.NODE_EXTRA_CA_CERTS) {
