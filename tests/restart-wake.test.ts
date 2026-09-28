@@ -6,8 +6,8 @@ import path from "node:path";
 /**
  * A restart kills every pane. Sessions that were in the middle of something are
  * brought back and asked whether they have work to pick up: the ones `cork
- * restart` found busy just before, and any whose transcript was written in the
- * last minute when the daemon came up.
+ * restart` found busy just before, and any whose last user/assistant row is
+ * under a minute old when the daemon comes up.
  */
 
 const { tmux } = vi.hoisted(() => ({ tmux: { panes: new Set<string>() } }));
@@ -62,9 +62,22 @@ function session(
   const tdir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(tdir, { recursive: true });
   const t = path.join(tdir, `${sid}.jsonl`);
-  fs.writeFileSync(t, "{}\n");
-  const at = (Date.now() - opts.writtenAgo) / 1000;
-  fs.utimesSync(t, at, at);
+  // The conversation's last row, then what claude writes on its way out when a
+  // restart kills it: rows with no timestamp, which freshen the file itself.
+  const spoke = new Date(Date.now() - opts.writtenAgo).toISOString();
+  fs.writeFileSync(
+    t,
+    [
+      { type: "user", timestamp: spoke, message: { role: "user", content: "hi" } },
+      { type: "assistant", timestamp: spoke, message: { role: "assistant", content: [] } },
+      { type: "system", timestamp: new Date().toISOString(), subtype: "turn_duration" },
+      { type: "last-prompt" },
+      { type: "cost-state" },
+      { type: "bridge-session" },
+    ]
+      .map((r) => JSON.stringify(r))
+      .join("\n") + "\n"
+  );
   tmux.panes.add(`cork_${key}`);
 }
 
@@ -173,5 +186,17 @@ describe("waking after a start", () => {
     expect(mgr.wakeInterrupted()).toEqual(["fresh"]);
     await new Promise((r) => setTimeout(r, 10));
     expect(sent).toEqual([]);
+  });
+
+  it("does not wake an idle session whose file only its own exit freshened", async () => {
+    // Every transcript in these tests ends in exit rows written just now; a
+    // session that last spoke minutes ago must still count as quiet.
+    session("idle", { writtenAgo: 9 * 60_000 });
+    const { mod, mgr } = await manager();
+    const t = fs.readdirSync(path.join(home, ".claude", "projects"))[0];
+    const file = path.join(home, ".claude", "projects", t, "sid-idle.jsonl");
+    expect(Date.now() - fs.statSync(file).mtimeMs).toBeLessThan(5000);
+    expect(mod.lastConversationAt(ws, "sid-idle")).toBeLessThan(Date.now() - 8 * 60_000);
+    expect(mgr.wakeInterrupted()).toEqual([]);
   });
 });

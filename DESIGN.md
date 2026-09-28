@@ -350,7 +350,7 @@ It arrives like a chat message, so the Stop hook expects a reply; the empty repl
 Which sessions:
 
 - **Busy when `cork restart` ran.** Before restarting, `cork restart` reads claude's own status for every live pane (`~/.claude/sessions/<pid>.json`, the same source idle stop uses) and writes the ones that are not `idle` — mid-turn, waiting on a dialog, running a background shell or monitor — to `~/.cork/wake-on-start.json`. A long command or a quiet background job leaves the transcript untouched for many minutes, so only the status catches these, and it has to be read then: the file goes when its process does. The daemon uses a record at most 2 minutes old, once.
-- **Transcript written in the last minute** when the daemon starts, however it was stopped: work in flight when it was killed or crashed, and a turn that had only just ended — the usual shape of a session that restarts cork and has something left to check.
+- **Spoke in the last minute** when the daemon starts, however it was stopped: the newest `user` or `assistant` row with a timestamp is under a minute old — every model output and tool call, every tool result, message and notification is one. That catches work in flight when the daemon was killed or crashed, and a turn that had only just ended — the usual shape of a session that restarts cork and has something left to check. Not the file's mtime: claude writes bookkeeping rows on its way out (`last-prompt`, `cost-state`, `bridge-session`, no timestamp), so killing an idle pane freshens its transcript, and every live session used to be woken on every restart.
 
 Autopilot runs are skipped: `resumeAutopilots` and their watcher already carry them on. A daemon killed outside `cork restart` wakes only the second kind.
 

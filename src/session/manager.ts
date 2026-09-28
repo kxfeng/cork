@@ -19,6 +19,7 @@ import {
 import { resolveWorkspacePath } from "../config/loader.js";
 import {
   transcriptPath,
+  findLastTranscriptRow,
   lastTranscriptModel,
   formatModelName,
   readCompactOutcome,
@@ -509,8 +510,27 @@ export const RESTART_WAKE_TEXT =
   "through the reply tool as usual. If there is nothing to continue, call the " +
   "reply tool with empty text — nothing is sent to the chat.";
 
-/** A transcript written this recently when the daemon starts was cut off mid-work. */
+/** A session that spoke this recently when the daemon starts was cut off mid-work. */
 export const RESTART_RECENT_WRITE_MS = 60_000;
+
+/**
+ * When the session last took part in the conversation: the newest `user` or
+ * `assistant` row with a timestamp — every model output and tool call, every
+ * tool result, message and notification is one. Not the file's mtime: claude
+ * writes bookkeeping rows as it exits (`last-prompt`, `cost-state`,
+ * `bridge-session`…), so a restart that kills an idle pane freshens every live
+ * transcript, and every session used to be woken.
+ */
+export function lastConversationAt(workspace: string, sessionId: string): number {
+  return (
+    findLastTranscriptRow(workspace, sessionId, (row) => {
+      const r = row as { type?: unknown; timestamp?: unknown };
+      if (r.type !== "user" && r.type !== "assistant") return null;
+      const at = typeof r.timestamp === "string" ? Date.parse(r.timestamp) : NaN;
+      return Number.isFinite(at) ? at : null;
+    }) ?? 0
+  );
+}
 /** How old a `cork restart` record may be and still count. */
 export const RESTART_RECORD_MAX_AGE_MS = 2 * 60_000;
 
@@ -2026,7 +2046,7 @@ export class SessionManager extends EventEmitter {
   /**
    * After the daemon starts, bring back the chat sessions a restart cut off, and
    * ask each whether it has work to pick up: the ones `cork restart` recorded as
-   * busy, and any whose transcript was written in the last minute — work in
+   * busy, and any that took part in the conversation in the last minute — work in
    * flight when the daemon was killed some other way, or a turn that had only
    * just ended. Autopilot runs are left to resumeAutopilots and their watcher.
    *
@@ -2036,8 +2056,8 @@ export class SessionManager extends EventEmitter {
   wakeInterrupted(now = Date.now()): string[] {
     const keys = new Set(takeRestartRecord(now));
     for (const { key, meta } of listSessions()) {
-      const written = fileMtime(transcriptPath(meta.workspace, meta.sessionId));
-      if (written && now - written < RESTART_RECENT_WRITE_MS) keys.add(key);
+      const spoke = lastConversationAt(meta.workspace, meta.sessionId);
+      if (spoke && now - spoke < RESTART_RECENT_WRITE_MS) keys.add(key);
     }
     const woken: string[] = [];
     for (const key of keys) {
