@@ -319,9 +319,15 @@ cork start --foreground # Run in foreground (interactive, for debugging)
 - `RunAtLoad: true` — auto-start on login
 - `HOME`, and a minimal `PATH` (see below)
 
-**PATH.** Every pane inherits the daemon's environment — tmux, claude, and each command claude runs — and launchd/systemd start the daemon from a bare one. The daemon therefore asks the user's login shell for PATH each time it starts (`login-path.ts`): `<shell> -ilc` printing PATH between markers, the shell being `$SHELL`, else the account's shell, else `/bin/sh`, with a 5 s timeout; on failure it keeps the inherited PATH and logs a warning. The unit / plist carries only enough to start cork — the directory of the node that ran `cork start`, and the system dirs — and `ExecStart` is the `cork` found on the login shell's PATH.
+**PATH.** A pane inherits the environment it is started with — claude, and every command claude runs: Claude Code does not re-read the user's shell rc for its Bash tool (measured: a claude started with `PATH=/usr/bin:/bin` runs its commands with exactly that). launchd/systemd start the daemon from a bare environment, so cork gives each pane its own PATH:
 
-It used to copy the PATH of whoever ran `cork start`/`cork restart` into the unit, which made the daemon's PATH depend on how it was started: `systemd-run cork restart` wrote systemd's bare PATH, and the next daemon could not find claude. Now a terminal, systemd-run, cron or a Claude session all produce the same daemon, and a change to the shell's rc files takes effect on `cork restart`.
+- **Per pane** (`panePath`): read from the user's login shell as the pane starts — `<shell> -ilc` printing PATH between markers, stdin closed, stderr dropped, 5 s timeout; the shell is `$SHELL`, else the account's shell, else `/bin/sh` — and put on the claude command line as `PATH='…'`. Like a new terminal tab: a changed rc or a new node version reaches the next session with no restart, and nothing the rc prints lands in the pane where cork reads dialogs. Measured at 20–100 ms, no failures in 250 runs across Linux and macOS.
+- **The unit / plist** carry a small fixed PATH (`minimalPath`): the dir of `node` and of `claude` as found on the login shell's PATH (symlinks not followed, so Homebrew's `/opt/homebrew/bin` rather than a versioned Cellar dir), then the system dirs. `ExecStart` is the `cork` found there. If a pane's lookup ever fails it falls back to this, logged but not announced: claude still starts, and a model that meets `command not found` finds the tool itself (measured with go and bun) — the one thing it cannot recover from is claude missing.
+- **No claude, no pane:** if `claude` is not on the PATH a pane would get, the pane is not started and the chat is told why, instead of a start that can only time out while the daemon looks healthy.
+
+Only `cork start` writes the unit / plist. `cork restart` leaves them as they are and says so when they differ from what this cork would write (a newer template, or cork or claude moved); `cork stop && cork start` refreshes them.
+
+It used to copy the PATH of whoever ran `cork start` or `cork restart` into the unit — and restart rewrote the unit every time — so the daemon's PATH depended on how cork was started: `systemd-run cork restart` wrote systemd's bare PATH, and the next daemon could not find claude.
 
 ### 4.3 `cork stop`
 

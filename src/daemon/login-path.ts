@@ -1,21 +1,25 @@
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 /**
- * The PATH the daemon, and everything under it, runs with.
+ * The PATH a session runs with, and the PATH the daemon itself runs with.
  *
- * launchd and systemd start the daemon from a bare environment, and every pane
- * inherits the daemon's: tmux, claude, and each command claude runs. So the
- * daemon needs the user's real PATH, or claude is not found and a session's
- * tools are missing.
+ * launchd and systemd start the daemon from a bare environment, and a pane
+ * inherits what it is given: claude, and every command claude runs — Claude
+ * Code does not re-read the user's shell rc for its Bash tool (measured: a
+ * claude started with PATH=/usr/bin:/bin runs its commands with exactly that).
  *
- * It used to be copied into the unit from whoever ran `cork start`, which made
- * it depend on how cork was started: a terminal gave the full PATH, but
- * `systemd-run cork restart` gave systemd's bare one and wrote that in, and the
- * next daemon could not find claude. Now the unit carries only enough to start
- * cork, and the daemon asks the user's login shell for PATH itself each time it
- * starts — the same answer from a terminal, systemd-run, cron or a session.
+ * So each pane is started with PATH read from the user's login shell at that
+ * moment (resolveLoginPath), the way a new terminal tab would get it: a changed
+ * rc or a new node version reaches the next session with no restart. The unit /
+ * plist carries only a small fixed PATH (minimalPath) — enough to start cork and
+ * to find claude should a shell ever fail to answer.
+ *
+ * It used to copy the PATH of whoever ran `cork start`/`cork restart` into the
+ * unit, which made everything depend on how cork was started: `systemd-run cork
+ * restart` wrote systemd's bare PATH, and the next daemon could not find claude.
  */
 
 const START = "__CORK_PATH_START__";
@@ -70,10 +74,36 @@ export function resolveLoginPath(
   return value.includes("/") ? value : null;
 }
 
-/** Enough to start cork from a unit: the node running this, and the system dirs. */
-export function minimalPath(): string {
+/** Where `cmd` would run from on `PATH`, symlinks left as they are, or null. */
+export function which(cmd: string, PATH: string): string | null {
+  for (const dir of PATH.split(":")) {
+    if (!dir) continue;
+    const file = path.join(dir, cmd);
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      if (fs.statSync(file).isFile()) return file;
+    } catch {
+      // Not here.
+    }
+  }
+  return null;
+}
+
+/**
+ * The unit's / plist's PATH: the node that starts cork, claude, and the system
+ * dirs. Both are looked up on the login shell's PATH without following
+ * symlinks, so a Homebrew node comes out as /opt/homebrew/bin rather than a
+ * versioned Cellar dir that the next upgrade removes. claude is here because a
+ * session whose own PATH lookup failed must still be able to start it; every
+ * other tool it can find on its own.
+ */
+export function minimalPath(loginPath: string | null = resolveLoginPath()): string {
+  const search = loginPath ?? process.env.PATH ?? "";
+  const node = which("node", search);
+  const claude = which("claude", search);
   const dirs = [
-    path.dirname(process.execPath),
+    node ? path.dirname(node) : path.dirname(process.execPath),
+    ...(claude ? [path.dirname(claude)] : []),
     ...(process.platform === "darwin" ? ["/opt/homebrew/bin"] : []),
     "/usr/local/bin",
     "/usr/bin",

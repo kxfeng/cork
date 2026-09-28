@@ -6,6 +6,7 @@ import {
   loginShell,
   minimalPath,
   resolveLoginPath,
+  which,
   withEntries,
 } from "../src/daemon/login-path.js";
 
@@ -81,29 +82,62 @@ describe("loginShell", () => {
   });
 });
 
+/** A dir holding executables with these names. */
+function binDir(name: string, cmds: string[]): string {
+  const d = path.join(dir, name);
+  fs.mkdirSync(d, { recursive: true });
+  for (const c of cmds) fs.writeFileSync(path.join(d, c), "#!/bin/sh\n", { mode: 0o755 });
+  return d;
+}
+
+describe("which", () => {
+  it("finds the first executable on PATH, without following symlinks", () => {
+    const a = binDir("a", ["tool"]);
+    const b = binDir("b", ["tool", "other"]);
+    fs.symlinkSync(path.join(b, "other"), path.join(a, "linked"));
+    expect(which("tool", `${a}:${b}`)).toBe(path.join(a, "tool"));
+    expect(which("linked", `${a}:${b}`)).toBe(path.join(a, "linked"));
+    expect(which("missing", `${a}:${b}`)).toBeNull();
+  });
+
+  it("skips a file that is not executable", () => {
+    const a = binDir("a", []);
+    fs.writeFileSync(path.join(a, "tool"), "", { mode: 0o644 });
+    expect(which("tool", a)).toBeNull();
+  });
+});
+
 describe("the unit's PATH", () => {
-  it("is the node running cork and the system dirs, never the caller's PATH", () => {
-    process.env.PATH = "/caller/only/bin:/usr/bin";
-    const p = minimalPath();
-    expect(p.split(":")[0]).toBe(path.dirname(process.execPath));
+  it("is node's dir, claude's dir and the system dirs — nothing else the caller has", () => {
+    const node = binDir("node-bin", ["node"]);
+    const claude = binDir("claude-bin", ["claude"]);
+    const extra = binDir("extra", ["go"]);
+    const p = minimalPath(`${extra}:${node}:${claude}:/usr/bin`).split(":");
+    expect(p[0]).toBe(node);
+    expect(p[1]).toBe(claude);
     expect(p).toContain("/usr/bin");
-    expect(p).not.toContain("/caller/only/bin");
+    expect(p).not.toContain(extra);
+  });
+
+  it("falls back to the running node when the login PATH has none", () => {
+    const p = minimalPath(binDir("empty", []));
+    expect(p.split(":")[0]).toBe(path.dirname(process.execPath));
   });
 
   it("is what the systemd unit is written with", async () => {
-    process.env.PATH = "/caller/only/bin:/usr/bin";
+    const login = `${binDir("node-bin", ["node", "cork"])}:${binDir("claude-bin", ["claude"])}:/usr/bin`;
     const { generateUnit } = await import("../src/daemon/service.js");
-    const unit = generateUnit();
-    expect(unit).toContain(`Environment="PATH=${minimalPath()}"`);
-    expect(unit).not.toContain("/caller/only/bin");
+    const unit = generateUnit(login);
+    expect(unit).toContain(`Environment="PATH=${minimalPath(login)}"`);
+    expect(unit).toContain(`ExecStart=${path.join(dir, "node-bin", "cork")} start --daemon`);
   });
 
   it("is what the launchd plist is written with", async () => {
-    process.env.PATH = "/caller/only/bin:/usr/bin";
+    const login = `${binDir("node-bin", ["node", "cork"])}:${binDir("claude-bin", ["claude"])}:/usr/bin`;
     const { generatePlist } = await import("../src/daemon/service.js");
-    const plist = generatePlist();
-    expect(plist).toContain(`<string>${minimalPath()}</string>`);
-    expect(plist).not.toContain("/caller/only/bin");
+    const plist = generatePlist(login);
+    expect(plist).toContain(`<string>${minimalPath(login)}</string>`);
+    expect(plist).toContain(`<string>${path.join(dir, "node-bin", "cork")}</string>`);
   });
 });
 

@@ -14,7 +14,6 @@ import { TelegramChannel } from "../channels/telegram/index.js";
 import { killCorkTmuxServer } from "../session/tmux.js";
 import type { Channel } from "../channels/types.js";
 import { enableLogFile, getLogger } from "../logger.js";
-import { resolveLoginPath, withEntries } from "../daemon/login-path.js";
 
 /**
  * On first run, write the web terminal's config out so it is visible and
@@ -84,18 +83,6 @@ export async function startForeground(): Promise<void> {
 
   enableLogFile();
   const logger = getLogger("start");
-
-  // Before anything is spawned: every pane inherits this. What the unit gave us
-  // is kept on the end, so the node running cork stays reachable either way.
-  const loginPath = resolveLoginPath();
-  if (loginPath) {
-    process.env.PATH = withEntries(loginPath, process.env.PATH ?? "");
-    logger.info("using the login shell's PATH", { PATH: process.env.PATH });
-  } else {
-    logger.warn("could not read PATH from the login shell; keeping the inherited one", {
-      PATH: process.env.PATH,
-    });
-  }
 
   const config = await seedWebConfig(loadConfig());
 

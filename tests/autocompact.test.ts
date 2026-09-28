@@ -35,11 +35,17 @@ let dir: string;
 async function makeManager(autoCompactPercent?: number) {
   vi.resetModules(); // paths.ts reads CORK_DIR at import time
   const { SessionManager } = await import("../src/session/manager.js");
-  return new SessionManager({
+  const mgr = new SessionManager({
     defaultWorkspace: WS,
     claude: { permissionMode: "default", extraArgs: [], autoCompactPercent },
     channels: {},
   } as never) as any;
+  // A PATH with a claude on it, so these tests do not depend on this machine's.
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "claude"), "#!/bin/sh\n", { mode: 0o755 });
+  mgr.panePath = () => `${bin}:/usr/bin`;
+  return mgr;
 }
 
 /** The `tmux new-session` command spawnPane would run. */
@@ -122,5 +128,20 @@ describe("default config", () => {
       },
     };
     expect(merged.claude.autoCompactPercent).toBe(75);
+  });
+});
+
+describe("the pane's PATH", () => {
+  it("starts claude with the PATH read for this pane", async () => {
+    const mgr = await makeManager();
+    expect(paneCommand(mgr, META)).toContain(`PATH='${path.join(dir, "bin")}:/usr/bin' `);
+  });
+
+  it("refuses to start a pane whose PATH has no claude", async () => {
+    const mgr = await makeManager();
+    mgr.panePath = () => "/nowhere";
+    execCalls.length = 0;
+    expect(() => mgr.spawnPane("sess-key", META, [])).toThrow(/claude was not found on PATH/);
+    expect(execCalls.find((c) => c.includes("new-session"))).toBeUndefined();
   });
 });

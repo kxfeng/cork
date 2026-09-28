@@ -68,7 +68,7 @@ tmux attach -t cork_lark:<chatId>
 | `cork start`      | Start the daemon under the platform service manager — `launchd` (macOS) or `systemd --user` (Linux); auto‑restarts and runs at login/boot |
 | `cork start --foreground` | Run in the current shell (for debugging)              |
 | `cork stop`       | Stop the daemon                                               |
-| `cork restart`    | `stop` + `start`; sessions it cut off mid-work are woken to carry on |
+| `cork restart`    | Restart the daemon (leaves the service definition alone — `cork stop && cork start` refreshes it); sessions it cut off mid-work are woken to carry on |
 | `cork status`     | Show daemon state, socket, and how many sessions are live     |
 | `cork session list` | List live sessions: chat, workspace, Claude context, `tmux attach` command |
 
@@ -168,7 +168,7 @@ All state lives under `~/.cork/`:
 └── logs/               # cork.log (+ launchd stdout/stderr on macOS; journald on Linux)
 ```
 
-`~/.cork/env` is the easy way to pass things like proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise. The file is read when cork brings up its tmux server, which every pane is forked from, so **changes take effect on `cork restart`** — the same rule `config.json` follows. The daemon takes its `PATH` from your login shell (`$SHELL -ilc`) each time it starts, so a directory added in your shell rc files reaches Claude after `cork restart` too.
+`~/.cork/env` is the easy way to pass things like proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise. The file is read when cork brings up its tmux server, which every pane is forked from, so **changes take effect on `cork restart`** — the same rule `config.json` follows. Each session takes its `PATH` from your login shell (`$SHELL -ilc`) when it starts, so a directory added in your shell rc files reaches the next session without a restart.
 
 Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the session is created and keeps it across `--resume`; an env override is applied on every launch instead, so changing it silently rewrites the model of every existing session the next time cork restarts them — permanently, since removing the variable later does not put them back. Set a default model in `~/.claude/settings.json` instead, which is read only when a session is created.
 

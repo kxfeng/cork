@@ -1,8 +1,9 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { paths } from "../config/paths.js";
-import { minimalPath, resolveLoginPath } from "./login-path.js";
+import { minimalPath, resolveLoginPath, which } from "./login-path.js";
 
 /**
  * Where the cork daemon's "run me in the background, keep me alive, start me at
@@ -38,16 +39,8 @@ export type DaemonState = {
  *  the service manager launches with no shell PATH resolution of its own. Looked
  *  up on the login shell's PATH rather than the caller's, so a caller with a bare
  *  environment (systemd-run, cron) still finds the same shim a terminal would. */
-function corkBin(): string {
-  const PATH = resolveLoginPath() ?? process.env.PATH ?? "";
-  try {
-    return execSync("command -v cork", {
-      encoding: "utf-8",
-      env: { ...process.env, PATH },
-    }).trim();
-  } catch {
-    return process.argv[1];
-  }
+function corkBin(loginPath: string | null): string {
+  return which("cork", loginPath ?? process.env.PATH ?? "") ?? process.argv[1];
 }
 
 /**
@@ -85,8 +78,8 @@ export function otherCorkProcesses(): { pid: number; command: string }[] {
 
 // ─────────────────────────────── macOS: launchd ───────────────────────────────
 
-export function generatePlist(): string {
-  const bin = corkBin();
+export function generatePlist(loginPath: string | null = resolveLoginPath()): string {
+  const bin = corkBin(loginPath);
 
   // launchd starts the daemon from a bare environment — it never sources the
   // user's shell profile. Carry NODE_EXTRA_CA_CERTS across if the shell running
@@ -123,7 +116,7 @@ export function generatePlist(): string {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>${minimalPath()}</string>
+    <string>${minimalPath(loginPath)}</string>
     <key>HOME</key>
     <string>${process.env.HOME || ""}</string>
 ${extraCaEnv}  </dict>
@@ -198,14 +191,14 @@ function systemdUserOk(): boolean {
   }
 }
 
-export function generateUnit(): string {
-  const bin = corkBin();
-  // Only enough PATH to start cork: the daemon asks the login shell for the real
-  // one when it starts (see login-path.ts), so nothing here depends on the shell
-  // that ran `cork start`. HOME, and NODE_EXTRA_CA_CERTS when set. Values are
-  // quoted so an unusual entry cannot break the line.
+export function generateUnit(loginPath: string | null = resolveLoginPath()): string {
+  const bin = corkBin(loginPath);
+  // A small fixed PATH (see login-path.ts): each pane gets the user's full one
+  // when it starts, so nothing here depends on the shell that ran `cork start`.
+  // HOME, and NODE_EXTRA_CA_CERTS when set. Values are quoted so an unusual
+  // entry cannot break the line.
   const env: string[] = [
-    `Environment="PATH=${minimalPath()}"`,
+    `Environment="PATH=${minimalPath(loginPath)}"`,
     `Environment="HOME=${process.env.HOME || ""}"`,
   ];
   if (process.env.NODE_EXTRA_CA_CERTS) {
@@ -289,10 +282,8 @@ function systemdRestart(): void {
       "systemd user instance is not reachable (systemctl --user cannot connect)."
     );
   }
-  // Rewrite the unit so a moved cork binary / changed env is picked up, keep it
-  // enabled for boot, then (re)start to run the current build now.
-  writeUnit();
-  systemctlUser(`enable ${SYSTEMD_UNIT}`);
+  if (!fs.existsSync(paths.systemdUnit)) return systemdInstallStart();
+  warnIfStale(paths.systemdUnit, generateUnit());
   systemctlUser(`restart ${SYSTEMD_UNIT}`);
 }
 
@@ -350,15 +341,35 @@ export function teardown(): void {
   else systemdTeardown();
 }
 
-/** Stop and start again, rewriting the definition so a new build is picked up. */
+/**
+ * Restart the daemon without touching its unit / plist: only `cork start`
+ * writes those. The service manager does the stop and the start as one
+ * operation — systemctl restart, launchctl kickstart -k — so it completes even
+ * when the process asking is inside a pane the restart tears down, as a session
+ * restarting cork is. (On macOS it used to unload and load the plist itself,
+ * and died at the unload before it could load it again.) A new build needs no
+ * new unit: ExecStart points at the cork shim, which runs whatever is built.
+ */
 export function restart(): void {
   if (IS_MAC) {
-    launchdTeardown();
-    // Give launchd a moment to release the label and the daemon to release its
-    // UDS / log handles before relaunching.
-    execSync("sleep 0.5");
-    launchdInstallStart();
+    if (!fs.existsSync(paths.launchdPlist) || !launchdLoaded()) return launchdInstallStart();
+    warnIfStale(paths.launchdPlist, generatePlist());
+    execSync(`launchctl kickstart -k gui/${os.userInfo().uid}/${LAUNCHD_LABEL} 2>&1`);
   } else {
     systemdRestart();
   }
+}
+
+/** Say so when the installed definition is not what `cork start` would write
+ *  now — a newer template, or cork or claude moved — since restart keeps it. */
+function warnIfStale(file: string, wanted: string): void {
+  try {
+    if (fs.readFileSync(file, "utf-8") === wanted) return;
+  } catch {
+    return;
+  }
+  console.log(
+    `Note: ${file} differs from what this cork would install. ` +
+      "Run `cork stop && cork start` to refresh it."
+  );
 }

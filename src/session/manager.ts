@@ -37,6 +37,7 @@ import type { CorkConfig } from "../config/schema.js";
 import type { AllowsChange, IncomingMessage, MentionRef } from "../channels/types.js";
 import type { UdsServer, UdsMessage } from "../daemon/uds-server.js";
 import { paths } from "../config/paths.js";
+import { resolveLoginPath, which } from "../daemon/login-path.js";
 import { getLogger } from "../logger.js";
 import { TranscriptWatcher, type AutopilotHooks, type NotifyOptions } from "./transcript-watcher.js";
 import {
@@ -2625,7 +2626,32 @@ export class SessionManager extends EventEmitter {
    * resolveResume and buildClaudeArgs are their own methods. Throws if tmux
    * refuses; the caller decides what that means for the session.
    */
+  /**
+   * The PATH a new pane starts claude with: the login shell's, read now, as a
+   * new terminal tab would get it (see login-path.ts). Falls back to the
+   * daemon's own — the unit's small PATH, which still holds claude — logged but
+   * not announced: claude runs, and finds a missing tool itself when it needs
+   * one.
+   */
+  panePath(): string {
+    const resolved = resolveLoginPath();
+    if (resolved) return resolved;
+    logger.warn("could not read PATH from the login shell; starting claude with the daemon's", {
+      PATH: process.env.PATH,
+    });
+    return process.env.PATH ?? "";
+  }
+
   spawnPane(key: string, meta: SessionMeta, claudeArgs: string[]): void {
+    const PATH = this.panePath();
+    // Refuse rather than start a pane that can only time out: that failure
+    // said nothing anywhere but the log, while the daemon looked healthy.
+    if (!which("claude", PATH)) {
+      throw new Error(
+        "claude was not found on PATH — check that your shell rc still puts it " +
+          "there, or run `cork stop && cork start` to refresh cork's own PATH"
+      );
+    }
     // CORK_SESSION_KEY is passed via env, inherited by Claude → MCP subprocess
     // A locale is part of the pane's contract with everything Claude Code shells
     // out to. launchd starts the daemon without one, the tmux server inherits
@@ -2644,6 +2670,7 @@ export class SessionManager extends EventEmitter {
     // carries the channel: the channel MCP used to read it off the key prefix
     // and tell the model which platform it is replying to.
     const claudeCmd =
+      `PATH=${shellQuoted(PATH)} ` +
       `LANG='${locale}' LC_CTYPE='${locale}' ` +
       `CORK_SESSION_KEY='${key}' ` +
       `CORK_CHANNEL_NAME='${meta.channel ?? "lark"}' ` +
