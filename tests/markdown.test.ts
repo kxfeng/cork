@@ -237,7 +237,7 @@ describe("mentionPrefix", () => {
     // A sibling `at` element renders on the line above an `md` one — feishu
     // lays md out as a block. Inside the markdown it stays put.
     expect(mentionPrefix(["ou_1", "ou_2"])).toBe(
-      "<at id=ou_1></at> <at id=ou_2></at>\n\n"
+      '<at user_id="ou_1"></at> <at user_id="ou_2"></at>\n\n'
     );
   });
 

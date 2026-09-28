@@ -39,6 +39,11 @@ export function buildPostContentFromSegments(segments: PostSegment[]): string {
  * element. A sibling `at` element does not: feishu lays `md` out as a block, so
  * the mention lands on the line above it anyway.
  *
+ * `user_id="…"` — the form Lark documents for markdown, and the one the reply
+ * tool tells a Lark session to use mid-text. `id=…` works too: measured, both
+ * mention and notify alike (which id shape a reader sees on readback depends
+ * on the API it reads with, not on this).
+ *
  * It gets a line of its own, always. Sitting in front of the text it would push
  * whatever starts that line out of column one, and a heading or list item that
  * is no longer at the start of its line stops being one. Both verified in a
@@ -46,5 +51,5 @@ export function buildPostContentFromSegments(segments: PostSegment[]): string {
  */
 export function mentionPrefix(userIds: string[]): string {
   if (userIds.length === 0) return "";
-  return `${userIds.map((id) => `<at id=${id}></at>`).join(" ")}\n\n`;
+  return `${userIds.map((id) => `<at user_id="${id}"></at>`).join(" ")}\n\n`;
 }
