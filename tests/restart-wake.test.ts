@@ -80,11 +80,11 @@ async function manager() {
     claude: { permissionMode: "default", extraArgs: [] },
     channels: {},
   } as never) as any;
-  const sent: Array<{ key: string; chatId: string; text: string; senderId: string }> = [];
+  const sent: Array<{ key: string; chatId: string; text: string; senderId: string; origin: string }> = [];
   vi.spyOn(mgr, "ensureConnected").mockResolvedValue(true);
   vi.spyOn(mgr, "dispatchSystemMessage").mockImplementation(
-    (key: unknown, chatId: unknown, text: unknown, senderId: unknown) => {
-      sent.push({ key, chatId, text, senderId } as never);
+    (key: unknown, chatId: unknown, text: unknown, senderId: unknown, origin: unknown) => {
+      sent.push({ key, chatId, text, senderId, origin } as never);
       return true;
     }
   );
@@ -136,6 +136,8 @@ describe("waking after a start", () => {
     expect(mgr.wakeInterrupted().sort()).toEqual(["fresh", "job"]);
     await vi.waitFor(() => expect(sent).toHaveLength(2));
     expect(sent.map((s) => s.senderId)).toEqual(["cork:restart", "cork:restart"]);
+    // The message id is built from this, so it says where the message came from.
+    expect(sent.map((s) => s.origin)).toEqual(["cork-restart", "cork-restart"]);
     expect(sent[0].text).toBe(mod.RESTART_WAKE_TEXT);
     expect(sent.find((s) => s.key === "job")?.chatId).toBe("oc_job");
     expect(fs.existsSync(wakeFile())).toBe(false);

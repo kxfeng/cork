@@ -2046,7 +2046,9 @@ export class SessionManager extends EventEmitter {
       this.rememberId(key, meta);
       woken.push(key);
       void this.ensureConnected(key, SESSION_START_WAIT_MS).then((ok) => {
-        if (ok) this.dispatchSystemMessage(key, meta.chatId, RESTART_WAKE_TEXT, "cork:restart");
+        if (ok) {
+          this.dispatchSystemMessage(key, meta.chatId, RESTART_WAKE_TEXT, "cork:restart", "cork-restart");
+        }
       });
     }
     if (woken.length > 0) logger.info("waking sessions a restart cut off", { keys: woken });
