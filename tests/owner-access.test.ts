@@ -30,6 +30,7 @@ function makeCtx(opts: {
   const fetchedMessages: string[] = [];
   const ctx = {
     config: { owners: opts.owners, ackEmoji: "" },
+    quoteWaitMs: 0,
     channel: {
       markEventReceived: () => {},
       fetchChatName: async () => "Chat",

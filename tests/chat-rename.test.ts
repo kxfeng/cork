@@ -20,6 +20,7 @@ function makeCtx(fetchName: (chatId: string) => Promise<string>, sender = "ou_me
   const userLookups: string[] = [];
   const ctx = {
     config: { owners: [OWNER], ackEmoji: "" },
+    quoteWaitMs: 0,
     channel: {
       markEventReceived: () => {},
       fetchChatName: async (chatId: string) => {

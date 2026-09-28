@@ -98,6 +98,8 @@ export function clearStaleBuffers(): void {
 
 export interface LarkEventContext {
   config: LarkChannelConfig;
+  /** How long a message waits for a later one quoting it; QUOTE_WAIT_MS unless set. */
+  quoteWaitMs?: number;
   dispatcher: Dispatcher;
   channel: import("./index.js").LarkChannel;
   resolveSessionKey?: (channel: string, chatId: string, threadId?: string) => string;
@@ -255,6 +257,49 @@ function rejectionNotice(owners: string[], senderId: string): string {
  * — so entries are dropped as they expire and the map stays the size of the
  * last ten minutes rather than of the process's whole life.
  */
+/**
+ * "Forward with a comment" arrives as two messages: the forwarded one, and the
+ * comment quoting it — created ~200ms apart, delivered by Lark in either order
+ * and up to ~0.9s apart, then finished by cork in whatever order their content
+ * takes to fetch. Each became its own turn, the first one a pointless one: the
+ * comment's quote already carries all of it.
+ *
+ * So a message is handed on no sooner than QUOTE_WAIT_MS after it arrived, and
+ * dropped if by then a message from the same person in the same chat has quoted
+ * it. The quote is noted as the quoting message's event arrives, from its own
+ * `parent_id` — nothing waits for content — so it counts whichever arrives
+ * first. Measured, the comment lands at most ~0.4s after the forward.
+ * The wait costs nothing it did not already: handing on used to wait ~0.7s for
+ * the ack reaction, which now runs alongside instead.
+ *
+ * Not in threads: a thread reply's parent is not rendered as a quote.
+ */
+export const QUOTE_WAIT_MS = 500;
+const QUOTE_TTL_MS = 10_000;
+const quotedRecently = new Map<string, number>();
+
+function quoteKey(chatId: string, senderId: string, messageId: string): string {
+  return `${chatId}|${senderId}|${messageId}`;
+}
+
+function noteQuote(chatId: string, senderId: string, parentId: string): void {
+  const now = Date.now();
+  for (const [k, at] of quotedRecently) {
+    if (now - at >= QUOTE_TTL_MS) quotedRecently.delete(k);
+  }
+  quotedRecently.set(quoteKey(chatId, senderId, parentId), now);
+}
+
+function isQuoted(chatId: string, senderId: string, messageId: string): boolean {
+  const at = quotedRecently.get(quoteKey(chatId, senderId, messageId));
+  return at !== undefined && Date.now() - at < QUOTE_TTL_MS;
+}
+
+/** For tests. */
+export function clearQuoteRecords(): void {
+  quotedRecently.clear();
+}
+
 const refusalNoticeSent = new Map<string, number>();
 const REFUSAL_NOTICE_COOLDOWN_MS = 10 * 60 * 1000;
 
@@ -294,6 +339,7 @@ async function handleMessageEvent(
   ctx: LarkEventContext,
   data: any
 ): Promise<void> {
+  const receivedAt = Date.now();
   const event = data;
   const message = event?.message;
   const sender = event?.sender;
@@ -457,6 +503,21 @@ async function handleMessageEvent(
       ownersConfigured: ctx.config.owners.length,
       noticeSent,
     });
+    return;
+  }
+
+  // Let in, so what this message quotes is spoken for — noted now, from the
+  // event alone, before any content is fetched: events are handled
+  // concurrently, and the quoted message must see it however the two arrive.
+  // Only a message from the same person counts (see QUOTE_WAIT_MS).
+  if (!threadId && message.parent_id) noteQuote(chatId, senderId, message.parent_id);
+
+  // Already quoted by one that got here first: drop it before fetching any of
+  // its content — a merge_forward with a card and an image costs seconds, all
+  // of which the quoting message is fetching again anyway. The check before
+  // dispatch below covers the other order.
+  if (!threadId && isQuoted(chatId, senderId, messageId)) {
+    logger.info("skipping a message a later one quotes", { messageId, chatId, early: true });
     return;
   }
 
@@ -697,14 +758,35 @@ async function handleMessageEvent(
     { ...logCtx, senderId, textLen: text.trim().length, preview: truncate(text.trim()) }
   );
 
-  // Ack with emoji immediately
+  // Ack with emoji, alongside rather than before: it is a round trip to Lark,
+  // and nothing below needs to wait for it.
   const ackEmoji = ctx.config.ackEmoji || "OnIt";
-  let reactionId: string | undefined;
-  try {
-    reactionId = await ctx.channel.addReaction(chatId, messageId, ackEmoji);
-    logger.debug("ack reaction added", { messageId, reactionId });
-  } catch (err) {
-    logger.warn("failed to add ack reaction", { err, messageId });
+  const reaction: Promise<string | undefined> = ctx.channel
+    .addReaction(chatId, messageId, ackEmoji)
+    .then(
+      (id) => {
+        logger.debug("ack reaction added", { messageId, reactionId: id });
+        return id;
+      },
+      (err) => {
+        logger.warn("failed to add ack reaction", { err, messageId });
+        return undefined;
+      }
+    );
+
+  const wait = receivedAt + (ctx.quoteWaitMs ?? QUOTE_WAIT_MS) - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  if (!threadId && isQuoted(chatId, senderId, messageId)) {
+    logger.info("skipping a message a later one quotes", { messageId, chatId });
+    const id = await reaction;
+    if (id) {
+      try {
+        await ctx.channel.removeReaction(chatId, messageId, id);
+      } catch (err) {
+        logger.debug("failed to remove ack reaction", { err });
+      }
+    }
+    return;
   }
 
   let result: { syncReplied: boolean } = { syncReplied: false };
@@ -717,6 +799,7 @@ async function handleMessageEvent(
     dispatchError = err;
   }
 
+  const reactionId = await reaction;
   if (!reactionId) return;
 
   // For sync replies (commands) or dispatch errors, remove emoji now.

@@ -142,6 +142,7 @@ describe("a message from an allowed bot", () => {
     const { src } = names();
     const ctx = {
       config: { owners: [OWNER], ackEmoji: "", ...config },
+      quoteWaitMs: 0,
       channel: {
         ...src,
         markEventReceived: () => {},

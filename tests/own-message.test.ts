@@ -26,6 +26,7 @@ function makeCtx(owners: string[]) {
   const dispatched: Array<Record<string, unknown>> = [];
   const ctx = {
     config: { owners, ackEmoji: "" },
+    quoteWaitMs: 0,
     channel: {
       markEventReceived: () => {},
       fetchChatName: async () => "Chat",

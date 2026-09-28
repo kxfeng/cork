@@ -420,13 +420,15 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 2. **Stale rejection** — Messages older than 30 seconds at startup are ignored
 3. **Message type filter** — Supports: text, post, image, file, audio, media, sticker, interactive, merge_forward, share_chat, share_user, location
 4. **Access control** — Owner check + group @bot check (see §2.4)
+4a. **Quote noted** — once the sender is let in, a message with a `parent_id` records "(chat, sender) quoted it" for 10 s, from the event alone, before any content is fetched (events are handled concurrently, so it cannot wait for the content); a message that finds itself already quoted — the comment arrived first — is dropped right there, before its content is fetched. Not in threads.
 5. **Content parsing** — Extract text from various message types (content.ts)
 6. **Mention stripping** — Remove `@bot` text from group messages
 7. **Chat commands** — `/mention-on` and `/mention-off` processed inline
 8. **Resource download** — Images/files downloaded to `/tmp/cork-media/` with MIME-inferred extensions
 9. **Quoted message** — Fetch parent message via API, resolve sender name, format as blockquote with timestamp
 10. **Merge-forward** — Fetch sub-message tree, resolve sender names, format hierarchically
-11. **Ack reaction** — Add configurable emoji reaction (default: `OnIt`)
+11. **Ack reaction** — Add configurable emoji reaction (default: `OnIt`), started alongside the dispatch rather than awaited before it (it is a ~0.7 s round trip)
+11a. **Quote wait** — no message is handed on sooner than `QUOTE_WAIT_MS` (500 ms) after it arrived; if by then a message from the same person in the same chat has quoted it (4a), it is dropped and its ack taken back. "Forward with a comment" is two messages, created ~200 ms apart and delivered in either order up to ~0.9 s apart (the comment at most ~0.4 s after the forward, measured); the comment's quote already carries the forwarded content, so it alone becomes a turn. The wait replaces the ack round trip that used to sit here, so nothing got slower.
 12. **Dispatch** — Route to MessageRouter → session → UDS → channel MCP → Claude Code
 13. **Reaction handoff** — If dispatch was synchronous (chat command or dispatch error), remove the ack emoji immediately. Otherwise (Claude-handled), enqueue `(messageId, reactionId)` on the session's `pendingReactions` queue for later removal.
 
