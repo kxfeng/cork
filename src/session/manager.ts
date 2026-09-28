@@ -497,6 +497,64 @@ export function formatMentions(mentions: MentionRef[]): string {
     .join("; ");
 }
 
+/**
+ * What a session woken after a restart is told. It arrives like a chat message,
+ * so the Stop hook wants a reply to it — hence the explicit empty reply for the
+ * common case of nothing to carry on with.
+ */
+export const RESTART_WAKE_TEXT =
+  "cork just restarted. If you were in the middle of something for this chat, " +
+  "check where it got to before redoing anything, and carry on, replying " +
+  "through the reply tool as usual. If there is nothing to continue, call the " +
+  "reply tool with empty text — nothing is sent to the chat.";
+
+/** A transcript written this recently when the daemon starts was cut off mid-work. */
+export const RESTART_RECENT_WRITE_MS = 60_000;
+/** How old a `cork restart` record may be and still count. */
+export const RESTART_RECORD_MAX_AGE_MS = 2 * 60_000;
+
+/**
+ * Called by `cork restart` just before it restarts the daemon, while every pane
+ * is still alive: note the chat sessions claude itself says are not idle — mid
+ * turn, waiting on a dialog, or running a background shell or monitor — for
+ * the next daemon to wake. A long command or a quiet background job leaves the
+ * transcript untouched for minutes, so the transcript alone would miss these;
+ * claude's status is gone once its process is, so it has to be read now.
+ */
+export function recordBusyBeforeRestart(now = Date.now()): string[] {
+  const keys: string[] = [];
+  for (const tmuxName of liveTmuxSessions()) {
+    if (!tmuxName.startsWith(TMUX_PREFIX)) continue;
+    const key = tmuxName.slice(TMUX_PREFIX.length);
+    const meta = loadSession(key);
+    if (!meta || isLocal(meta)) continue;
+    const status = claudeSessionStatus(meta.sessionId);
+    if (status && status !== "idle") keys.push(key);
+  }
+  try {
+    fs.writeFileSync(paths.wakeFile, JSON.stringify({ at: now, keys }), "utf-8");
+  } catch (err) {
+    logger.warn("could not record busy sessions", { err: (err as Error).message });
+  }
+  return keys;
+}
+
+/** The keys `cork restart` recorded, when recent enough; the record is used once. */
+function takeRestartRecord(now: number): string[] {
+  let rec: { at?: number; keys?: unknown } | undefined;
+  try {
+    rec = JSON.parse(fs.readFileSync(paths.wakeFile, "utf-8"));
+  } catch {
+    return [];
+  } finally {
+    try {
+      fs.rmSync(paths.wakeFile, { force: true });
+    } catch {}
+  }
+  if (typeof rec?.at !== "number" || now - rec.at > RESTART_RECORD_MAX_AGE_MS) return [];
+  return Array.isArray(rec.keys) ? rec.keys.filter((k): k is string => typeof k === "string") : [];
+}
+
 function fileMtime(file: string): number {
   try {
     return fs.statSync(file).mtimeMs;
@@ -1962,6 +2020,37 @@ export class SessionManager extends EventEmitter {
       logger.info("resumed autopilot runs", { keys: resumed });
     }
     return resumed;
+  }
+
+  /**
+   * After the daemon starts, bring back the chat sessions a restart cut off, and
+   * ask each whether it has work to pick up: the ones `cork restart` recorded as
+   * busy, and any whose transcript was written in the last minute — work in
+   * flight when the daemon was killed some other way, or a turn that had only
+   * just ended. Autopilot runs are left to resumeAutopilots and their watcher.
+   *
+   * Nothing is posted to the chat; a session with nothing to do answers with an
+   * empty reply. Returns the keys woken.
+   */
+  wakeInterrupted(now = Date.now()): string[] {
+    const keys = new Set(takeRestartRecord(now));
+    for (const { key, meta } of listSessions()) {
+      const written = fileMtime(transcriptPath(meta.workspace, meta.sessionId));
+      if (written && now - written < RESTART_RECENT_WRITE_MS) keys.add(key);
+    }
+    const woken: string[] = [];
+    for (const key of keys) {
+      const meta = loadSession(key);
+      if (!meta || isLocal(meta)) continue;
+      if (isRunning(loadAutopilot(key))) continue;
+      this.rememberId(key, meta);
+      woken.push(key);
+      void this.ensureConnected(key, SESSION_START_WAIT_MS).then((ok) => {
+        if (ok) this.dispatchSystemMessage(key, meta.chatId, RESTART_WAKE_TEXT, "cork:restart");
+      });
+    }
+    if (woken.length > 0) logger.info("waking sessions a restart cut off", { keys: woken });
+    return woken;
   }
 
   /**

@@ -23,6 +23,9 @@ export async function restartDaemon(): Promise<void> {
     await startBackground();
     return;
   }
+  // Read now, while the panes are alive: the daemon that comes up wakes these.
+  const { recordBusyBeforeRestart } = await import("../session/manager.js");
+  recordBusyBeforeRestart();
   restart();
   // Give the manager a moment to bring the process back before we report.
   await new Promise((r) => setTimeout(r, 500));

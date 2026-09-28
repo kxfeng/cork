@@ -25,6 +25,8 @@ export const paths = {
   // so they load into every session without touching ~/.claude or the workspace.
   agentDir: path.join(corkDir, "agent"),
   socketPath: path.join(corkDir, "cork.sock"),
+  // Sessions `cork restart` found busy, for the daemon it starts to wake.
+  wakeFile: path.join(corkDir, "wake-on-start.json"),
   logsDir: path.join(corkDir, "logs"),
   logFile: path.join(corkDir, "logs", "cork.log"),
   stdoutLog: path.join(corkDir, "logs", "stdout.log"),

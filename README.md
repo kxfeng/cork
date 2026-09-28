@@ -68,7 +68,7 @@ tmux attach -t cork_lark:<chatId>
 | `cork start`      | Start the daemon under the platform service manager — `launchd` (macOS) or `systemd --user` (Linux); auto‑restarts and runs at login/boot |
 | `cork start --foreground` | Run in the current shell (for debugging)              |
 | `cork stop`       | Stop the daemon                                               |
-| `cork restart`    | `stop` + `start`                                              |
+| `cork restart`    | `stop` + `start`; sessions it cut off mid-work are woken to carry on |
 | `cork status`     | Show daemon state, socket, and how many sessions are live     |
 | `cork session list` | List live sessions: chat, workspace, Claude context, `tmux attach` command |
 

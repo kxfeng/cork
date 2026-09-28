@@ -121,6 +121,7 @@ export class CorkDaemon {
       logger.info("resumed autopilot runs", { count: resumed.length });
     }
 
+    this.router.sessionManager.wakeInterrupted();
     this.router.sessionManager.startIdleStop();
   }
 

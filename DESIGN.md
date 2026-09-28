@@ -329,6 +329,21 @@ Calls `launchctl unload` and removes the plist file. The daemon receives SIGTERM
 
 Note: tmux sessions (Claude Code instances) continue running independently. They will reconnect when cork restarts.
 
+### 4.3a Waking sessions a restart cut off
+
+A restart kills every pane, and a session killed mid-task stays silent until someone writes to it — including one that restarted cork itself and meant to report back. So after the daemon starts, cork resumes the chat sessions that may have been in the middle of something and sends each one message, as `cork:restart`:
+
+> cork just restarted. If you were in the middle of something for this chat, check where it got to before redoing anything, and carry on, replying through the reply tool as usual. If there is nothing to continue, call the reply tool with empty text — nothing is sent to the chat.
+
+It arrives like a chat message, so the Stop hook expects a reply; the empty reply is the way out for a session with nothing to do. Nothing is posted to the chat by cork itself.
+
+Which sessions:
+
+- **Busy when `cork restart` ran.** Before restarting, `cork restart` reads claude's own status for every live pane (`~/.claude/sessions/<pid>.json`, the same source idle stop uses) and writes the ones that are not `idle` — mid-turn, waiting on a dialog, running a background shell or monitor — to `~/.cork/wake-on-start.json`. A long command or a quiet background job leaves the transcript untouched for many minutes, so only the status catches these, and it has to be read then: the file goes when its process does. The daemon uses a record at most 2 minutes old, once.
+- **Transcript written in the last minute** when the daemon starts, however it was stopped: work in flight when it was killed or crashed, and a turn that had only just ended — the usual shape of a session that restarts cork and has something left to check.
+
+Autopilot runs are skipped: `resumeAutopilots` and their watcher already carry them on. A daemon killed outside `cork restart` wakes only the second kind.
+
 ### 4.4 `cork status`
 
 ```bash
