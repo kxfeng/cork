@@ -156,7 +156,7 @@ All state lives under `~/.cork/`:
 
 ```
 ~/.cork/
-├── config.jsonc        # main config (created by `cork setup`)
+├── config.json         # main config (created by `cork setup`)
 ├── env                 # extra env vars exported to every claude session (one KEY=VALUE per line)
 ├── mcp-config.json     # auto‑written; points claude at the cork channel MCP
 ├── claude-settings.json # auto‑written; the Stop hook every session runs with
@@ -168,33 +168,41 @@ All state lives under `~/.cork/`:
 └── logs/               # cork.log (+ launchd stdout/stderr on macOS; journald on Linux)
 ```
 
-`~/.cork/env` is the easy way to pass things like proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise. The file is read when cork brings up its tmux server, which every pane is forked from, so **changes take effect on `cork restart`** — the same rule `config.jsonc` follows.
+`~/.cork/env` is the easy way to pass things like proxy settings to every Claude session — the service manager (`launchd`/`systemd`) doesn't read your shell rc files, so exports there won't reach Claude otherwise. The file is read when cork brings up its tmux server, which every pane is forked from, so **changes take effect on `cork restart`** — the same rule `config.json` follows.
 
 Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the session is created and keeps it across `--resume`; an env override is applied on every launch instead, so changing it silently rewrites the model of every existing session the next time cork restarts them — permanently, since removing the variable later does not put them back. Set a default model in `~/.claude/settings.json` instead, which is read only when a session is created.
 
-`config.jsonc` (excerpt):
+`config.json` (excerpt):
 
-```jsonc
+```json
 {
   "defaultWorkspace": "~/Workspace",
   "claude": {
-    "permissionMode": "bypassPermissions",   // pass --dangerously-skip-permissions
-    "extraArgs": [],                         // any extra flags forwarded to claude
-    "idleStopHours": 4                       // stop a pane nothing has happened in for this long; 0 = never
+    "permissionMode": "bypassPermissions",
+    "extraArgs": [],
+    "idleStopHours": 4
   },
   "channels": {
     "lark": {
       "appId": "...",
       "appSecret": "...",
-      "domain": "feishu",                     // or "lark"
-      "owners": ["ou_..."],                   // may talk to the bot and run its commands; edit here only
-      "allows": ["ou_..."],                   // may talk to it in every chat, not command it; edit here only
+      "domain": "feishu",
+      "owners": ["ou_..."],
+      "allows": ["ou_..."],
       "ackEmoji": "👀",
       "streamingIntervalMs": 1500
     }
   }
 }
 ```
+
+- `permissionMode` — `bypassPermissions` passes `--dangerously-skip-permissions`; `extraArgs` are forwarded to `claude` as they are.
+- `idleStopHours` — stop a pane nothing has happened in for this long; `0` means never.
+- `domain` — `feishu` or `lark`.
+- `owners` — may talk to the bot and run its commands. Edited here only.
+- `allows` — may talk to it in every chat, but not command it. Edited here only; `/allow` in a chat covers just that chat.
+
+An older install kept this as `config.jsonc`. cork moves it to `config.json` the first time it loads the config — comments and trailing commas in it are fine — and keeps the old file as `config.jsonc.bak`.
 
 ## How it works
 

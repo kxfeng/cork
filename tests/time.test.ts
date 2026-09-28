@@ -16,7 +16,7 @@ let dir: string;
 async function load(config?: Record<string, unknown>) {
   vi.resetModules();
   if (config) {
-    fs.writeFileSync(path.join(dir, "config.jsonc"), JSON.stringify(config));
+    fs.writeFileSync(path.join(dir, "config.json"), JSON.stringify(config));
   }
   return import("../src/time.js");
 }

@@ -52,7 +52,7 @@ beforeEach(() => {
   fs.mkdirSync(path.join(dir, "sessions", KEY), { recursive: true });
   // Pinned so the folder name means the same thing on any machine.
   fs.writeFileSync(
-    path.join(dir, "config.jsonc"),
+    path.join(dir, "config.json"),
     JSON.stringify({ timezone: "Asia/Singapore" })
   );
 });

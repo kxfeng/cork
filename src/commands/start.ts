@@ -37,10 +37,10 @@ async function seedWebConfig(config: CorkConfig): Promise<CorkConfig> {
     });
   }
 
-  const seeded = { ...config, web: { ...config.web, port } };
-  saveConfig(seeded);
+  const web = { ...config.web, port };
+  saveConfig({ ...loadRawConfig(), web });
   logger.info("seeded web config", { port });
-  return seeded;
+  return { ...config, web };
 }
 
 export async function startForeground(): Promise<void> {

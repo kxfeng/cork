@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig } from "../config/loader.js";
+import { loadRawConfig, saveConfig } from "../config/loader.js";
 
 /**
  * Add a Telegram numeric user id to the allowlist (config.channels.telegram.owners)
@@ -6,8 +6,8 @@ import { loadConfig, saveConfig } from "../config/loader.js";
  */
 export async function telegramAllow(userId: string): Promise<void> {
   const id = userId.trim();
-  const config = loadConfig();
-  if (!config.channels.telegram) {
+  const config = loadRawConfig();
+  if (!config.channels?.telegram) {
     console.error("Telegram is not configured. Run 'cork setup telegram' first.");
     process.exit(1);
   }
@@ -26,8 +26,8 @@ export async function telegramAllow(userId: string): Promise<void> {
  */
 export async function telegramDeny(userId: string): Promise<void> {
   const id = userId.trim();
-  const config = loadConfig();
-  if (!config.channels.telegram) {
+  const config = loadRawConfig();
+  if (!config.channels?.telegram) {
     console.error("Telegram is not configured. Run 'cork setup telegram' first.");
     process.exit(1);
   }

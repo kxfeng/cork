@@ -123,14 +123,14 @@ The transition fires whichever happens last. If register arrives before the Ente
 
 A local directory that serves as the working directory for a Claude Code session.
 
-- Default workspace configured in `~/.cork/config.jsonc`
+- Default workspace configured in `~/.cork/config.json`
 - Fixed per session at creation time
 - `/new <path>` creates a new session with a different workspace
 - Non-existent paths are auto-created
 
 ### 2.4 Owner & Access Control
 
-Two lists, both of Feishu `open_id`s in `config.jsonc`:
+Two lists, both of Feishu `open_id`s in `config.json`:
 
 - **`channels.lark.owners`** — may talk to the bot **and** run its chat commands. Auto-detected during `cork setup`; afterwards changed only by editing the file. Nothing in chat or on the CLI grants ownership.
 - **`channels.lark.allows`** — may talk to the bot in every chat, but not command it: a `/…` from them reaches the model as plain text. Edited by hand only, for the rare someone who should reach a personal agent anywhere.
@@ -466,7 +466,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 
 ```
 ~/.cork/
-├── config.jsonc                         # Main configuration (JSONC)
+├── config.json                          # Main configuration (plain JSON)
 ├── cork.sock                            # UDS server socket
 ├── mcp-config.json                      # Global MCP config consumed by Claude Code (--mcp-config)
 ├── sessions/
@@ -484,30 +484,38 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 └── com.cork.daemon.plist                # launchd service definition
 ```
 
-### 7.2 config.jsonc
+### 7.2 config.json
 
-```jsonc
+```json
 {
   "defaultWorkspace": "~/Workspace",
   "claude": {
     "permissionMode": "bypassPermissions",
     "extraArgs": [],
-    "autoCompactPercent": 75,     // compact at 75% of the window, for every session
-    "contextWindow": 0            // optional override; normally read from the model id
+    "autoCompactPercent": 75,
+    "contextWindow": 0
   },
   "channels": {
     "lark": {
       "appId": "cli_xxxx",
       "appSecret": "xxxx",
-      "domain": "feishu",           // "feishu" or "lark", auto-detected
-      "owners": ["ou_xxxx"],        // talk + command; edited by hand only; empty = refuse everyone
-      "allows": ["ou_yyyy"],        // talk only, every chat; edited by hand only
+      "domain": "feishu",
+      "owners": ["ou_xxxx"],
+      "allows": ["ou_yyyy"],
       "ackEmoji": "OnIt",
       "streamingIntervalMs": 500
     }
   }
 }
 ```
+
+- `autoCompactPercent` — compact at this share of the window, for every session; `contextWindow` is an optional override, normally read from the model id.
+- `domain` — `feishu` or `lark`, auto-detected by setup.
+- `owners` — talk and command; edited by hand only; empty refuses everyone. `allows` — talk only, in every chat; edited by hand only.
+
+Plain JSON, not JSONC. The file is the user's, but cork writes it too (setup, seeding the web port, an auto-detected owner, `cork telegram allow`), and a format that invites comments cannot keep them through a program's rewrite without every writer editing in place. So there is nothing to keep: `saveConfig` writes back what `loadRawConfig` read plus the change — never the defaults `loadConfig` merges in, which would pin today's defaults into the file. What changes at runtime lives in session state instead (per-chat allows, `mentionRequired`).
+
+Older installs have `config.jsonc`. The first load moves it: parsed leniently with `jsonc-parser` (comments, trailing commas), written as `config.json` (0600), the original kept as `config.jsonc.bak`. An unreadable file is left where it is, with an error naming it. That lenient read is the only use of `jsonc-parser` left, and goes when the move does.
 
 ### 7.3 Session Metadata
 
@@ -522,7 +530,8 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
   "lastActiveAt": "2026-04-15T14:30:00.000Z",
   "lastMessagePreview": "first non-empty line (max 50 chars)",
   "claudeSessionStarted": true,
-  "mentionRequired": true
+  "mentionRequired": true,
+  "allows": ["ou_zzzz"]
 }
 ```
 
@@ -741,7 +750,7 @@ cork/
 │   │   └── uds-client.ts         # UDS client connecting to cork daemon
 │   └── config/
 │       ├── schema.ts             # Config type definitions
-│       ├── loader.ts             # JSONC config reader/writer, path resolver
+│       ├── loader.ts             # config reader/writer (and config.jsonc move), path resolver
 │       └── paths.ts              # ~/.cork/ path constants (incl. socketPath, mcpConfigPath)
 ├── tests/
 │   ├── content.test.ts             # Message content parsing
@@ -770,7 +779,7 @@ cork/
 | Prompts | `@inquirer/prompts` | Interactive setup |
 | QR Code | `qrcode-terminal` | Terminal QR display |
 | Logging | `winston` | JSON file logging, child loggers |
-| Config | `jsonc-parser` | JSONC support (comments in config) |
+| Config | `jsonc-parser` | Reading an old `config.jsonc` once, to move it to `config.json` |
 | Testing | `vitest` | Fast, ESM-native |
 | Terminal Mux | `tmux` | Detachable terminal sessions |
 | IPC | Unix Domain Socket | Local, reliable, no port conflicts |

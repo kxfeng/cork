@@ -14,7 +14,8 @@ const corkHome = vi.hoisted(
 vi.mock("../src/config/paths.js", () => ({
   paths: {
     corkDir: corkHome,
-    configFile: `${corkHome}/config.jsonc`,
+    configFile: `${corkHome}/config.json`,
+    legacyConfigFile: `${corkHome}/config.jsonc`,
     envFile: `${corkHome}/env`,
     sessionsDir: `${corkHome}/sessions`,
     spoolDir: `${corkHome}/spool`,

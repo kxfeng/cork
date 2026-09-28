@@ -87,7 +87,7 @@ beforeEach(() => {
   // Times are shown in the configured zone; pin one so the assertions below
   // mean the same thing on a machine in any other.
   fs.writeFileSync(
-    path.join(dir, "config.jsonc"),
+    path.join(dir, "config.json"),
     JSON.stringify({ timezone: "Asia/Singapore" })
   );
   sent = [];

@@ -29,7 +29,7 @@ const CONFIG = `{
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "cork-allows-"));
   process.env.CORK_DIR = dir;
-  fs.writeFileSync(path.join(dir, "config.jsonc"), CONFIG);
+  fs.writeFileSync(path.join(dir, "config.json"), CONFIG);
   vi.resetModules(); // paths.ts reads CORK_DIR at import time
 });
 

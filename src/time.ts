@@ -7,7 +7,7 @@ import { loadConfig } from "./config/loader.js";
  * person: a daemon on a server is usually not in the reader's zone — this one
  * runs in UTC while its user is in UTC+8 — so a stored timestamp shown raw is
  * off by hours with nothing to say so. Configured once (`timezone` in
- * config.jsonc), used everywhere a time is shown or put in a name.
+ * config.json), used everywhere a time is shown or put in a name.
  */
 
 /**

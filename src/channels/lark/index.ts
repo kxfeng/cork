@@ -1,7 +1,7 @@
 import * as lark from "@larksuiteoapi/node-sdk";
 import { Resolver } from "node:dns/promises";
 import { getLogger } from "../../logger.js";
-import { loadConfig, saveConfig } from "../../config/loader.js";
+import { loadRawConfig, saveConfig } from "../../config/loader.js";
 import type {
   Channel,
   Dispatcher,
@@ -138,8 +138,8 @@ export class LarkChannel implements Channel {
     // restart — `this.config` is the same object the event handler reads.
     this.config.owners.push(found.openId);
     try {
-      const stored = loadConfig();
-      const lark = stored.channels.lark;
+      const stored = loadRawConfig();
+      const lark = stored.channels?.lark;
       if (lark && lark.owners.length === 0) {
         lark.owners.push(found.openId);
         saveConfig(stored);

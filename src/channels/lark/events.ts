@@ -243,7 +243,7 @@ function rejectionNotice(owners: string[], senderId: string): string {
   return (
     "⚠️ No owners are configured, so this bot cannot verify anyone.\n" +
     `Your ID: ${senderId}\n` +
-    "If you are the owner, add it to channels.lark.owners in ~/.cork/config.jsonc, then run:  cork restart"
+    "If you are the owner, add it to channels.lark.owners in ~/.cork/config.json, then run:  cork restart"
   );
 }
 

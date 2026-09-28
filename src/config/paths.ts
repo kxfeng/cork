@@ -11,7 +11,9 @@ const corkDir = process.env.CORK_DIR || path.join(os.homedir(), CORK_DIR_NAME);
 
 export const paths = {
   corkDir,
-  configFile: path.join(corkDir, "config.jsonc"),
+  configFile: path.join(corkDir, "config.json"),
+  // Where the config lived before it was plain JSON; moved on first load.
+  legacyConfigFile: path.join(corkDir, "config.jsonc"),
   envFile: path.join(corkDir, "env"),
   sessionsDir: path.join(corkDir, "sessions"),
   // Directory-as-queue for CLI → daemon commands (see command-spool.ts).

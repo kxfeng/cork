@@ -81,7 +81,7 @@ export function ensureCorkTmuxServer(): void {
       // Only the call that actually forks the server sets any of this; on an
       // already-running server start-server is a no-op. Since shutdown() ends
       // in kill-server, "restart cork" is what re-reads ~/.cork/env — which is
-      // the same rule config.jsonc follows.
+      // the same rule config.json follows.
       //
       // The locale is here because launchd gives the daemon none to pass on,
       // and without one macOS tools fall back to the C encoding and read UTF-8

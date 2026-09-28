@@ -1,13 +1,13 @@
 import { input } from "@inquirer/prompts";
-import { loadConfig, saveConfig } from "../config/loader.js";
+import { loadRawConfig, saveConfig } from "../config/loader.js";
 import { runLarkSetup } from "../channels/lark/setup.js";
 import { runTelegramSetup } from "../channels/telegram/setup.js";
 
 export async function setupCommand(channelName?: string): Promise<void> {
-  const config = loadConfig();
+  const config = loadRawConfig();
 
   // First run: prompt for global settings if not configured
-  if (config.defaultWorkspace === "~/Workspace") {
+  if (!config.defaultWorkspace || config.defaultWorkspace === "~/Workspace") {
     const workspace = await input({
       message: "默认工作区路径 Default workspace path:",
       default: "~/Workspace",
@@ -18,17 +18,17 @@ export async function setupCommand(channelName?: string): Promise<void> {
   if (!channelName || channelName === "lark") {
     console.log("\n--- Lark/Feishu Channel Setup ---\n");
     const larkConfig = await runLarkSetup();
-    config.channels.lark = larkConfig;
+    config.channels = { ...config.channels, lark: larkConfig };
   } else if (channelName === "telegram") {
     console.log("\n--- Telegram Channel Setup ---\n");
     const telegramConfig = await runTelegramSetup();
-    config.channels.telegram = telegramConfig;
+    config.channels = { ...config.channels, telegram: telegramConfig };
   } else {
     console.log(`Channel "${channelName}" is not supported yet.`);
     return;
   }
 
   saveConfig(config);
-  console.log(`\n✓ Configuration saved to ~/.cork/config.jsonc`);
+  console.log(`\n✓ Configuration saved to ~/.cork/config.json`);
   console.log(`\nRun "cork start" to start the daemon in the background.`);
 }
