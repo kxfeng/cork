@@ -204,7 +204,7 @@ An MCP server that runs inside Claude Code, bridging Claude Code ↔ Cork daemon
 - `CORK_CHANNEL_NAME` — which platform the session replies to
 - `CORK_BOT_NAME` / `CORK_BOT_OPEN_ID` — this bot's own name and open id, written into the instructions ("You are XiaoK on Lark, open id ou_…") so the model can tell which @ is aimed at it. Omitted while the id is unknown
 
-**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), `role` (`owner`, or `guest` for someone allowed), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list).
+**Channel tag attributes:** `chatId`, `senderId`, `messageId`, `sender` (name), `mentionYou` (groups), `role` (`owner`, or `guest` for someone allowed), and `mentions` — everyone the message @mentioned, as `CoKo=ou_93…; 张三(测试)=ou_11…`. Ids live there rather than in the text, where `@张三(测试)(ou_…)` would be ambiguous; an open id's fixed shape makes each entry split cleanly at its last `=`. Any id from `senderId` or `mentions` can go in the reply tool's `at` (a list), which mentions them at the head of the reply. On Lark a mention can also go anywhere in the text: the reply's Markdown is sent as a post `md` element, and Lark renders `<at user_id="ou_…"></at>` there as a real mention (name filled in, person notified — measured). A plain `@Name` stays text. Only a Lark session's tool description says so; Telegram has no such thing.
 
 **MCP Tool:**
 ```typescript

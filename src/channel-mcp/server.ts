@@ -161,6 +161,16 @@ const mcp = new Server(
   }
 );
 
+// Lark renders `<at user_id="ou_…"></at>` inside a message's Markdown as a real
+// mention, anywhere in the text (measured: the name is filled in and the person
+// notified). Telegram has no such thing, so only a Lark session is told.
+const inlineAtHint =
+  channelName === "lark"
+    ? " To @mention someone in the middle of the text instead, write " +
+      '`<at user_id="ou_…"></at>` there, with an id from the same places; ' +
+      "a plain `@Name` stays plain text and notifies nobody."
+    : "";
+
 // Reply tool: Claude calls this to send a message back to the chat it came from
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -221,7 +231,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
               "there is nobody to distinguish from, and skip it when nothing " +
               "is being addressed to anyone in particular — an @ on every " +
               "message stops meaning anything. Only an id that appeared on a " +
-              "channel tag works; a name on its own cannot be turned into one.",
+              "channel tag works; a name on its own cannot be turned into one." +
+              inlineAtHint,
           },
         },
         required: ["text"],
