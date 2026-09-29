@@ -93,6 +93,36 @@ function inferExtension(buffer: Buffer, fileName?: string): string {
   return "";
 }
 
+/** Attempts (first one included) at a media download that fails transiently;
+ *  tests set delayMs to 0. */
+export const mediaRetry = { attempts: 3, delayMs: 1000 };
+
+/** 5xx, or a request that never got a response (timeout, reset). */
+function isTransient(err: unknown): boolean {
+  const e = err as {
+    response?: { status?: number };
+    isAxiosError?: boolean;
+  } | null;
+  const status = e?.response?.status;
+  if (typeof status === "number") return status >= 500;
+  return e?.isAxiosError === true;
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  onRetry: (attempt: number, err: unknown) => void
+): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (attempt >= mediaRetry.attempts || !isTransient(err)) throw err;
+      onRetry(attempt, err);
+      await new Promise((r) => setTimeout(r, mediaRetry.delayMs));
+    }
+  }
+}
+
 /**
  * Download a message's media resources into the temp dir.
  *
@@ -107,6 +137,12 @@ function inferExtension(buffer: Buffer, fileName?: string): string {
  * Each id is tried in order until one succeeds, so the caller should pass the
  * more-likely id first (sub-message id, then outer forward id). Per-resource
  * failures are logged and skipped — this never throws.
+ *
+ * A transient failure (5xx, or no response at all) is retried on the same id,
+ * up to `mediaRetry.attempts` attempts in all: Lark's resource endpoint does throw the
+ * odd 500, and a dropped image leaves the model looking at nothing. A 4xx is
+ * an answer, not a hiccup — typically the resource lives on the other
+ * candidate id — so it moves straight on.
  */
 async function downloadMedia(
   channel: FormatChannel,
@@ -120,10 +156,15 @@ async function downloadMedia(
     let saved: DownloadedMedia | undefined;
     for (const messageId of messageIds) {
       try {
-        const { buffer, fileName } = await channel.downloadResource(
-          messageId,
-          res.fileKey,
-          res.type
+        const { buffer, fileName } = await withRetry(
+          () => channel.downloadResource(messageId, res.fileKey, res.type),
+          (attempt, err) =>
+            logger.debug("media download attempt failed, retrying", {
+              messageId,
+              fileKey: res.fileKey,
+              attempt,
+              err: (err as Error)?.message,
+            })
         );
         const ext = inferExtension(buffer, res.fileName || fileName);
         const saveName = res.fileName || fileName || `${res.fileKey}${ext}`;

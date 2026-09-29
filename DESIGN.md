@@ -424,7 +424,7 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 5. **Content parsing** — Extract text from various message types (content.ts)
 6. **Mention stripping** — Remove `@bot` text from group messages
 7. **Chat commands** — `/mention-on` and `/mention-off` processed inline
-8. **Resource download** — Images/files downloaded to `/tmp/cork-media/` with MIME-inferred extensions
+8. **Resource download** — Images/files downloaded to `/tmp/cork-media/` with MIME-inferred extensions. A 5xx or unanswered request is retried on the same id, 3 attempts in all, 1 s apart; a 4xx moves straight to the next candidate id
 9. **Quoted message** — Fetch parent message via API, resolve sender name, format as blockquote with timestamp
 10. **Merge-forward** — Fetch sub-message tree, resolve sender names, format hierarchically
 11. **Ack reaction** — Add configurable emoji reaction (default: `OnIt`), started alongside the dispatch rather than awaited before it (it is a ~0.7 s round trip)
