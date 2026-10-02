@@ -202,6 +202,23 @@ describe("no dialog", () => {
     expect(readDialog(pane, W)).toBeNull();
   });
 
+  it("is not fooled by the input box when its foot and the status area are not drawn", () => {
+    // Seen on a memory-starved machine for minutes on end: the rule under the
+    // input box and the status area missing, so the last rule is the one ABOVE
+    // the box, and what follows is the prompt with claude's suggestion in it.
+    // That is one `❯` line and no way out — reported to two chats as a dialog.
+    const pane = [
+      "  ⎿  done",
+      "",
+      rule("─"),
+      "❯ 用 metrics 按 _to_idc 拆一下确认",
+      "",
+      "",
+      " ".repeat(130) + "Checking for updates",
+    ].join("\n");
+    expect(readDialog(pane, W)).toBeNull();
+  });
+
   it("ignores a rule that is not the pane's full width", () => {
     const narrow = ["●", "─".repeat(W - 1), "   Select model", "   ❯ 1. Yes"].join("\n");
     expect(readDialog(narrow, W)).toBeNull();

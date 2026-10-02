@@ -24,6 +24,9 @@
  *   /status                ▔          0        yes    dialog (by Esc)
  *   feedback text form     ▔          0        yes    dialog (by Esc)
  *
+ * A `❯` at the edge directly under the last rule is never a dialog: that is the
+ * input box, read as one when its foot rule is missing (see readDialog).
+ *
  * Reading only the LAST rule is what keeps this simple. An earlier version
  * looked for the input box between rules, which meant recognising the rule
  * ABOVE it — and that one carries the session's title on a named session
@@ -143,6 +146,12 @@ export function readDialog(pane: string, width: number): Dialog | null {
   // The status area offers nothing to choose and no way out, because it is not
   // asking anything. That is the whole test.
   if (options.length === 0 && !canLeave) return null;
+  // The prompt itself, right under the last rule and flush with the edge: the
+  // input box with its foot rule and the status area left undrawn, so the rule
+  // above the box is the last one. Seen for minutes on a machine starved of
+  // memory, where the `❯` of a prompt suggestion was reported to two chats as
+  // a one-option dialog. A dialog opens on its title, and indents its options.
+  if (!clipped && lines[last + 1]?.startsWith(CURSOR)) return null;
   if (clipped && !isDialogBottom(region, rows)) return null;
 
   const taken = new Set(options.map((o) => o.text));
