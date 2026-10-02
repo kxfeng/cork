@@ -350,10 +350,12 @@ export function formatDialog(d: Dialog): string {
 
   // One "…" for each run of lines left out, blanks inside the run included. A
   // clipped dialog opens on one: its start is missing too, if not by choice.
+  const label = optionLabels(d);
   const shown: string[] = d.clipped ? ["…"] : [];
   for (const [i, line] of screen.entries()) {
     const gap = shown[shown.length - 1] === "…";
-    if (options.has(i) || kept.has(i)) shown.push(line);
+    if (options.has(i)) shown.push(label(i, line));
+    else if (kept.has(i)) shown.push(line);
     else if (!line.trim()) {
       if (!gap) shown.push(line);
     } else if (!gap) shown.push("…");
@@ -367,6 +369,33 @@ export function formatDialog(d: Dialog): string {
     : "`/pick esc` to cancel · or answer it in the terminal";
 
   return [head, "", "```", ...shown, "```", hint].join("\n");
+}
+
+/**
+ * Numbers for a dialog that does not number its own options, so the reader
+ * sees exactly what `/pick <n>` will aim at.
+ *
+ * Without them the reader counts, and counts what they see — while `/pick`
+ * counts what cork recognised, and the two can differ. Measured on the
+ * feedback list: a group heading ("Other sessions") is read as an option and
+ * an option past a blank line is not, so "2" meant something else to each.
+ * With cork's own numbers on the rows, the heading wearing `[1]` and the row
+ * with no number say plainly where cork went wrong, and `/pick` re-reads the
+ * cursor before Enter, so a pick that lands elsewhere is refused, not made.
+ *
+ * Left alone when claude numbers them itself (`1. Yes`), and when the dialog
+ * cannot be answered from the chat anyway.
+ */
+function optionLabels(d: Dialog): (row: number, line: string) => string {
+  const numbered = d.options.every((o) => /^\d+\.\s/.test(o.text));
+  if (numbered || !d.answerable) return (_row, line) => line;
+  const index = new Map(d.optionRows.map((row, i) => [row, i + 1]));
+  return (row, line) => {
+    const n = index.get(row);
+    if (n === undefined) return line;
+    const lead = /^\s*(?:❯\s*)?/.exec(line)![0];
+    return `${lead}[${n}] ${line.slice(lead.length)}`;
+  };
 }
 
 export function formatDuration(ms: number): string {

@@ -275,6 +275,37 @@ describe("the message", () => {
     expect(text).toContain("1. Default");
   });
 
+  it("numbers the options of a dialog that does not, with cork's own numbers", () => {
+    // Captured off /feedback with a draft queued. cork reads the group heading
+    // as option 1 and misses the option past the blank line; its numbers on
+    // the rows show both, rather than leaving the reader to count differently.
+    const feedback = readDialog(
+      [
+        rule("▔"),
+        "   Feedback drafts",
+        "",
+        "     Other sessions",
+        "   ❯ Safety classifier stopped a defensive security de…   bug · 6d",
+        "",
+        "     + Write new feedback",
+        "",
+        "   Drafts live only on this machine and are never sent without you.",
+        "",
+        "   Enter to review · d to discard · Esc to close",
+      ].join("\n"),
+      W
+    )!;
+    const text = formatDialog(feedback);
+    expect(text).toContain("  [1] Other sessions");
+    expect(text).toContain("❯ [2] Safety classifier");
+    expect(text).toContain("  + Write new feedback");
+    expect(text).not.toContain("[3]");
+  });
+
+  it("leaves claude's own numbering as the only one", () => {
+    expect(formatDialog(PICKER)).not.toMatch(/\[\d+\]/);
+  });
+
   it("ends with one line of instructions, whatever the dialog is", () => {
     expect(formatDialog(PICKER).trimEnd().split("\n").pop()).toBe(
       "`/pick <n>` to choose · `/pick esc` to cancel"

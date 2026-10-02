@@ -1488,7 +1488,13 @@ export class SessionManager extends EventEmitter {
 
       const after = this.currentDialog(key);
       if (!after || after.selected === null || after.options[after.selected]?.text !== want.text) {
-        return { ok: false, reason: `could not select "${want.text}"` };
+        // The cursor would not go where cork's reading of the screen said it
+        // would — that reading is wrong for this dialog, and the terminal is
+        // where it can be answered.
+        return {
+          ok: false,
+          reason: `could not select "${want.text}" — answer it in the terminal`,
+        };
       }
 
       press("Enter");
