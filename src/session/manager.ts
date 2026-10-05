@@ -576,14 +576,6 @@ function takeRestartRecord(now: number): string[] {
   return Array.isArray(rec.keys) ? rec.keys.filter((k): k is string => typeof k === "string") : [];
 }
 
-function fileMtime(file: string): number {
-  try {
-    return fs.statSync(file).mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-
 /**
  * The pane's text, including enough scrollback to hold a long input.
  *
@@ -2242,14 +2234,28 @@ export class SessionManager extends EventEmitter {
         status: claudeSessionStatus(meta.sessionId),
         autopilot: isRunning(loadAutopilot(key)),
         lastInteractionAt: Math.max(
-          fileMtime(transcriptPath(meta.workspace, meta.sessionId)),
+          lastConversationAt(meta.workspace, meta.sessionId),
           Date.parse(meta.lastActiveAt ?? "") || 0,
           this.paneCreatedAt(tmuxName) ?? 0
         ),
         clientActivityAt: this.clientActivity(tmuxName),
       };
       const verdict = idleVerdict(facts, now, limitMs);
-      if (!verdict.stop) continue;
+      if (!verdict.stop) {
+        // Quiet past the limit yet kept: say why, or a pane that outlives the
+        // limit by days leaves nothing to tell which check held it. Only for
+        // the first half hour past it — a few sweeps' worth, with room for one
+        // running late — so a pane held for days does not log every sweep.
+        const over = now - facts.lastInteractionAt - limitMs;
+        if (over >= 0 && over < 30 * 60_000) {
+          logger.info("kept an idle session", {
+            key,
+            why: verdict.why,
+            idleMin: Math.round((now - facts.lastInteractionAt) / 60_000),
+          });
+        }
+        continue;
+      }
 
       this.stopSessionByKey(key);
       stopped.push(key);

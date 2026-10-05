@@ -115,11 +115,19 @@ async function makeManager() {
 
 /**
  * One session as the sweep finds it: a record, claude's registry entry, a
- * transcript last written `quietFor` ago, and a live pane.
+ * transcript whose last exchange was `quietFor` ago, and a live pane.
+ * `bookkeepingFor` appends a timestamp-less row that recent, as claude's
+ * Remote Control bridge does on reconnecting.
  */
 function session(
   key: string,
-  opts: { status?: string | null; quietFor: number; paneUpFor?: number; clients?: number[] }
+  opts: {
+    status?: string | null;
+    quietFor: number;
+    paneUpFor?: number;
+    clients?: number[];
+    bookkeepingFor?: number;
+  }
 ): void {
   const sid = `sid-${key}`;
   const at = Date.now() - opts.quietFor;
@@ -155,8 +163,13 @@ function session(
   const tdir = path.join(home, ".claude", "projects", slug);
   fs.mkdirSync(tdir, { recursive: true });
   const t = path.join(tdir, `${sid}.jsonl`);
-  fs.writeFileSync(t, "{}\n");
+  fs.writeFileSync(t, JSON.stringify({ type: "assistant", timestamp: iso }) + "\n");
   fs.utimesSync(t, at / 1000, at / 1000);
+  if (opts.bookkeepingFor !== undefined) {
+    fs.appendFileSync(t, JSON.stringify({ type: "bridge-session", bridgeSessionId: "b" }) + "\n");
+    const bk = (Date.now() - opts.bookkeepingFor) / 1000;
+    fs.utimesSync(t, bk, bk);
+  }
 
   tmux.panes.set(`cork_${key}`, {
     createdAt: Date.now() - (opts.paneUpFor ?? opts.quietFor),
@@ -200,6 +213,15 @@ describe("the sweep", () => {
     session("resumed", { quietFor: 24 * H, paneUpFor: 10 * 60_000 });
     const mgr = await makeManager();
     expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual([]);
+  });
+
+  it("counts from the last exchange, not from a bookkeeping row written since", async () => {
+    // Seen on two machines: a Remote Control bridge reconnecting appends
+    // `bridge-session` rows, and something else bumps the file's mtime with no
+    // write at all. Neither is anyone talking, and either kept a DM up for days.
+    session("bridged", { quietFor: 5 * H, bookkeepingFor: 10 * 60_000 });
+    const mgr = await makeManager();
+    expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual(["bridged"]);
   });
 
   it("keeps a pane with an autopilot run", async () => {

@@ -18,10 +18,14 @@
  *                     stopping the pane would kill it.
  *   autopilot         a running task. The watcher would bring the pane
  *                     straight back, so stopping it would only interrupt.
- *   the transcript    grew recently. This is every way in at once: chat
- *                     messages, typing at the terminal, Remote Control, the
- *                     watcher's nudges, and local commands, which write rows
- *                     too (measured for /model, /compact and /exit).
+ *   the transcript    has a recent exchange: a `user` or `assistant` row —
+ *                     chat messages, prompts typed at the terminal or sent
+ *                     over Remote Control, the watcher's nudges. Not the
+ *                     file's mtime: a Remote Control bridge reconnecting
+ *                     appends bookkeeping rows, and something bumped one
+ *                     file's mtime with no write at all; either kept a DM up
+ *                     for days. Local commands (/model, /compact) do not
+ *                     count, but the keypresses that typed them do.
  *   a person typing   an attached client that had a keypress recently. Only a
  *                     keypress moves tmux's client_activity — output and a
  *                     resize do not (measured) — so a browser tab left open
