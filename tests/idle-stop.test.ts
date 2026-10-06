@@ -127,6 +127,7 @@ function session(
     paneUpFor?: number;
     clients?: number[];
     bookkeepingFor?: number;
+    channel?: string;
   }
 ): void {
   const sid = `sid-${key}`;
@@ -138,7 +139,7 @@ function session(
     path.join(dir, "sessions", key, "session.json"),
     JSON.stringify({
       sessionId: sid,
-      channel: "lark",
+      channel: opts.channel ?? "lark",
       chatId: `oc_${key}`,
       chatType: "group",
       chatName: key,
@@ -222,6 +223,15 @@ describe("the sweep", () => {
     session("bridged", { quietFor: 5 * H, bookkeepingFor: 10 * 60_000 });
     const mgr = await makeManager();
     expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual(["bridged"]);
+  });
+
+  it("leaves a local session alone, however quiet", async () => {
+    // Driven from the browser or over Remote Control, and nothing brings it
+    // back once stopped: a Remote Control message goes to the claude process,
+    // not to cork. Stopping it would lose it from claude.ai.
+    session("local", { quietFor: 24 * H, channel: "local" });
+    const mgr = await makeManager();
+    expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual([]);
   });
 
   it("keeps a pane with an autopilot run", async () => {

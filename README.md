@@ -197,7 +197,7 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
 ```
 
 - `permissionMode` — `bypassPermissions` passes `--dangerously-skip-permissions`; `extraArgs` are forwarded to `claude` as they are.
-- `idleStopHours` — stop a pane nothing has happened in for this long; `0` means never.
+- `idleStopHours` — stop a chat session's pane nothing has happened in for this long; `0` means never. The next message resumes it. Local sessions (started from cork web, no chat) are never stopped: nothing brings one back, and one driven over Remote Control would vanish from claude.ai.
 - `domain` — `feishu` or `lark`.
 - `owners` — may talk to the bot and run its commands. Edited here only.
 - `allows` — may talk to it in every chat, but not command it. Edited here only; `/allow` in a chat covers just that chat.

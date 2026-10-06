@@ -2214,8 +2214,11 @@ export class SessionManager extends EventEmitter {
 
   /**
    * One pass over every live pane: stop the ones idleVerdict says have been
-   * left alone. Chat sessions and local ones alike — a local session is
-   * started again from the browser the same way a chat one is by a message.
+   * left alone. Chat sessions only. Stopping one is harmless because the next
+   * message brings it back with `claude -r`; a local session has no such way
+   * back. It is driven from the browser or over Remote Control, whose messages
+   * go to the claude process itself, so once that is gone the session vanishes
+   * from claude.ai and nothing restarts it — stopping it loses it.
    *
    * Returns the keys it stopped, for the log and the tests.
    */
@@ -2228,7 +2231,7 @@ export class SessionManager extends EventEmitter {
       // Coming up right now: its channel has not even registered yet.
       if (session?.state === "starting") continue;
       const meta = session?.meta ?? loadSession(key);
-      if (!meta) continue;
+      if (!meta || isLocal(meta)) continue;
 
       const facts: IdleFacts = {
         status: claudeSessionStatus(meta.sessionId),

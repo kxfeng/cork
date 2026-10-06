@@ -31,6 +31,9 @@
  *                     resize do not (measured) — so a browser tab left open
  *                     does not count, and a draft being written does.
  *
+ * Only chat sessions are swept (see stopIdleSessions): a local one has no
+ * message to bring it back.
+ *
  * Pure, so the rules can be tested without a pane, a registry or a clock.
  */
 
