@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import readline from "node:readline";
 
 export interface TranscriptUsage {
   model: string | null;
@@ -211,47 +210,37 @@ export function lastTranscriptModel(
 }
 
 /**
- * Stream the transcript and return the LAST assistant message that carried a
- * `message.usage` block. That row reflects the tokens actually loaded into
- * context for the most recent model turn — which is what Claude Code's
- * `/context` view shows. Returns null if the file is missing or has no usage.
+ * The LAST assistant message that carried a `message.usage` block. That row
+ * reflects the tokens actually loaded into context for the most recent model
+ * turn — which is what Claude Code's `/context` view shows. Returns null if the
+ * file is missing or has no usage.
+ *
+ * Read from the end, not streamed from the start: a long-running session's
+ * transcript reaches hundreds of MB (265MB measured), and parsing every line
+ * of it made the status call take 1.7s for one number near the bottom.
  */
 export async function readLatestUsage(
   workspace: string,
   sessionId: string
 ): Promise<TranscriptUsage | null> {
-  const file = transcriptPath(workspace, sessionId);
-  if (!fs.existsSync(file)) return null;
-
-  let latest: TranscriptUsage | null = null;
-  const rl = readline.createInterface({
-    input: fs.createReadStream(file, { encoding: "utf-8" }),
-    crlfDelay: Infinity,
-  });
-  for await (const line of rl) {
-    if (!line) continue;
-    let obj: any;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const msg = obj?.message;
-    if (!msg || typeof msg !== "object") continue;
-    const usage = msg.usage;
-    if (!usage || typeof usage !== "object") continue;
+  return findLastTranscriptRow<TranscriptUsage>(workspace, sessionId, (row) => {
+    const msg = (row as { message?: unknown })?.message as
+      | { usage?: unknown; model?: unknown }
+      | undefined;
+    if (!msg || typeof msg !== "object") return null;
+    const usage = msg.usage as Record<string, number> | undefined;
+    if (!usage || typeof usage !== "object") return null;
     // Claude Code synthesizes assistant rows for API errors and they carry a
     // usage block too. Taking one as "latest" would report `<synthetic>` as the
     // model and size the context window off a name that isn't a model.
-    if (msg.model === "<synthetic>") continue;
-    latest = {
+    if (msg.model === "<synthetic>") return null;
+    return {
       model: typeof msg.model === "string" ? msg.model : null,
       inputTokens: usage.input_tokens || 0,
       cacheCreationTokens: usage.cache_creation_input_tokens || 0,
       cacheReadTokens: usage.cache_read_input_tokens || 0,
     };
-  }
-  return latest;
+  });
 }
 
 /**

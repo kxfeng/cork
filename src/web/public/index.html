@@ -1099,8 +1099,16 @@
         if (open) setOffline(!open.alive);
       }
 
+      // Poll only while the page is on screen: a tab left in the background has
+      // nobody looking at the list. Coming back refreshes at once, so nothing
+      // shown is up to five seconds stale on return.
       refresh();
-      setInterval(refresh, 5000);
+      setInterval(() => {
+        if (!document.hidden) refresh();
+      }, 5000);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) refresh();
+      });
     </script>
   </body>
 </html>
