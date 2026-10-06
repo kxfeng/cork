@@ -45,6 +45,7 @@ import {
   IDLE_STOP_CHECK_MS,
   idleLimitMs,
   idleVerdict,
+  LOCAL_IDLE_STOP_MS,
   type IdleFacts,
 } from "./idle-stop.js";
 import {
@@ -2075,6 +2076,43 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * After the daemon starts, bring back the local sessions someone left
+   * running (keepAlive), however cork went down — `cork restart`, a crash,
+   * the machine rebooting. Nothing else would: a local session has no chat
+   * message to start it, and a Remote Control message goes to the claude
+   * process, which is gone. Only the pane comes back; nothing is typed into it.
+   *
+   * One with no exchange in LOCAL_IDLE_STOP_MS is not brought back, and is no
+   * longer marked: it has been forgotten, and the sweep would stop it anyway.
+   * Returns the keys started.
+   */
+  restoreLocalSessions(now = Date.now()): string[] {
+    const live = liveTmuxSessions();
+    const started: string[] = [];
+    for (const { key, meta } of listSessions()) {
+      if (!isLocal(meta) || !meta.keepAlive) continue;
+      if (live.has(`${TMUX_PREFIX}${key}`)) continue;
+      const last = Math.max(
+        lastConversationAt(meta.workspace, meta.sessionId),
+        Date.parse(meta.lastActiveAt ?? "") || 0
+      );
+      if (now - last >= LOCAL_IDLE_STOP_MS) {
+        delete meta.keepAlive;
+        saveSession(key, meta);
+        logger.info("not restoring a forgotten local session", {
+          key,
+          idleDays: Math.round((now - last) / 86_400_000),
+        });
+        continue;
+      }
+      this.rememberId(key, meta);
+      if (this.startSessionByKey(key)) started.push(key);
+    }
+    if (started.length > 0) logger.info("restored local sessions", { keys: started });
+    return started;
+  }
+
+  /**
    * Tear down every session belonging to a chat — the chat's own session and any
    * thread sessions under it. For when the chat itself is gone: disbanded, or the
    * bot removed from it. Nobody can reach those panes again, so leaving them
@@ -2152,9 +2190,19 @@ export class SessionManager extends EventEmitter {
     return false;
   }
 
-  startSessionByKey(key: string): boolean {
+  /**
+   * `byUser`: someone asked for this one — Start in cork web. For a local
+   * session that marks it as meant to be up, so the daemon brings it back on
+   * its next start (see restoreLocalSessions).
+   */
+  startSessionByKey(key: string, opts: { byUser?: boolean } = {}): boolean {
     const meta = this.sessions.get(key)?.meta ?? loadSession(key);
     if (!meta) return false;
+    if (opts.byUser && isLocal(meta)) {
+      meta.keepAlive = true;
+      meta.lastActiveAt = new Date().toISOString();
+      saveSession(key, meta);
+    }
     this.prepareSession({
       channel: meta.channel ?? "lark",
       chatId: meta.chatId,
@@ -2171,7 +2219,13 @@ export class SessionManager extends EventEmitter {
    * next comes up would replay them out of context.
    */
   stopSessionByKey(key: string): boolean {
-    if (!this.sessions.has(key) && !loadSession(key)) return false;
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return false;
+    // Stopped on purpose, so not to be brought back on the daemon's next start.
+    if (isLocal(meta) && meta.keepAlive) {
+      delete meta.keepAlive;
+      saveSession(key, meta);
+    }
     this.killTmux(key);
     const session = this.sessions.get(key);
     if (session) {
@@ -2214,11 +2268,16 @@ export class SessionManager extends EventEmitter {
 
   /**
    * One pass over every live pane: stop the ones idleVerdict says have been
-   * left alone. Chat sessions only. Stopping one is harmless because the next
-   * message brings it back with `claude -r`; a local session has no such way
-   * back. It is driven from the browser or over Remote Control, whose messages
-   * go to the claude process itself, so once that is gone the session vanishes
-   * from claude.ai and nothing restarts it — stopping it loses it.
+   * left alone. A chat session after `limitMs`: stopping one is harmless
+   * because the next message brings it back with `claude -r`. A local session
+   * only after LOCAL_IDLE_STOP_MS: it has no such way back — it is driven from
+   * the browser or over Remote Control, whose messages go to the claude
+   * process itself, so once that is gone it vanishes from claude.ai.
+   *
+   * A local session counts from its last exchange or from `lastActiveAt` —
+   * moved when someone starts it on purpose — not from when its pane came up:
+   * the daemon brings local panes back on every start, and that must not
+   * restart the week.
    *
    * Returns the keys it stopped, for the log and the tests.
    */
@@ -2231,7 +2290,9 @@ export class SessionManager extends EventEmitter {
       // Coming up right now: its channel has not even registered yet.
       if (session?.state === "starting") continue;
       const meta = session?.meta ?? loadSession(key);
-      if (!meta || isLocal(meta)) continue;
+      if (!meta) continue;
+      const local = isLocal(meta);
+      const limit = local ? LOCAL_IDLE_STOP_MS : limitMs;
 
       const facts: IdleFacts = {
         status: claudeSessionStatus(meta.sessionId),
@@ -2239,17 +2300,17 @@ export class SessionManager extends EventEmitter {
         lastInteractionAt: Math.max(
           lastConversationAt(meta.workspace, meta.sessionId),
           Date.parse(meta.lastActiveAt ?? "") || 0,
-          this.paneCreatedAt(tmuxName) ?? 0
+          local ? 0 : this.paneCreatedAt(tmuxName) ?? 0
         ),
         clientActivityAt: this.clientActivity(tmuxName),
       };
-      const verdict = idleVerdict(facts, now, limitMs);
+      const verdict = idleVerdict(facts, now, limit);
       if (!verdict.stop) {
         // Quiet past the limit yet kept: say why, or a pane that outlives the
         // limit by days leaves nothing to tell which check held it. Only for
         // the first half hour past it — a few sweeps' worth, with room for one
         // running late — so a pane held for days does not log every sweep.
-        const over = now - facts.lastInteractionAt - limitMs;
+        const over = now - facts.lastInteractionAt - limit;
         if (over >= 0 && over < 30 * 60_000) {
           logger.info("kept an idle session", {
             key,
@@ -2337,6 +2398,7 @@ export class SessionManager extends EventEmitter {
       lastMessagePreview: "",
       claudeSessionStarted: false,
       mentionRequired: false,
+      keepAlive: true,
     };
     saveSession(key, meta);
     this.rememberId(key, meta);

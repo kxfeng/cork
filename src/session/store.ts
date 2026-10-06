@@ -59,6 +59,16 @@ export interface SessionMeta {
    * own record never holds one — and carried across `/new`.
    */
   allows?: string[];
+  /**
+   * A local session only: someone left it running — created it, or pressed
+   * Start in cork web — and has not stopped it since. Removed when it is
+   * stopped, by hand or by the idle sweep. The daemon brings back every local
+   * session that carries it on start, whatever stopped cork: nothing else
+   * would, since a Remote Control message goes to the claude process and
+   * never reaches cork. A deliberate start also moves `lastActiveAt`, which is
+   * what the 7-day limit counts from.
+   */
+  keepAlive?: boolean;
 }
 
 /**

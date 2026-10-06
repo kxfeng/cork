@@ -31,11 +31,18 @@
  *                     resize do not (measured) — so a browser tab left open
  *                     does not count, and a draft being written does.
  *
- * Only chat sessions are swept (see stopIdleSessions): a local one has no
- * message to bring it back.
+ * A local session is swept on a much longer limit (LOCAL_IDLE_STOP_MS): it
+ * has no message to bring it back, so stopping it after an afternoon would
+ * lose it, but one nobody has spoken to in a week has been forgotten.
  *
  * Pure, so the rules can be tested without a pane, a registry or a clock.
  */
+
+/**
+ * How long a local session may go without an exchange before it is stopped,
+ * and past which the daemon no longer brings it back on start.
+ */
+export const LOCAL_IDLE_STOP_MS = 7 * 24 * 3_600_000;
 
 /** How often the sweep runs. The error on the limit is at most this. */
 export const IDLE_STOP_CHECK_MS = 10 * 60_000;

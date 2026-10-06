@@ -468,7 +468,7 @@ export class WebServer {
         const key = msg.session;
         const ok =
           action === "start"
-            ? this.sessions.startSessionByKey(key)
+            ? this.sessions.startSessionByKey(key, { byUser: true })
             : action === "stop"
               ? this.sessions.stopSessionByKey(key)
               : action === "rename"

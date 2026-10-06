@@ -122,6 +122,7 @@ export class CorkDaemon {
     }
 
     this.router.sessionManager.wakeInterrupted();
+    this.router.sessionManager.restoreLocalSessions();
     this.router.sessionManager.startIdleStop();
   }
 

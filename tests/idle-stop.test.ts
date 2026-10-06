@@ -128,6 +128,9 @@ function session(
     clients?: number[];
     bookkeepingFor?: number;
     channel?: string;
+    keepAlive?: boolean;
+    activeFor?: number;
+    noPane?: boolean;
   }
 ): void {
   const sid = `sid-${key}`;
@@ -140,12 +143,14 @@ function session(
     JSON.stringify({
       sessionId: sid,
       channel: opts.channel ?? "lark",
+      ...(opts.keepAlive ? { keepAlive: true } : {}),
       chatId: `oc_${key}`,
       chatType: "group",
       chatName: key,
       workspace: ws,
       createdAt: iso,
-      lastActiveAt: iso,
+      lastActiveAt:
+        opts.activeFor !== undefined ? new Date(Date.now() - opts.activeFor).toISOString() : iso,
       lastMessagePreview: "",
       claudeSessionStarted: true,
     })
@@ -172,6 +177,7 @@ function session(
     fs.utimesSync(t, bk, bk);
   }
 
+  if (opts.noPane) return;
   tmux.panes.set(`cork_${key}`, {
     createdAt: Date.now() - (opts.paneUpFor ?? opts.quietFor),
     clients: opts.clients ?? [],
@@ -194,6 +200,52 @@ afterEach(() => {
   delete process.env.CORK_DIR;
   process.env.HOME = realHome;
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+describe("bringing local sessions back on start", () => {
+  async function restore() {
+    const mgr = await makeManager();
+    vi.spyOn(mgr, "startSessionByKey").mockImplementation(() => true);
+    return { mgr, started: mgr.restoreLocalSessions(Date.now()) as string[] };
+  }
+
+  it("starts the local sessions someone left running", async () => {
+    session("kept", { quietFor: 2 * H, channel: "local", keepAlive: true, noPane: true });
+    session("stopped", { quietFor: 2 * H, channel: "local", noPane: true });
+    session("chat", { quietFor: 2 * H, keepAlive: true, noPane: true });
+    session("up", { quietFor: 2 * H, channel: "local", keepAlive: true });
+    expect((await restore()).started).toEqual(["kept"]);
+  });
+
+  it("leaves one untouched for a week, and stops marking it", async () => {
+    session("forgotten", { quietFor: 8 * 24 * H, channel: "local", keepAlive: true, noPane: true });
+    expect((await restore()).started).toEqual([]);
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, "sessions", "forgotten", "session.json"), "utf8"));
+    expect(meta.keepAlive).toBeUndefined();
+  });
+});
+
+describe("marking a local session as meant to be up", () => {
+  const meta = (key: string) =>
+    JSON.parse(fs.readFileSync(path.join(dir, "sessions", key, "session.json"), "utf8"));
+
+  it("is set by a Start someone pressed, which also moves lastActiveAt, and cleared by a stop", async () => {
+    session("l", { quietFor: H, channel: "local", noPane: true });
+    const mgr = await makeManager();
+    mgr.stopSessionByKey.mockRestore();
+    vi.spyOn(mgr, "prepareSession").mockImplementation(() => undefined);
+    vi.spyOn(mgr, "killTmux").mockImplementation(() => undefined);
+
+    const before = meta("l").lastActiveAt;
+    mgr.startSessionByKey("l"); // cork's own start, e.g. to type a command
+    expect(meta("l").keepAlive).toBeUndefined();
+    expect(meta("l").lastActiveAt).toBe(before);
+    mgr.startSessionByKey("l", { byUser: true });
+    expect(meta("l").keepAlive).toBe(true);
+    expect(Date.parse(meta("l").lastActiveAt)).toBeGreaterThan(Date.parse(before));
+    mgr.stopSessionByKey("l");
+    expect(meta("l").keepAlive).toBeUndefined();
+  });
 });
 
 describe("the sweep", () => {
@@ -225,13 +277,23 @@ describe("the sweep", () => {
     expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual(["bridged"]);
   });
 
-  it("leaves a local session alone, however quiet", async () => {
+  it("gives a local session a week, not the chat limit", async () => {
     // Driven from the browser or over Remote Control, and nothing brings it
     // back once stopped: a Remote Control message goes to the claude process,
-    // not to cork. Stopping it would lose it from claude.ai.
-    session("local", { quietFor: 24 * H, channel: "local" });
+    // not to cork. A day's silence is not forgotten; a week's is.
+    session("day", { quietFor: 24 * H, channel: "local" });
+    session("week", { quietFor: 8 * 24 * H, channel: "local" });
     const mgr = await makeManager();
-    expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual([]);
+    expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual(["week"]);
+  });
+
+  it("counts a local session from when someone started it, not from its pane", async () => {
+    // The daemon brings local panes back on every start; that must not restart
+    // the week. Someone pressing Start does.
+    session("restored", { quietFor: 8 * 24 * H, channel: "local", keepAlive: true, paneUpFor: 60_000 });
+    session("pressed", { quietFor: 8 * 24 * H, channel: "local", keepAlive: true, activeFor: 60_000 });
+    const mgr = await makeManager();
+    expect(mgr.stopIdleSessions(Date.now(), LIMIT)).toEqual(["restored"]);
   });
 
   it("keeps a pane with an autopilot run", async () => {
