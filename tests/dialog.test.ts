@@ -219,6 +219,38 @@ describe("no dialog", () => {
     expect(readDialog(pane, W)).toBeNull();
   });
 
+  it("is not fooled by the list of background agents under the status area", () => {
+    // Captured off a session with a subagent at work: claude lists the agents
+    // below the status line, cursor and all. Two rows and a timer that moves
+    // every few seconds — read as a dialog, it was announced over and over.
+    const pane = [
+      "● Agent processing; awaiting update",
+      "",
+      rule("─"),
+      "❯ ",
+      rule("─"),
+      "  Opus 5.5 | Context: ██▒▒▒▒ 122K/1M 12%",
+      "  ↑/↓ to select",
+      "",
+      "❯ ● main",
+      "  ◯ general-purpose  Reading build_svc.sh service rows      6m 13s · ↓ 132.5k tokens",
+    ].join("\n");
+    expect(readDialog(pane, W)).toBeNull();
+  });
+
+  it("is not fooled by the agent list under a draft of several lines", () => {
+    const pane = [
+      rule("─"),
+      "❯ first line of a draft",
+      "  second line",
+      rule("─"),
+      "  Opus 5.5 | Context: ██▒▒▒▒ 122K/1M 12%",
+      "❯ ● main",
+      "  ◯ general-purpose  Reading files      1m 2s",
+    ].join("\n");
+    expect(readDialog(pane, W)).toBeNull();
+  });
+
   it("ignores a rule that is not the pane's full width", () => {
     const narrow = ["●", "─".repeat(W - 1), "   Select model", "   ❯ 1. Yes"].join("\n");
     expect(readDialog(narrow, W)).toBeNull();

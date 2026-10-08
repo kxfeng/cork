@@ -152,6 +152,15 @@ export function readDialog(pane: string, width: number): Dialog | null {
   // memory, where the `❯` of a prompt suggestion was reported to two chats as
   // a one-option dialog. A dialog opens on its title, and indents its options.
   if (!clipped && lines[last + 1]?.startsWith(CURSOR)) return null;
+  // The rule under the input box: what follows is the status area, whatever it
+  // holds. With background agents running claude adds a list of them there
+  // (`↑/↓ to select`, `❯ ● main`, `◯ general-purpose  …`), which reads as a
+  // dialog with two options — and its timers change every few seconds, so a
+  // session with an agent at work announced a fresh dialog to its chat on
+  // every check. The box is recognised from above: the prompt sits at the
+  // edge, and a draft's later lines are indented under it, with nothing blank
+  // in between. A dialog's own rule has the conversation above it instead.
+  if (!clipped && isInputFoot(lines, last)) return null;
   if (clipped && !isDialogBottom(region, rows)) return null;
 
   const taken = new Set(options.map((o) => o.text));
@@ -183,6 +192,17 @@ export function readDialog(pane: string, width: number): Dialog | null {
     footer,
     answerable: options.length > 0 && !folded,
   };
+}
+
+/** Whether the rule at `at` is the one under the input box. */
+function isInputFoot(lines: string[], at: number): boolean {
+  for (let i = at - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.trim()) return false;
+    if (line.startsWith(CURSOR)) return true;
+    if (!/^\s/.test(line)) return false;
+  }
+  return false;
 }
 
 /**
