@@ -573,6 +573,14 @@
        * That is the point: a message typed here is addressed to the pane, not to
        * the group.
        */
+      /**
+       * A key the IME consumed: Enter mid-composition commits the pinyin as
+       * letters, so the field keeps it and nothing is submitted or dismissed.
+       * isComposing is the UI Events signal; keyCode 229 ("Process") covers
+       * WebKit, which ends the composition before the confirming keydown.
+       */
+      const imeHandled = (e) => e.isComposing || e.keyCode === 229;
+
       /** How long the Enter trails the text it submits — see send(). */
       const SUBMIT_DELAY_MS = 50;
 
@@ -625,7 +633,7 @@
       }
 
       $("msg").addEventListener("keydown", (e) => {
-        if (e.key !== "Enter" || e.isComposing) return; // IME mid-composition
+        if (e.key !== "Enter" || imeHandled(e)) return;
         if (e.shiftKey) return; // Shift+Enter: newline, the default
         e.preventDefault();
         send();
@@ -726,6 +734,7 @@
           m.hidden = false;
           (focus ? $(focus) : ok ? $("mok") : $("mcancel")).focus();
           const onKey = (e) => {
+            if (imeHandled(e)) return; // Enter just lands the letters; the dialog stays
             if (e.key === "Escape") { e.stopPropagation(); done(false); }
             else if (e.key === "Enter") { e.stopPropagation(); done(!!ok); }
           };
