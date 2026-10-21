@@ -15,6 +15,7 @@ export function loadConfig(): CorkConfig {
     ...DEFAULT_CONFIG,
     ...parsed,
     claude: { ...DEFAULT_CONFIG.claude, ...parsed.claude },
+    autopilot: { ...DEFAULT_CONFIG.autopilot, ...parsed.autopilot },
     channels: { ...DEFAULT_CONFIG.channels, ...parsed.channels },
   };
 }

@@ -25,7 +25,7 @@ import {
   readCompactOutcome,
   type CompactOutcome,
 } from "./transcript.js";
-import { readDialog, goalArmed, type Dialog } from "./dialog.js";
+import { readDialog, type Dialog } from "./dialog.js";
 import {
   parseModelPicker,
   chooseModelRow,
@@ -63,7 +63,10 @@ import {
   archiveBeforeReset,
   type AutopilotRecord,
   type AutopilotStopReason,
+  type Evaluation,
+  headline,
 } from "./autopilot.js";
+import { runEvaluator } from "./evaluator.js";
 
 export { TMUX_PREFIX };
 
@@ -100,7 +103,7 @@ const PROMPT_SETTLE_MS = 8_000;
  * Backspace takes what is before the cursor and Delete what is after, and both
  * are needed: a cleared draft was measured down to the last few characters,
  * which were sitting after the cursor and which the next attempt then typed
- * around. Comfortably past MAX_GOAL_CHARS so the longest allowed goal cannot
+ * around. Comfortably past any slash command cork types, so none of them can
  * outlast it.
  */
 const CLEAR_PRESSES = 4000;
@@ -665,6 +668,12 @@ interface ActiveSession {
  * - "notify" (sessionKey, text) — cork itself has something to tell the chat
  *   (an autopilot run finished, stalled, or could not be restarted)
  */
+/** The first non-empty line of a text, capped — for a one-line chat notice. */
+function firstLineOf(text: string, max: number): string {
+  const line = text.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+  return [...line].length <= max ? line : `${[...line].slice(0, max).join("")}…`;
+}
+
 export class SessionManager extends EventEmitter {
   private sessions = new Map<string, ActiveSession>();
   /**
@@ -1133,8 +1142,7 @@ export class SessionManager extends EventEmitter {
    *     is no longer at the start of the line and the whole thing is sent as an
    *     ordinary chat message. Nothing reports this.
    *   - past ~800 characters claude folds the input into a pasted block, with
-   *     the same result. (Callers keep commands far below that; see
-   *     MAX_GOAL_CHARS.)
+   *     the same result. (Callers keep commands far below that.)
    *
    * A third, found the same way: sending the text and the Enter back to back
    * loses the Enter. The command sits in the input box unsubmitted, and the
@@ -1921,30 +1929,6 @@ export class SessionManager extends EventEmitter {
       notify: (text: string) => this.emit("notify", key, text),
       isAlive: () => liveTmuxSessions().has(`${TMUX_PREFIX}${key}`),
       restart: () => this.startSessionByKey(key),
-      clearGoal: () => {
-        // Interrupt first, same as `/autopilot stop` does: the model is working
-        // on the goal, and a command typed into a busy pane queues behind it.
-        // Not waited on, exactly as the command handler does not wait: the
-        // watcher records the attempt now, and the transcript is what says
-        // whether the goal actually went.
-        void this.interruptPane(key)
-          .then(() => this.sendSlashCommand(key, "/goal clear"))
-          .catch(() => {});
-      },
-      goalArmed: () => {
-        // Only from a connected session: a pane still drawing its first frame
-        // has no input box yet, and "no box" is reported as "cannot say"
-        // rather than "no goal", which would type the goal in for nothing.
-        if (this.sessions.get(key)?.state !== "connected") return null;
-        return goalArmed(capturePaneSafe(`${TMUX_PREFIX}${key}`));
-      },
-      rearmGoal: (condition: string) => {
-        // Not waited on, and no interrupt first — unlike `clearGoal`, this is
-        // not trying to stop anything. A slash command typed into a busy pane
-        // queues and runs at the end of the turn, which is soon enough; what
-        // says whether it took is the `goal_status` row, not this call.
-        void this.sendSlashCommand(key, `/goal ${condition}`).catch(() => {});
-      },
       contextWindow: () => this.config.claude.contextWindow ?? 0,
       compactPercent: () => this.config.claude.autoCompactPercent ?? DEFAULT_COMPACT_PERCENT,
     };
@@ -2019,6 +2003,191 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Start an autopilot run's watcher and tell the model to begin, once the pane
+   * is connected. False when the pane did not come up in time, or the session
+   * is unknown — the record is already `running` either way, and the watcher
+   * restarts a dead pane on its own.
+   */
+  async beginAutopilot(key: string, text: string): Promise<boolean> {
+    this.watchAutopilot(key);
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return false;
+    const ok = await this.ensureConnected(key, SESSION_START_WAIT_MS);
+    if (!ok) return false;
+    return this.dispatchSystemMessage(key, meta.chatId, text, "cork:autopilot", "cork-autopilot");
+  }
+
+  /**
+   * A command the model sent through the channel MCP's `cork` tool.
+   *
+   * One tool, a string command, a whitelist here: the model gets a single
+   * place to tell cork things, and cork decides which things it will hear.
+   * The user's own commands (`/autopilot stop`, `/new`, …) are not on the list
+   * — a model that could stop its own run would be grading itself.
+   */
+  async runModelCommand(key: string, command: string): Promise<{ ok: boolean; text: string }> {
+    const name = command.trim().split(/\s+/).filter(Boolean).join(" ");
+    logger.info("model command", { key, command: name.slice(0, 80) });
+    if (name === "autopilot done") return this.evaluateAutopilot(key);
+    return {
+      ok: false,
+      text: `Unknown command "${name.slice(0, 80)}". Commands: \`autopilot done\`.`,
+    };
+  }
+
+  /**
+   * The model says its autopilot goal is met: start the evaluator, and answer
+   * now. The verdict is delivered later — into the session as a message, and
+   * to the chat as a line — because an evaluation takes a minute or more and
+   * the tool call should not sit open for it.
+   *
+   * One evaluation at a time per run. A second `autopilot done` while one is
+   * going is refused rather than queued: the first verdict is about to arrive,
+   * and it will say what to do next.
+   */
+  async evaluateAutopilot(key: string): Promise<{ ok: boolean; text: string }> {
+    const rec = loadAutopilot(key);
+    if (!isRunning(rec)) {
+      return {
+        ok: false,
+        text: "Autopilot is not running in this session, so there is nothing to evaluate.",
+      };
+    }
+    if (rec.evaluatingSince) {
+      return {
+        ok: false,
+        text:
+          `An evaluation is already running (since ${rec.evaluatingSince}) — if you ` +
+          "called a moment ago, that call started it. Wait for its verdict; it " +
+          "arrives as a message here.",
+      };
+    }
+    const meta = this.sessions.get(key)?.meta ?? loadSession(key);
+    if (!meta) return { ok: false, text: "Cork has no record of this session." };
+
+    // Nothing is said in the chat: an evaluation is a step inside the run,
+    // and the user hears about endings. `/ap status` shows "(evaluating)".
+    const startedAt = new Date().toISOString();
+    updateAutopilot(key, { evaluatingSince: startedAt });
+    logger.info("evaluation started", { key });
+    void this.finishEvaluation(key, meta, startedAt, rec.startedAt);
+    return {
+      ok: true,
+      text:
+        "Evaluation started; the verdict arrives as a message in this session, " +
+        "usually within a few minutes. The evaluator reads GOAL.md, EVIDENCE.md, " +
+        "the workspace and the transcript live, so leave EVIDENCE.md and the " +
+        "workspace as they are until it answers.",
+    };
+  }
+
+  /**
+   * Run the evaluator to its verdict and act on it. Never throws.
+   *
+   * `runStartedAt` identifies the run this verdict is about: a run can be
+   * stopped, re-drafted and started again inside the minutes an evaluation
+   * takes, and a verdict about the old goal must not land on the new run's
+   * record (or recreate a record `/new` has just deleted).
+   */
+  private async finishEvaluation(
+    key: string,
+    meta: SessionMeta,
+    startedAt: string,
+    runStartedAt: string | undefined
+  ): Promise<void> {
+    const verdict = await runEvaluator({
+      workspace: meta.workspace,
+      sessionDir: sessionDir(key),
+      transcript: transcriptPath(meta.workspace, meta.sessionId),
+      model: this.config.autopilot.evaluatorModel,
+      PATH: this.panePath(),
+      runStartedAt,
+    });
+    const evaluation: Evaluation = {
+      at: startedAt,
+      ok: verdict.ok,
+      impossible: verdict.impossible,
+      reason: verdict.reason,
+      durationMs: verdict.durationMs,
+      ...(verdict.costUsd !== undefined ? { costUsd: verdict.costUsd } : {}),
+      ...(verdict.sessionId ? { sessionId: verdict.sessionId } : {}),
+    };
+
+    const rec = loadAutopilot(key);
+    if (rec.state === "idle" || rec.startedAt !== runStartedAt) {
+      // A different run, or none: the verdict is about a goal that is gone.
+      logger.info("evaluation finished for a run that no longer exists", { key, ok: verdict.ok });
+      return;
+    }
+    const evaluations = [...(rec.evaluations ?? []), evaluation];
+    // The run ended while this was going — `/autopilot stop` — or a later
+    // evaluation replaced this one. Keep the verdict on the record and change
+    // nothing else.
+    if (!isRunning(rec) || rec.evaluatingSince !== startedAt) {
+      updateAutopilot(key, { evaluations });
+      logger.info("evaluation finished after its run ended", { key, ok: verdict.ok });
+      return;
+    }
+    updateAutopilot(key, {
+      evaluations,
+      evaluatingSince: undefined,
+      // A verdict is a check of the goal: the hourly self-check counts from it.
+      lastGoalCheckAt: new Date().toISOString(),
+    });
+
+    // Delivered now when the session is connected; otherwise once it is — a
+    // pane can be mid-restart when a verdict lands, and a not-met verdict
+    // that nobody hears costs another round against unchanged evidence.
+    const tell = (text: string) => {
+      if (this.dispatchSystemMessage(key, meta.chatId, text, "cork:evaluator", "cork-evaluator")) return;
+      logger.info("verdict waits for the session to come back", { key });
+      void this.ensureConnected(key, SESSION_START_WAIT_MS).then((ok) => {
+        if (!ok || !this.dispatchSystemMessage(key, meta.chatId, text, "cork:evaluator", "cork-evaluator")) {
+          logger.warn("verdict could not be delivered to the model", { key });
+        }
+      });
+    };
+
+    if (verdict.ok) {
+      const ended = stopAutopilot(key, "met", verdict.reason);
+      // One line to the chat; the evaluator's reasons are on the record
+      // (`evaluations`) for anyone who needs to see what was checked. The
+      // model is told too: it may have wrap-up to do (PROJECT.md, loose ends),
+      // and the user may follow with ordinary requests in the same session.
+      this.emit("notify", key, headline("completed", ended));
+      tell(
+        "Autopilot: the evaluator confirmed every condition in GOAL.md is met " +
+          "and the run is over. Leave PROJECT.md current and finish any wrap-up; " +
+          "anything the user asks from here is ordinary conversation."
+      );
+      return;
+    }
+    if (verdict.impossible) {
+      const ended = stopAutopilot(key, "impossible", verdict.reason);
+      this.emit(
+        "notify",
+        key,
+        `${headline("stopped (impossible)", ended)}\n${firstLineOf(verdict.reason, 200)}`
+      );
+      tell(
+        "Autopilot: the evaluator judged the goal impossible, and the run is over. " +
+          `Its reasons:\n\n${verdict.reason}\n\n` +
+          "Leave PROJECT.md current and stop working toward the goal; the user decides what happens next."
+      );
+      return;
+    }
+    // Not met is a round, not an ending. However many rounds a run takes,
+    // the chat hears the result; the rounds are on the record.
+    logger.info("evaluation: not met", { key, round: evaluations.length });
+    tell(
+      "Autopilot: the evaluator says the goal is NOT met yet. Its reasons:\n\n" +
+        `${verdict.reason}\n\n` +
+        "Address them, update EVIDENCE.md, and call the cork tool with `autopilot done` " +
+        "again when you believe every condition is met."
+    );
+  }
+
+  /**
    * Make sure the watcher for this session is live, for a task that has just
    * been started. A connected session already has one; this covers the case
    * where it does not yet.
@@ -2032,7 +2201,28 @@ export class SessionManager extends EventEmitter {
     const resumed: string[] = [];
     for (const { key, meta } of listSessions()) {
       if (isLocal(meta)) continue;
-      if (!isRunning(loadAutopilot(key))) continue;
+      const rec = loadAutopilot(key);
+      if (!isRunning(rec)) continue;
+      // An evaluator that was running died with the daemon; its verdict is not
+      // coming. Clear the flag so the next `autopilot done` is accepted and the
+      // stall check nudges again, and ask for the call to be repeated once the
+      // pane is back.
+      if (rec.evaluatingSince) {
+        updateAutopilot(key, { evaluatingSince: undefined });
+        logger.info("an evaluation was lost to the restart", { key });
+        void this.ensureConnected(key, SESSION_START_WAIT_MS).then((ok) => {
+          if (!ok) return;
+          this.dispatchSystemMessage(
+            key,
+            meta.chatId,
+            "Cork restarted while your goal was being evaluated, and that " +
+              "evaluation was lost. Call the cork tool with `autopilot done` " +
+              "again when you are ready.",
+            "cork:autopilot",
+            "cork-autopilot"
+          );
+        });
+      }
       this.rememberId(key, meta);
       if (this.startSessionByKey(key)) resumed.push(key);
     }
@@ -2179,7 +2369,7 @@ export class SessionManager extends EventEmitter {
   private async ensureConnected(key: string, timeoutMs: number): Promise<boolean> {
     if (this.sessions.get(key)?.state === "connected") return true;
     if (!this.startSessionByKey(key)) return false;
-    logger.info("starting a session to type a command into", { key });
+    logger.info("starting a session so it can be reached", { key });
 
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -2828,26 +3018,6 @@ export class SessionManager extends EventEmitter {
       workspace: meta.workspace,
       resume,
     });
-
-    // A new claude process has no goal until something puts one back. Claude
-    // rebuilds it from its own conversation, which after a compaction no
-    // longer reaches the row the goal was set on — so a run can come back
-    // with nothing driving it and nothing anywhere saying so. Mark it here,
-    // at the one place a pane is created, and let the watcher type it in.
-    // `running` only, not every state a run can be in. A `starting` task has
-    // cork's own `/goal` in flight already and re-arming would send a second;
-    // a `stopping` one is having its goal cleared on purpose, and putting it
-    // back is the opposite of what was asked.
-    if (resume && loadAutopilot(key).state === "running") {
-      updateAutopilot(key, {
-        needsRearm: true,
-        rearmAttempts: 0,
-        rearmPendingSince: undefined,
-        blockedSince: new Date().toISOString(),
-        rearmNotified: false,
-      });
-      logger.info("goal needs re-arming after resume", { key });
-    }
 
     try {
       this.spawnPane(key, meta, claudeArgs);

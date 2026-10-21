@@ -26,16 +26,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-/**
- * States that get the instructions.
- *
- * `stopping` is left out on purpose: cork has already typed `/goal clear` by
- * then and the run is ending, so steering the summary toward a goal that is
- * on its way out would preserve the wrong thing. `starting` is in — GOAL.md
- * and PROJECT.md are both written by then, and a compaction landing in that
- * window is exactly when they are worth keeping.
- */
-const LIVE_STATES = ["starting", "running"];
+/** States that get the instructions: a run that is going. */
+const LIVE_STATES = ["running"];
 
 /** Where cork keeps this session's files, or null when there is no session. */
 function sessionDir(): string | null {
@@ -71,13 +63,16 @@ function instructions(dir: string): string {
   return [
     "This session is running an unattended task that continues across many turns",
     `and compactions. Its files are in ${dir}/ — GOAL.md (the acceptance`,
-    "conditions, frozen for the duration) and PROJECT.md (the working record).",
+    "conditions, frozen for the duration), PROJECT.md (the working record) and",
+    "EVIDENCE.md (where each condition can be confirmed by a reviewer).",
     "In the summary, preserve:",
     "- the acceptance conditions verbatim;",
     "- which of them are met and which are not;",
     "- the step in progress at the moment of compaction;",
     `- the path ${path.join(dir, "PROJECT.md")}, and that it must be re-read`,
-    "  before any work continues.",
+    "  before any work continues;",
+    "- that the run ends by calling the cork tool with `autopilot done` once",
+    "  every condition is met and EVIDENCE.md says where to confirm each.",
     "Tool output recoverable by running the command again may be dropped.",
   ].join("\n");
 }

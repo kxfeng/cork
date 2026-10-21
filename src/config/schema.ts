@@ -10,6 +10,7 @@ export interface CorkConfig {
    */
   timezone?: string;
   claude: ClaudeConfig;
+  autopilot: AutopilotConfig;
   channels: ChannelsConfig;
   web?: WebConfig;
 }
@@ -72,6 +73,15 @@ export interface ClaudeConfig {
    * turns it off.
    */
   idleStopHours?: number;
+}
+
+export interface AutopilotConfig {
+  /**
+   * The model that judges an autopilot run when the worker says it is done —
+   * a separate `claude -p` with read-only tools (see session/evaluator.ts).
+   * Any id or alias claude accepts for `--model`. Defaults to `opus`.
+   */
+  evaluatorModel: string;
 }
 
 export interface ChannelsConfig {
@@ -137,6 +147,7 @@ export const DEFAULT_CONFIG: CorkConfig = {
     autoCompactPercent: 75,
     idleStopHours: 4,
   },
+  autopilot: { evaluatorModel: "opus" },
   channels: {},
   web: { port: 6780 },
 };

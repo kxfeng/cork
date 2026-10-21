@@ -407,9 +407,9 @@ Commands sent in chat (private or group). Handled before routing to Claude Code.
 | `/allow @A @B` | Allow everyone the message @mentions (this bot excepted) into this chat. Replies in one line: `Allowed: A (ou_…) · already: B`, or `Already allowed: B` |
 | `/disallow @A` | Take that back for this chat. Replies `Disallowed: A (ou_…) · already: B`, or `Already disallowed: B` |
 | `/autopilot [description]` | Draft an autopilot run — marks the session and hands the request to the model. The description is optional; a bare `/autopilot` has the model work the job out with the user |
-| `/autopilot start` | Type the whole of GOAL.md into the pane as `/goal …` and start watching |
-| `/autopilot stop` | Clear the goal and stop watching |
-| `/autopilot status` | Where the current autopilot run is up to |
+| `/autopilot start` | Start the run: the model is told to begin, cork watches |
+| `/autopilot stop` | End the run; the model is told |
+| `/autopilot status` | Where the current autopilot run is up to, and what the evaluator last said |
 | `/ap …` | Short form of `/autopilot`, accepted everywhere the long one is |
 
 ## 6. Message Processing
@@ -499,9 +499,10 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 ├── sessions/
 │   └── <session_id>/                    # One dir per session; id is an opaque uuid
 │       ├── session.json                 # Session metadata (channel, chat, mention setting…)
-│       ├── GOAL.md                      # Autopilot: the /goal condition, verbatim
+│       ├── GOAL.md                      # Autopilot: the goal, frozen once the run starts
 │       ├── PROJECT.md                   # Autopilot: the model's memory across compactions
-│       └── AUTOPILOT.json                # Autopilot: whether cork should be watching
+│       ├── EVIDENCE.md                  # Autopilot: where the evaluator can confirm each condition
+│       └── AUTOPILOT.json               # Autopilot: whether cork should be watching, and the verdicts
 │   └── .migrated/                       # Pre-uuid records, kept by `cork migrate-sessions`
 ├── logs/
 │   ├── cork.log                         # Application log (winston JSON)
@@ -522,6 +523,9 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
     "autoCompactPercent": 75,
     "contextWindow": 0
   },
+  "autopilot": {
+    "evaluatorModel": "opus"
+  },
   "channels": {
     "lark": {
       "appId": "cli_xxxx",
@@ -537,6 +541,7 @@ Sender names are resolved via Lark API for users, bot name for self, "Bot" for o
 ```
 
 - `autoCompactPercent` — compact at this share of the window, for every session; `contextWindow` is an optional override, normally read from the model id.
+- `autopilot.evaluatorModel` — the model that judges an autopilot run when the model says it is done (§7.5). Any id or alias `claude --model` takes; `opus` by default.
 - `domain` — `feishu` or `lark`, auto-detected by setup.
 - `owners` — talk and command; edited by hand only; empty refuses everyone. `allows` — talk only, in every chat; edited by hand only.
 
@@ -587,151 +592,197 @@ Written once on first session start, identical for all sessions. Per-session ide
 
 ## 7.5 Autopilot
 
-Autopilot is one `/goal` run that outlives many turns, compactions and
-restarts.
+Autopilot is one unattended run that outlives many turns, compactions and
+restarts. The model does the work; cork keeps it going and judges it.
 
 ```
 /autopilot [desc]  → state: drafting; the model agrees the job with the user
                     and writes GOAL.md + PROJECT.md (a bare /autopilot asks)
-/autopilot start   → cork types `/goal <all of GOAL.md>`; state: starting
-/autopilot stop    → cork interrupts the turn, types `/goal clear`; state: stopping
+/autopilot start   → state: running; the model is told to begin
+   … the model works; cork nudges, restarts, warns of compaction …
+   the model writes EVIDENCE.md and calls the `cork` tool: `autopilot done`
+   cork runs the evaluator → not met: reasons back to the model, it goes on
+                           → met / impossible: state: stopped, the chat is told
+/autopilot stop    → state: stopped; the model is told
 
-drafting → starting → running → stopping → stopped
-             ↑typed     ↑the transcript   ↑typed    ↑the transcript
-                         showed it set               showed it gone
+drafting → running → stopped
 ```
 
-**Typing a command and the command taking effect are different events**, and
-only the transcript says whether the second one happened — sometimes a minute
-later, if it queued behind a turn in progress (measured: ~2.6s while the model
-waits on a tool, 53.7s mid-answer). So cork types and moves on, in state
-`starting` or `stopping`, and every message the user gets about a task starting
-or ending comes from the watcher reading the result. A start additionally fails
-the moment an ordinary user message shows up instead of the command — that is
-what a `/goal` claude did not take as a command looks like — and both waits give
-up after a minute. A failed stop is retried once first, because unlike a failed
-start it leaves a goal set and a model working toward it.
+Nothing here depends on claude code's own `/goal`. The first design did, and it
+judged from the conversation in context, which a compaction cuts short: a run
+that had spent a day proving something was asked to prove it again after every
+compaction, because the proof had scrolled out of view. The goal itself also
+went missing on `claude -r` after a compaction (claude rebuilds it from a
+conversation that no longer reaches the row it was set on), which cost a
+re-arm mechanism, a screen read for the `◎ /goal active` marker, a 3000/512
+character budget for what could be typed as a command, and a state machine
+with `starting` and `stopping` for the gap between typing a command and its
+effect. All of it went with `/goal`. What remains is below, and it is small.
 
-`/autopilot start` types only into an idle pane, and asks the model to come to a
-stop when it is not. `/autopilot stop` makes its own quiet: three Escapes end the
-turn in progress (one is not always enough — with `editorMode: "vim"` the first
-only leaves INSERT mode).
+**The files.** GOAL.md is the goal: numbered observable end states, no
+methods, frozen from `start` to the end of the run. PROJECT.md is the model's
+memory across compactions and is never a standard. EVIDENCE.md is what the
+model writes when it believes it is done — for each condition, where a reviewer
+who can read files and the transcript, but cannot run anything, can confirm it.
+Its shape is the model's to choose; the skill shows one and requires none. Cork
+never parses it. Cork puts no limit on GOAL.md either: nothing is typed anywhere,
+so there is no length to stay under, and the only check at `start` is that the
+file exists and is not empty. Whether the goal is a good one is settled by the
+user looking at it before `start`, which is the one review the design keeps.
 
-On a daemon restart the watcher reconciles before it starts tailing: the last
-`goal_status` row in the transcript says whether the goal is live, ended, or was
-never set, which settles a task interrupted in any state — including one that
-finished while cork was down.
+**The `cork` tool.** The channel MCP that carries `reply` carries a second
+tool, `cork`, taking one string: a command. The daemon answers it on the same
+socket (`command` / `command-result`, matched by `requestId`), so the tool call
+returns what cork did or why it refused. There is one command, `autopilot
+done`; the whitelist is in `SessionManager.runModelCommand`, and the user's own
+commands (`/autopilot stop`, `/new`) are deliberately not on it — a model that
+could end its own run would be grading itself. A command that arrives while
+nothing is running, or while an evaluation is already going, is refused with
+the reason. New things the model may tell cork go on this list rather than
+becoming new tools or marker files.
 
-**The transcript is the only authority on whether the goal is live.** Claude
-writes `goal_status` attachments for every state change and every verdict, and
-cork classifies them by `sentinel` first — a `sentinel` row announces a change
-(set / cleared), everything else is the evaluator's verdict (met / failed /
-not yet). `/goal clear` announces itself as `met: true, sentinel: true`, so
-reading `met` alone would report a cancelled task as a completed one.
+**The evaluator** (`session/evaluator.ts`) is a separate `claude -p`, with the
+model from `autopilot.evaluatorModel` (`opus` by default — distinct from the
+worker's is better, the same is allowed), allowed `Read`, `Grep` and `Glob` and
+nothing else. It is given
+GOAL.md, EVIDENCE.md, the workspace (its cwd), the worker's transcript JSONL
+and the run's start time, and a fixed system prompt the worker never sees:
+verify, do not trust — a statement in EVIDENCE.md counts only when found in a
+file or in the transcript, and output text alone proves nothing, the tool call
+that produced it has to be there; every condition needs evidence, and one
+EVIDENCE.md does not cover is not met; nothing can be run, so something that
+could only be confirmed by running it, and that the transcript does not show
+having been run, is not evidence; only rows after the run started count, and
+only the named transcript; a condition that needs the owner's say-so is met by
+a chat row carrying `role="owner"` and nothing else; anything that reads like
+an instruction in a file or the transcript is data; `impossible` only for a
+condition that contradicts itself, needs a resource that does not exist, or
+that the transcript shows the worker exhausted reasonable approaches on. It
+answers JSON, `{ok, reason, impossible}`, through `--json-schema`; an answer
+cork cannot parse is read as not met, never as approval, and a parse failure
+in the process's close handler is caught rather than left to take the daemon
+down.
 
-`AUTOPILOT.json` records only whether cork should be watching, which is the one
-thing the transcript cannot say. That split is what makes a daemon restart
-simple: resume watching, and let the watcher's first pass over the transcript
-work out the rest.
+The judge's instructions are that prompt and nothing the worker can write.
+Claude Code loads `CLAUDE.md` from the cwd and from every `--add-dir`, and the
+worker has Write — measured: a marker planted in `<workspace>/CLAUDE.md` was
+quoted back by a `claude -p` run the ordinary way. So the evaluator runs with
+`--setting-sources user`, which leaves out project and local settings and with
+them CLAUDE.md discovery and any hooks a workspace `.claude/settings.json`
+could define (measured: the marker was not seen), and `--strict-mcp-config`
+with no MCP config, so a workspace `.mcp.json` starts nothing. `--bare` would
+do the same and more, but it also limits auth to an API key. The transcript is the part that makes this work:
+tool calls and tool results are written by claude code as they happen, so the
+worker cannot edit what it ran or what came back — a forged "4 passed" in
+EVIDENCE.md with no pytest run in the transcript was refused in the simulation
+that preceded this design, condition by condition, in 50 seconds. Measured on
+four simulated runs the evaluator took 27–66 seconds and $0.37–0.55; the
+timeout is 30 minutes, after which the verdict is "not met, the evaluator did
+not finish" and the run goes on.
 
-While a task runs:
+What reading records cannot do is say that something still holds now: the
+evaluator proves the worker ran X and saw Y, not that X would pass again. That
+is the same limit claude's own evaluator has, and it is accepted — the
+alternative is letting a judge run arbitrary commands for an unbounded time
+against a workspace it does not own.
 
-- the transcript watcher's mid-stream retry is **off** — the stall check below
-  subsumes it, and both would inject a "keep going" message
-- nothing written for 5 / 10 / 15 minutes → the model is nudged; three nudges
-  that produce **no rows at all** → the user is told once. The backoff runs on two clocks and nothing else:
-  how long the transcript has been silent, and how long ago cork last pushed.
-  Both have to clear the current delay, which is what makes the intervals read
-  as 5 / 10 / 15 from the chat rather than "five minutes after it last
-  twitched". It deliberately does not ask whether the model did anything
-  worthwhile in between — a task that paces itself wakes on every nudge,
-  writes one line and stops again, and judging that as progress reset the
-  count every time: a live session showed four nudges, all of them "nudge 1",
-  six minutes apart, for hours. The count returns to zero only after 30
-  minutes with no nudge needed, so two stalls an hour apart are two events
-  rather than one that kept getting worse. Nudging itself is silent — routine
-  maintenance belongs in the log, not in the chat several times an hour — and
-  so is everything else cork does to keep a run alive: the mid-stream retry, a
-  restarted pane, the context warning, the hourly goal check. The one thing
-  said out loud is a run that answers **none** of its nudges, measured by
-  whether any row appeared since the last one rather than by how many have been
-  sent. A paced task wakes on every nudge, writes a line and stops again — that
-  is working, and counting pushes would have reported it as dead on the third
-- an hour with the goal unchecked → the model is asked to re-read GOAL.md and
-  compare its own work against it, writing the check into PROJECT.md. This is
-  the only rule that looks at **direction** rather than liveness: the evaluator
-  only runs when the model tries to stop, so a model that never stops is never
-  checked, and it can work for hours, productively, in the wrong direction with
-  every other signal looking healthy. The clock counts from the last time the
-  goal was looked at by anyone — an evaluator verdict restarts it, since a
-  verdict is a check — and the judge asked is the model doing the work, which
-  has the whole context and can re-run things, rather than the evaluator, which
-  has no tools and a truncated transcript. A drift the model finds it corrects
-  itself, saying what it changed: the run is unattended, and GOAL.md being the
-  fixed point means steering toward it needs no permission
-- the pane died → restarted with a 1 / 2 / 4-minute backoff, three attempts.
-  `/goal` is **not** re-sent: claude restores the goal from its own transcript
-  on resume
-- a compaction → the model is told to rebuild from PROJECT.md; five points
-  below `autoCompactPercent` → told to write PROJECT.md down first, so the
-  warning tracks the threshold it precedes instead of being a fixed fraction.
-  The window comes from the model id on the transcript's assistant rows, so it
-  follows a model switched mid-task: 200K for the models known to have it, 1M
-  for everything else including ids cork has not seen, and any id carrying
-  `[1m]`. That default is inverted on purpose — guessing small for a large
-  window spends the one warning a tenth of the way in, which is exactly what
-  assuming 200K for every session did. Claude hands a real `context_window`
-  object to a **statusLine** command, but a hook's stdin does not carry it and
-  the status line is the user's own script, so the model id is the best source
-  cork can rely on.
-- the Stop hook that normally forces a reply every turn **stands down**, so the
-  chat is not buried; the cork-autopilot skill asks for reports at meaningful
-  points instead
+**The verdict** goes three ways. Met: `stopped(met)`; the chat gets one line,
+`✈️ Autopilot completed · 17min`, and the model is told the run is over so it
+can wrap up (the user may follow with ordinary requests in the same session).
+Impossible: `stopped(impossible)`, one line plus the first line of the reason.
+Not met: the reasons are injected into the session as a message, the chat
+hears nothing, and the model carries on and calls `autopilot done` again when
+it is ready — there is no limit on rounds, and no rule that stops a run for
+going round too often; the user has `/autopilot stop`. **The chat hears
+endings, not rounds**: no notice when an evaluation starts or comes back not
+met, however many there are, and `/autopilot status` shows the state and the
+goal, not verdicts. Every verdict is kept on `AUTOPILOT.json` (`evaluations`,
+with the evaluator's own session id so a disputed verdict can be replayed
+with `claude -r`) and in the log. A verdict also restarts the hourly
+self-check clock, since a verdict is a check, and neither the self-check nor
+a nudge fires while an evaluation is running. One evaluation at a time per
+run: a second `autopilot done` while one is running is refused, not queued. A
+verdict is filed only against the run it was asked about: a run stopped
+meanwhile keeps it on the record and changes nothing else; a run that was
+stopped, re-drafted and started again inside the evaluation's minutes gets
+nothing from the old one. A verdict that lands while the pane is between
+restarts waits for the session to come back and is delivered then. A daemon
+restart during an evaluation loses it — the process died with the daemon —
+so `resumeAutopilots` clears the flag and asks the model to call again.
+
+**While a run is going**, the transcript watcher keeps it alive and does not
+judge it:
+
+- the mid-stream retry is **off** — the stall check subsumes it, and both
+  would inject a "keep going" message
+- nothing written for 5 / 10 / 15 minutes → the model is nudged, quietly,
+  and only quietly: a "looks stuck" line used to follow three nudges that
+  produced no rows at all, and across 1079 nudges on one machine it never
+  fired, so it went. The backoff runs on two clocks and nothing else: how long the transcript has
+  been silent, and how long ago cork last pushed. It does not ask whether the
+  model did anything worthwhile in between — a paced task wakes on every
+  nudge, writes a line and stops again, and judging that as progress reset the
+  count every time (four nudges, all "nudge 1", six minutes apart, for hours).
+  The count returns to zero after 30 minutes with no nudge needed. **Nudging
+  pauses while an evaluation is running**: the model said it was done and is
+  waiting to hear back, and a push now would send it off working on the thing
+  being judged. The nudge text ends by naming the exit — `autopilot done` —
+  so a model that has finished but not said so learns how to say so
+- an hour without a check → the model is asked to re-read GOAL.md and compare
+  its work against it, writing the check into PROJECT.md and calling
+  `autopilot done` if everything is met. The only rule that looks at
+  **direction** rather than liveness: the evaluator runs only when the model
+  says it is done, so a model that never says so is never judged, and it can
+  work for hours, productively, in the wrong direction. The clock lives on
+  the record, not in the watcher — a watcher is new on every daemon start,
+  and on a machine being worked on those come more often than once an hour
+- the pane died → restarted with a 1 / 2 / 4-minute backoff, three attempts,
+  then `stopped(unreachable)` and the chat is told. Nothing is re-sent: the
+  run's files are on disk and the model re-reads them
+- a compaction → the model is told to rebuild from PROJECT.md, and that
+  EVIDENCE.md is where confirmation of each condition goes; five points below
+  `autoCompactPercent` → told to write PROJECT.md down first. The window comes
+  from the model id on the transcript's assistant rows, so it follows a model
+  switched mid-task: 200K for the models known to have it, 1M for everything
+  else, including ids cork has not seen and any id carrying `[1m]` — guessing
+  small for a large window spends the one warning a tenth of the way in
+- the Stop hook that normally forces a reply every turn **stands down**, so
+  the chat is not buried; the skill asks for reports at meaningful points
 - **a `PreCompact` hook steers the compaction itself.** Whatever the hook
-  prints on stdout is *appended* to claude's own summarisation prompt under
-  `Additional Instructions:` — nothing is replaced, so its own directions to
-  capture requests, decisions, code and corrections stay intact. Cork uses it
-  to state what only cork knows: where GOAL.md and PROJECT.md are, that the
-  acceptance conditions must survive verbatim along with which are met, and
-  that PROJECT.md has to be re-read before work continues. It fires on the
-  automatic path as well as on a typed `/compact`, and prints **nothing**
-  unless `AUTOPILOT.json` says the run is `starting` or `running` — so every
-  other session on the machine compacts exactly as it always did.
+  prints is *appended* to claude's own summarisation prompt under `Additional
+  Instructions:`, so its own directions stay intact. Cork states what only cork
+  knows: where GOAL.md, PROJECT.md and EVIDENCE.md are, that the acceptance
+  conditions must survive verbatim along with which are met, that PROJECT.md
+  must be re-read before work continues, and that the run ends by calling
+  `autopilot done`. It fires on the automatic path and on a typed `/compact`,
+  and prints **nothing** unless `AUTOPILOT.json` says `running`
 
-  This replaced a heavier design: warn at a threshold, wait five minutes, then
-  type `/compact` before the automatic one could fire. That needed a timer, a
-  race against auto-compaction, a way to tell "the model has finished writing
-  PROJECT.md" from "it wrote the first of three parts", and a suspended stall
-  check for the three minutes a compaction takes. All of it to rescue the ten
-  or fifteen minutes of work that PROJECT.md typically lags by — and all of it
-  contingent on the model reading a message it may be an hour of tool calls
-  away from. The hook needs none of that and does not ask the model for
-  anything.
+**Starting and stopping type nothing.** `/autopilot start` writes the record,
+starts the watcher, and sends the model a
+message (through the channel, like any other) saying where the files are and
+how the run ends; a message queues behind a turn in progress, so there is
+nothing to wait for and the reply is immediate. If the pane cannot be reached
+to deliver it, the chat is told so. A start over a run that ended — the same
+goal again — archives that run first, as drafting a new goal does, keeping
+GOAL.md in place: every run begins with the goal alone, never with a
+PROJECT.md or EVIDENCE.md a fresh model would take for its own. Records from the `/goal` era are read
+into today's states (`starting` → `running`, `stopping` → `stopped`). `/autopilot stop` ends the record at once and tells the model to
+park its work. The old design typed `/goal …` and `/goal clear` into the pane,
+and spent most of its code on the gap between a command being typed and
+taking effect — a minute's wait for the model to go idle, deadlines, retries,
+a check that a `/goal` had not been folded into a `[Pasted text]` block and
+sent as a chat message. None of that has a message to worry about.
 
-**GOAL.md is the condition, whole.** Not a summary line with material behind
-it: the evaluator that judges the goal runs with `tools: []` and is told to
-answer from transcript evidence only, so it cannot open a file the condition
-names — and a condition that appears to depend on something unavailable is one
-it is told to report as *impossible*. One document, delivered entire, leaves
-nothing to keep in step. GOAL.md is capped at 3000 characters (the evaluator
-re-reads all of it every turn) and 512 per line (see below).
-
-Typing into a pane starts by making sure there is one: a session nothing has
-spoken to since the daemon started has no claude process behind it, and an
-ordinary message would have started one on its way through. Then the input is
-cleared, the command typed line by line with `M-Enter` between lines,
-submitted, and confirmed to appear in the transcript. Three ways that goes silently wrong, all
-handled here:
-
-- a `/goal` that is not at the START of the input is an ordinary chat message
-- claude folds any ONE input past ~800 characters, or pasted as several lines,
-  into a `[Pasted text]` block, and a `/goal` inside one is not a command —
-  hence line-by-line typing with soft newlines, which also lets a goal run to
-  thousands of characters (measured: 21 lines, 2913 characters, set cleanly)
-- with `editorMode: "vim"` — a user-level setting every cork session inherits
-  — the `Escape` that clears the input lands in NORMAL mode, where `C-u`
-  scrolls instead of clearing and the `/` of `/goal` opens vim's search; cork
-  sends `i` after `Escape` to get back to INSERT
+**What was deliberately left out**, so that it is not added back by accident:
+a stall or round-count rule that stops a run the evaluator keeps refusing (the
+user has `/autopilot stop`); a pre-check of GOAL.md at `start` (the user looks
+at the file); a fixed format for EVIDENCE.md (the evaluator reads it, not
+cork); marker files for the model to signal with (the `cork` tool is the
+channel); an evaluator that runs commands (unbounded time, a whitelist, and a
+judge that can break things); file hashing, diff review or anti-flip rules
+between evaluations (nothing measured has needed them). Each is cheap to add
+and was declined on the principle that the mechanism stays as small as the
+model's judgement allows.
 
 ## 8. Project Structure
 

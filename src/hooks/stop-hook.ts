@@ -129,11 +129,7 @@ function autopilotRunning(): boolean {
       path.join(corkDir(), "sessions", key, "AUTOPILOT.json"),
       "utf-8"
     );
-    // Every live state, not just "running": a task waiting for its `/goal` to
-    // register is already the model's job, and forcing a channel reply in that
-    // window would put a turn between the command and its confirmation.
-    const state = JSON.parse(raw)?.state;
-    return state === "starting" || state === "running" || state === "stopping";
+    return JSON.parse(raw)?.state === "running";
   } catch {
     return false;
   }

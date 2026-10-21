@@ -3,6 +3,8 @@ import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { UdsServer, type CommandMessage } from "../src/daemon/uds-server.js";
+import { UdsClient } from "../src/channel-mcp/uds-client.js";
 
 /**
  * Integration test for the UDS protocol between cork daemon and channel MCP.
@@ -192,6 +194,94 @@ describe("UDS Protocol", () => {
     expect(client.writable).toBe(false);
   });
 
+});
+
+/**
+ * The one exchange on this socket that is a request with an answer: the
+ * model's `cork` tool sends a command and the tool call returns what the daemon
+ * said. Tested with the real client and server, since the correlation by
+ * requestId is theirs.
+ */
+describe("commands over UDS", () => {
+  const dir = path.join(os.tmpdir(), `cork-test-uds-cmd-${process.pid}`);
+  const sock = path.join(dir, "cmd.sock");
+  let server: UdsServer;
+  let client: UdsClient;
+
+  beforeEach(async () => {
+    fs.mkdirSync(dir, { recursive: true });
+    server = new UdsServer(sock);
+    await server.start();
+    client = new UdsClient(sock, "sess-cmd");
+    await client.connect();
+  });
+
+  afterEach(async () => {
+    client.disconnect();
+    await server.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("answers a command on the same socket, matched by requestId", async () => {
+    server.on("command", (msg: CommandMessage) => {
+      server.sendToChannel(msg.corkSessionKey, {
+        type: "command-result",
+        requestId: msg.requestId,
+        ok: msg.command === "autopilot done",
+        text: `got ${msg.command}`,
+      });
+    });
+    await delay(50); // let the register land
+
+    const res = await client.request({ type: "command", corkSessionKey: "sess-cmd", command: "autopilot done" });
+    expect(res.ok).toBe(true);
+    expect(res.text).toBe("got autopilot done");
+
+    const refused = await client.request({ type: "command", corkSessionKey: "sess-cmd", command: "nonsense" });
+    expect(refused.ok).toBe(false);
+  });
+
+  it("gives up when nothing answers", async () => {
+    await delay(50);
+    await expect(
+      client.request({ type: "command", corkSessionKey: "sess-cmd", command: "x" }, 200)
+    ).rejects.toThrow(/no answer/);
+  });
+
+  it("ignores a command that names a session other than the one on the socket", async () => {
+    // Found in review: anything that can open the socket could otherwise start
+    // an evaluation for any session by naming it.
+    const seen: string[] = [];
+    server.on("command", (msg: CommandMessage) => seen.push(msg.corkSessionKey));
+    await delay(50);
+    await expect(
+      client.request({ type: "command", corkSessionKey: "somebody-else", command: "autopilot done" }, 200)
+    ).rejects.toThrow(/no answer/);
+    expect(seen).toEqual([]);
+  });
+
+  it("fails pending requests at once when cork goes away", async () => {
+    await delay(50);
+    const p = client.request({ type: "command", corkSessionKey: "sess-cmd", command: "autopilot done" }, 10_000);
+    await server.stop();
+    await expect(p).rejects.toThrow(/disconnected|ECONNRESET|EPIPE/);
+  });
+
+  it("does not mistake a result for an inbound message", async () => {
+    const inbound: unknown[] = [];
+    client.on("message", (m) => inbound.push(m));
+    server.on("command", (msg: CommandMessage) => {
+      server.sendToChannel(msg.corkSessionKey, {
+        type: "command-result",
+        requestId: msg.requestId,
+        ok: true,
+        text: "ok",
+      });
+    });
+    await delay(50);
+    await client.request({ type: "command", corkSessionKey: "sess-cmd", command: "autopilot done" });
+    expect(inbound).toEqual([]);
+  });
 });
 
 function delay(ms: number): Promise<void> {

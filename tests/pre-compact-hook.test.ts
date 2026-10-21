@@ -76,17 +76,24 @@ describe("pre-compact-hook", () => {
     expect(out).toContain("acceptance conditions verbatim");
   });
 
-  it("covers a run whose goal is still registering", async () => {
-    // GOAL.md and PROJECT.md are both written by then, and a compaction
-    // landing in that window is exactly when they are worth keeping.
-    writeRecord("starting");
-    expect((await runHook(env())).out).toContain("PROJECT.md");
+  it("names EVIDENCE.md and the way the run ends", async () => {
+    // The model reading the summary has to know how to finish: evidence in
+    // the file, then `autopilot done`. A summary that lost that would leave a
+    // finished run working forever.
+    writeRecord("running");
+    const { out } = await runHook(env());
+    expect(out).toContain("EVIDENCE.md");
+    expect(out).toContain("autopilot done");
   });
 
-  it("says nothing once the run is being stopped", async () => {
-    // `/goal clear` has been typed by then; steering the summary toward a goal
-    // on its way out would preserve the wrong thing.
-    writeRecord("stopping");
+  it("says nothing while a goal is only being drafted", async () => {
+    // Nothing is frozen yet, and nothing is being worked toward.
+    writeRecord("drafting");
+    expect((await runHook(env())).out).toBe("");
+  });
+
+  it("says nothing once the run has ended", async () => {
+    writeRecord("stopped");
     expect((await runHook(env())).out).toBe("");
   });
 

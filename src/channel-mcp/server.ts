@@ -238,6 +238,31 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["text"],
       },
     },
+    {
+      name: "cork",
+      description:
+        "Tell cork something, as a command. Cork answers at once; the text says " +
+        "what it did or why it refused. Commands:\n" +
+        "- `autopilot done` — for this session's autopilot run: you believe every " +
+        "condition in GOAL.md is met, and EVIDENCE.md says where a reviewer can " +
+        "confirm each one. Cork starts its evaluator, which reads GOAL.md, " +
+        "EVIDENCE.md, the workspace and this session's recorded transcript — it " +
+        "runs nothing, so cite files and lines, and commands you actually ran " +
+        "with their output. The verdict arrives later as a message in this " +
+        "session: not met comes with the reasons, to act on and call again; met " +
+        "or impossible ends the run.\n" +
+        "Anything else is refused with the list of commands.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          command: {
+            type: "string",
+            description: "The command, e.g. `autopilot done`.",
+          },
+        },
+        required: ["command"],
+      },
+    },
   ],
 }));
 
@@ -281,6 +306,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             text: `failed to send: ${(err as Error).message}`,
           },
         ],
+        isError: true,
+      };
+    }
+  }
+  if (req.params.name === "cork") {
+    const { command } = (req.params.arguments ?? {}) as { command?: unknown };
+    const text = typeof command === "string" ? command.trim() : "";
+    log("cork_tool_called", { command: text.slice(0, 80), udsConnected: udsClient.connected });
+    try {
+      const res = await udsClient.request({
+        type: "command",
+        corkSessionKey: sessionKey!,
+        command: text,
+      });
+      const ok = res.ok === true;
+      log("cork_tool_answered", { ok });
+      return {
+        content: [{ type: "text" as const, text: String(res.text ?? (ok ? "ok" : "refused")) }],
+        ...(ok ? {} : { isError: true }),
+      };
+    } catch (err) {
+      log("cork_tool_failed", { err: (err as Error).message });
+      return {
+        content: [{ type: "text" as const, text: `cork did not answer: ${(err as Error).message}` }],
         isError: true,
       };
     }

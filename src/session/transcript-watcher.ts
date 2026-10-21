@@ -1,7 +1,7 @@
 import fs from "node:fs";
-import { transcriptPath, findLastTranscriptRow } from "./transcript.js";
+import { transcriptPath } from "./transcript.js";
 import { getLogger, type Logger } from "../logger.js";
-import { isRunning, type AutopilotRecord, type AutopilotStopReason } from "./autopilot.js";
+import { isRunning, headline, type AutopilotRecord, type AutopilotStopReason } from "./autopilot.js";
 import { dialogSignature, type Dialog } from "./dialog.js";
 import { contextWindowFor } from "./context-window.js";
 
@@ -59,7 +59,13 @@ const BACKOFF_RESET_WINDOW_MS = 300_000;
 
 const REPLY_TOOL_NAME = "mcp__cork-channel__reply";
 const WATCHER_SENDER_ID = "cork:watcher";
-const WATCHER_SENDER_MARKER = `senderId="${WATCHER_SENDER_ID}"`;
+/**
+ * What marks a row as one of cork's own injections — the watcher's nudges,
+ * `/autopilot start`'s opening message, the evaluator's verdicts. A prefix:
+ * every sender cork uses begins `cork:`, and none of them is activity by the
+ * model or a word from a person.
+ */
+const CORK_SENDER_MARKER = 'senderId="cork:';
 const STOP_HOOK_PREFIX = "Stop hook feedback:";
 /**
  * Claude Code words this error differently depending on what cut the stream —
@@ -93,7 +99,7 @@ export const WATCHER_CONSTANTS = {
   BACKOFF_MAX_MS,
   BACKOFF_RESET_WINDOW_MS,
   WATCHER_SENDER_ID,
-  WATCHER_SENDER_MARKER,
+  CORK_SENDER_MARKER,
   STOP_HOOK_PREFIX,
   MID_STREAM_MARKER,
   RETRY_MESSAGE_TEXT,
@@ -183,55 +189,13 @@ const RESTART_DELAYS_MS = [1, 2, 4].map((m) => m * 60_000);
 const MAX_RESTART_ATTEMPTS = 3;
 
 /**
- * How long to wait for a typed command to show up in the transcript.
- *
- * Typing and taking effect are different events: measured at ~2.6s when the
- * model is waiting on a tool and 53.7s when it is mid-answer. A minute covers
- * both with room; past it the command did not land.
- */
-const PENDING_DEADLINE_MS = 60_000;
-
-/** How many times `/goal clear` is typed before cork gives up on it. */
-const MAX_CLEAR_ATTEMPTS = 2;
-
-/**
- * How many times cork will type the goal back in before giving up.
- *
- * Same budget as clearing, for the same reason: the way a long `/goal` fails
- * to register is that claude folds it into `[Pasted text]` and stops treating
- * it as a command, which is deterministic. A third identical attempt would
- * fail identically. Only attempts that actually reached the input box count —
- * one blocked by a dialog was never tried.
- */
-const MAX_REARM_ATTEMPTS = 2;
-
-/** How long a re-arm may go blocked before the chat is told. Said once. */
-const REARM_BLOCKED_NOTICE_MS = 10 * 60_000;
-
-/**
- * One ending for every way re-arming can fail.
- *
- * Whether the command was never typed, was typed and folded into a paste, or
- * cork never had the goal's text — what is true afterwards is the same: this
- * session has no goal and cork cannot give it one. Continuing to call the run
- * live would be the exact fault this whole path exists to prevent.
- */
-const REARM_LOST_TEXT =
-  "⚠️ Autopilot stopped — could not re-arm the goal. `/ap start` again";
-
-/** Nudges before cork tells the user this task looks stuck. Warned once. */
-const STUCK_AFTER_NUDGES = 3;
-
-/**
  * How long a run may go unchecked against its goal before cork asks the model
  * to check it itself.
  *
- * The evaluator only ever runs when the model tries to stop, so a model that
- * never stops is never checked — it can work for hours, productively and in
+ * The evaluator only runs when the model says it is done, so a model that
+ * never says so is never checked — it can work for hours, productively and in
  * the wrong direction, and nothing in cork would notice: the pane is alive,
- * rows keep arriving, no nudge is due. The evaluator cannot help here even in
- * principle, and it is the weaker judge anyway: no tools, no thinking, and a
- * transcript it reads truncated.
+ * rows keep arriving, no nudge is due.
  *
  * The one with the whole context and the ability to check its own work is the
  * model doing it. So cork asks it, on a clock, and the clock restarts whenever
@@ -241,13 +205,15 @@ const STUCK_AFTER_NUDGES = 3;
 const DRIFT_CHECK_INTERVAL_MS = 60 * 60_000;
 
 const DRIFT_TEXT =
-  "This autopilot run has gone a long time without its goal being checked. " +
-  "Stop and re-read GOAL.md in full — the file, not your memory of it — and " +
-  "compare it against what you have actually done so far. Record the check " +
-  "and what it found in PROJECT.md. If the work has drifted, steer it back " +
-  "yourself and say in the chat what drifted and what you changed — the goal " +
-  "is the fixed point, so correcting toward it needs nobody's permission. Do " +
-  "not edit GOAL.md.";
+  "This autopilot run has gone a long time without checking itself against " +
+  "its goal. Stop and re-read GOAL.md in full — the file, not your memory of " +
+  "it — and compare it against what you have actually done so far. Record the " +
+  "check and what it found in PROJECT.md. If the work has drifted, steer it " +
+  "back yourself and say in the chat what drifted and what you changed — the " +
+  "goal is the fixed point, so correcting toward it needs nobody's permission. " +
+  "Do not edit GOAL.md. If every condition is already met, make sure " +
+  "EVIDENCE.md says where to confirm each one and call the cork tool with " +
+  "`autopilot done`.";
 
 /**
  * How far below the compaction point to ask the model to write its state down.
@@ -261,15 +227,19 @@ const CONTEXT_WARN_MARGIN_PCT = 5;
 
 const NUDGE_TEXT =
   "Autopilot is still running but nothing has been written to this " +
-  "session for a while. Continue working toward the goal. If you are blocked, " +
-  "record the blocker in PROJECT.md and say so in the chat.";
+  "session for a while. Continue working toward the goal — GOAL.md and " +
+  "PROJECT.md in this session's cork directory (on your allowed dirs) say " +
+  "what it is and where you got to. If you are blocked, record the blocker " +
+  "in PROJECT.md and say so in the chat. If you believe the goal is met, " +
+  "call the cork tool with `autopilot done`.";
 
 const COMPACT_TEXT =
   "This session was just compacted, so most of your working context is gone. " +
   "Re-read PROJECT.md before continuing, and write anything it is missing " +
   "back into it now — including what you were part-way through. If this " +
-  "session is running autopilot, the active goal states the standard in " +
-  "full; GOAL.md holds the same text and is not to be edited.";
+  "session is running autopilot, GOAL.md states the standard in full and is " +
+  "not to be edited; EVIDENCE.md is where you record how each of its " +
+  "conditions can be confirmed.";
 
 const CONTEXT_TEXT =
   "This session is approaching the point where it will be compacted. Bring " +
@@ -407,60 +377,6 @@ export function formatDuration(ms: number): string {
   return m % 60 ? `${h}h${m % 60}min` : `${h}h`;
 }
 
-/** "1 restart", "3 restarts" — a count with a noun that agrees with it. */
-function plural(n: number, noun: string): string {
-  return `${n} ${noun}${n === 1 ? "" : "s"}`;
-}
-
-export type GoalKind = "set" | "progress" | "met" | "failed" | "cleared";
-
-/**
- * The goal's state as of the newest `goal_status` row in these rows, or null
- * when there is none among them.
- */
-export function lastGoalStatus(rows: unknown[]): GoalKind | null {
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const status = readGoalStatus(rows[i] as TranscriptRow);
-    if (status) return status.kind;
-  }
-  return null;
-}
-
-/**
- * The goal's state according to the transcript file, searching back from its
- * end until a `goal_status` row turns up.
- *
- * The same question claude answers for itself when it resumes a session, and
- * deliberately the same way: it walks its whole conversation from the last
- * message back and stops at the first `goal_status`. Matching that means a
- * goal claude can restore is one cork can also see — which is what makes
- * `null` here mean "no goal was ever set", rather than "not in the window I
- * happened to read".
- */
-function readGoalFromTranscript(
-  workspace: string,
-  sessionId: string,
-  since: number
-): GoalKind | null {
-  return findLastTranscriptRow(workspace, sessionId, (row) => {
-    const r = row as TranscriptRow & { timestamp?: string };
-    if (!readGoalStatus(r)) return null;
-    // Rows from an earlier run in the same session are not evidence about
-    // this one. A session accumulates them: one transcript here holds three
-    // runs' worth. Without this, a run whose `/goal` never registered — which
-    // has written nothing of its own by definition — is judged on the ending
-    // of the run before it, and cork announces the previous verdict for work
-    // that never started.
-    const at = r.timestamp ? Date.parse(r.timestamp) : NaN;
-    if (!Number.isFinite(at) || at < since) return null;
-    return readGoalStatus(r)?.kind ?? null;
-  });
-}
-
-/** The goal in a code block, or nothing when cork does not have its text. */
-function goalBlock(goal: string | undefined): string {
-  return goal ? `\n\n\`\`\`\n${goal}\n\`\`\`` : "";
-}
 
 /** The first line of a reason, capped — the rest stays in AUTOPILOT.json. */
 function firstLine(text: string, max: number): string {
@@ -470,15 +386,10 @@ function firstLine(text: string, max: number): string {
 
 export const AUTOPILOT_CONSTANTS = {
   TICK_INTERVAL_MS,
-  PENDING_DEADLINE_MS,
-  MAX_CLEAR_ATTEMPTS,
-  MAX_REARM_ATTEMPTS,
-  REARM_BLOCKED_NOTICE_MS,
   CONTEXT_WARN_MARGIN_PCT,
   NUDGE_DELAYS_MS,
   RESTART_DELAYS_MS,
   MAX_RESTART_ATTEMPTS,
-  STUCK_AFTER_NUDGES,
   NUDGE_BACKOFF_RESET_MS,
   DRIFT_CHECK_INTERVAL_MS,
   NUDGE_TEXT,
@@ -514,32 +425,6 @@ export interface AutopilotHooks {
    * sent.
    */
   contextWindow(): number;
-  /**
-   * Type `/goal clear` into the terminal again.
-   *
-   * Not waited on, and nothing is reported back. Typing takes up to a minute
-   * and a half — waiting for a quiet pane, then up to three attempts at the
-   * input box — and the caller records the attempt before any of it happens,
-   * so there is no window in which two retries could overlap or a finished
-   * run could be reopened. What the command did is not knowable from here
-   * anyway: it is the transcript that says whether the goal went.
-   */
-  clearGoal(): void;
-  /**
-   * Type `/goal <condition>` into the terminal, to put a goal back that went
-   * with the pane. Not waited on, exactly like `clearGoal`: the transcript is
-   * what says whether it took.
-   */
-  rearmGoal(condition: string): void;
-  /**
-   * Whether claude is showing a live goal, or null when there is no screen to
-   * ask — a session that is not connected yet has not drawn one.
-   *
-   * Null is not "no goal", but it is not acted on as "goal" either: only a
-   * clear yes skips the re-arm. See checkRearm for why that asymmetry is the
-   * safe one.
-   */
-  goalArmed(): boolean | null;
   /**
    * The percentage cork asks claude to compact at
    * (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE). The state-down warning is sent a few
@@ -586,15 +471,6 @@ interface TranscriptRow {
       cache_read_input_tokens?: number;
     };
   };
-  /** `/goal` writes these; see readGoalStatus. */
-  attachment?: {
-    type?: string;
-    met?: boolean;
-    failed?: boolean;
-    sentinel?: boolean;
-    condition?: string;
-    reason?: string;
-  };
   /** `system` rows carry their text here rather than under `message`. */
   content?: string;
   uuid?: string;
@@ -640,15 +516,6 @@ export interface TranscriptWatcherOptions {
   };
   /** Test seam: override the wall clock. */
   now?: () => number;
-  /**
-   * Test seam: what the transcript file says about the goal, read from the
-   * end. Null means the file does not say — never "there is no goal".
-   */
-  goalOnDisk?: (
-    workspace: string,
-    sessionId: string,
-    since: number
-  ) => GoalKind | null;
 }
 
 export class TranscriptWatcher {
@@ -690,20 +557,6 @@ export class TranscriptWatcher {
   /** When each notifiable API error was last told to the chat. */
   private apiErrorNoticeAt = new Map<string, number>();
   private lastNudgeAt = 0;
-  /** When the goal was last checked — by the evaluator, or by cork asking. */
-  /**
-   * `lastRowAt` as it stood when cork last nudged, and how many nudges in a row
-   * have produced no row at all since.
-   *
-   * Separate from `nudgeCount`, which counts pushes and paces the backoff. This
-   * counts silence in answer to them, which is a different question and the
-   * only one worth telling the user about: a run that wakes, writes a line and
-   * stops again is working (a paced task does exactly that), while one that
-   * does not write anything through several nudges has probably stopped for
-   * good.
-   */
-  private lastRowAtNudge = 0;
-  private unansweredNudges = 0;
   private lastRestartAt = 0;
   /** The "compaction is coming" message is sent once per compaction cycle. */
   private contextWarned = false;
@@ -711,14 +564,6 @@ export class TranscriptWatcher {
   private lastModel: string | null = null;
   /** `startedAt` of the run this watcher's per-run flags belong to. */
   private runStartedAt: string | undefined;
-  /** Kept for the checks that read the transcript rather than tail it. */
-  private readonly workspace: string;
-  private readonly sessionId: string;
-  private readonly goalOnDisk: (
-    workspace: string,
-    sessionId: string,
-    since: number
-  ) => GoalKind | null;
   /** Whether the pane was up at the previous tick — see the transition in tick. */
   private lastAliveSeen = true;
   /**
@@ -733,15 +578,12 @@ export class TranscriptWatcher {
 
   constructor(opts: TranscriptWatcherOptions) {
     this.path = transcriptPath(opts.workspace, opts.sessionId);
-    this.workspace = opts.workspace;
-    this.sessionId = opts.sessionId;
     this.sessionKey = opts.sessionKey;
     this.inject = opts.inject;
     this.notifyFn = opts.notify;
     this.hooks = opts.autopilot;
     this.dialogHooks = opts.dialog;
     this.now = opts.now ?? Date.now;
-    this.goalOnDisk = opts.goalOnDisk ?? readGoalFromTranscript;
     this.log = getLogger("transcript-watcher").child({
       sessionKey: opts.sessionKey,
     });
@@ -769,7 +611,6 @@ export class TranscriptWatcher {
     );
 
     this.lastRowAt = this.now();
-    this.reconcile();
     // The stall/liveness rules need a clock of their own: a session that has
     // stopped writing produces no file events to react to. Unref'd for the same
     // reason the file watch is not persistent.
@@ -873,10 +714,7 @@ export class TranscriptWatcher {
     this.checkApiError(row);
 
     // Autopilot owns this session while it runs, and its rules replace the
-    // mid-stream retry rather than joining it — see the module comment. That
-    // ownership starts the moment `/goal` is typed, not when it registers:
-    // the rows in between are exactly the ones that say which of those
-    // happened.
+    // mid-stream retry rather than joining it — see the module comment.
     const rec = this.rec();
     if (rec && isRunning(rec)) {
       if (!ours) this.handleAutopilotRow(row);
@@ -951,81 +789,6 @@ export class TranscriptWatcher {
   }
 
   /**
-   * Work out what the goal has been doing while cork was not watching.
-   *
-   * The watcher starts reading at the file's current end, so everything that
-   * happened during an outage is invisible to it — including a goal that was
-   * met, cleared, or never set. Without this a task interrupted mid-`starting`
-   * would sit there until its deadline and be called a failure, and one that
-   * finished while the daemon was down would be nudged for ever.
-   *
-   * What the last `goal_status` row answers is whether the goal ENDED, not
-   * whether it is still live. An ending — met, judged unachievable, cleared by
-   * hand — is written once and stays written, so finding one is conclusive.
-   * Finding none is not the other way round: a goal is held in claude's
-   * memory and rebuilt on resume from a conversation a compaction can cut
-   * short, so it can be gone with the newest row still saying `progress`. An
-   * earlier version of this comment claimed the row was "the goal's state as
-   * of now", and a run spent a day being reported as live on the strength of
-   * it. Whether there is a goal right now is settled elsewhere, by typing one
-   * back in after every resume — see checkRearm.
-   */
-  private reconcile(): void {
-    const hooks = this.hooks;
-    if (!hooks) return;
-    const rec = this.rec();
-    if (!rec || !isRunning(rec)) return;
-
-    // Only rows this run wrote. `startedAt` is stamped when `/autopilot start`
-    // types the goal, so it is earlier than any row the run can have.
-    const since = rec.startedAt ? Date.parse(rec.startedAt) : 0;
-    const status = this.goalOnDisk(
-      this.workspace,
-      this.sessionId,
-      Number.isFinite(since) ? since : 0
-    );
-
-    // No ending on record. That does not make the goal live — only that
-    // nothing happened during the outage which would end the run.
-    if (status === "set" || status === "progress") {
-      if (rec.state === "starting") {
-        this.updateRec({ state: "running", pendingSince: undefined });
-        this.say(`✈️ Autopilot started${goalBlock(rec.goal)}`);
-      } else if (rec.state === "stopping") {
-        // The clear did not take, or never got typed. Give the deadline a
-        // fresh minute from here rather than from before the outage.
-        this.updateRec({ pendingSince: this.now() });
-      }
-      this.log.info("reconciled: the goal did not end while cork was away", {
-        state: rec.state,
-      });
-      return;
-    }
-
-    // Nothing found is not the same as nothing there. The scan walks the whole
-    // file, so a `goal_status` row is only missing when none was ever written
-    // — but it also returns null for a file that could not be opened or read,
-    // and those answer nothing. Ending a run on that would hand a working task
-    // back to nobody over a transient IO error. Leave the record alone:
-    // `starting` and `stopping` have deadlines that will settle them, and a
-    // `running` task carries on with the tail live again.
-    if (status === null) {
-      this.log.info("reconciled: the transcript does not say", { state: rec.state });
-      return;
-    }
-
-    this.stopRec(status === "met" ? "met" : status === "failed" ? "failed" : "user-stop");
-    this.say(
-      status === "met"
-        ? `✈️ Autopilot complete${this.runSummary()}`
-        : status === "failed"
-          ? `⚠️ Autopilot stopped — goal judged unachievable${this.runSummary()}`
-          : `✈️ Autopilot stopped${this.runSummary()}`
-    );
-    this.log.info("reconciled: goal had already ended", { status });
-  }
-
-  /**
    * Tell the chat something, and log that it was told.
    *
    * Everything the watcher says goes through here, so the log records what
@@ -1084,8 +847,6 @@ export class TranscriptWatcher {
     // that actually bought was a timer that never fired: every daemon start
     // makes a new watcher, and on a machine being worked on those come more
     // often than once an hour. It lives on the record now and survives them.
-    this.lastRowAtNudge = 0;
-    this.unansweredNudges = 0;
     this.lastRowAt = this.now(); // a fresh run gets a full stall window
     this.log.info("watching a new autopilot run", { startedAt: rec.startedAt });
   }
@@ -1110,146 +871,17 @@ export class TranscriptWatcher {
     return Number.isFinite(ms) && ms > 0 ? formatDuration(ms) : "";
   }
 
-  /**
-   * How long the task ran and how much cork had to do to keep it going, as a
-   * short clause to append to a one-line notice. Empty when there is nothing
-   * worth saying — a task that finished on its first turn needs no statistics.
-   */
-  private runSummary(): string {
-    const rec = this.rec();
-    if (!rec?.startedAt) return "";
-    const ms = this.now() - Date.parse(rec.startedAt);
-    const parts: string[] = [];
-    if (Number.isFinite(ms) && ms > 0) parts.push(formatDuration(ms));
-    if (rec.compactCount) parts.push(plural(rec.compactCount, "compaction"));
-    if (rec.restartCount) parts.push(plural(rec.restartCount, "restart"));
-    return parts.length ? ` (${parts.join(", ")})` : "";
-  }
 
 
   /**
-   * Rows that matter while an autopilot run is running. Everything the goal does is
-   * visible here, which is why cork keeps no opinion of its own about whether
-   * the goal is still live (see autopilot.ts).
+   * Rows that matter while an autopilot run is running: a compaction, and the
+   * context filling toward one. Whether the goal is met is not read from rows
+   * at all — the model says when it believes so, through the `cork` tool, and
+   * cork's own evaluator decides (see SessionManager.evaluateAutopilot).
    */
   private handleAutopilotRow(row: TranscriptRow): void {
-    const hooks = this.hooks;
-    if (!hooks) return;
-
     const current = this.rec();
     if (current) this.noticeRunChange(current);
-
-    const status = readGoalStatus(row);
-    if (status) {
-      // Any verdict is a check of the goal — met, failed, or "not yet". The
-      // drift clock counts from the last time the goal was looked at, and by
-      // whom does not matter, so a verdict restarts it. `set` and `cleared`
-      // are state changes rather than verdicts, but both begin or end a run,
-      // and either way there is nothing to have drifted from yet.
-      this.updateRec({ lastGoalCheckAt: new Date(this.now()).toISOString() });
-      // Read before anything writes: stopRec below turns the state to
-      // "stopped", and how a goal ending should be worded depends on whether
-      // the user asked for it.
-      const wasStopping = current?.state === "stopping";
-      switch (status.kind) {
-        case "set": {
-          // Either cork's own /goal landing, or the user setting one by hand.
-          // This row is what a `starting` task has been waiting for — it is
-          // the first evidence anywhere that the command took effect, and the
-          // only thing the user is told a task started on.
-          const wasStarting = this.rec()?.state === "starting";
-          // A goal cork typed back in after a resume lands here too, and it is
-          // the only evidence anywhere that it took. Nothing is said about it:
-          // the run never stopped, and a line in the chat on every daemon
-          // restart would be noise about something that worked. `wasStarting`
-          // is false in that case — the state stayed `running` throughout —
-          // so the start message below already stays quiet.
-          const wasRearming = this.rec()?.needsRearm === true;
-          this.updateRec({
-            state: "running",
-            goal: status.condition,
-            pendingSince: undefined,
-            nudgeCount: 0,
-            stuckWarned: false,
-            restartCount: 0,
-            needsRearm: false,
-            rearmAttempts: 0,
-            rearmPendingSince: undefined,
-            blockedSince: undefined,
-            rearmNotified: false,
-          });
-          this.lastNudgeAt = 0;
-          this.log.info("goal set", { wasStarting, wasRearming });
-          if (wasStarting) {
-            this.say(
-              `✈️ Autopilot started\n\n\`\`\`\n${status.condition ?? ""}\n\`\`\``
-            );
-          }
-          break;
-        }
-        case "cleared":
-          // Cork's own `/goal clear` arriving, or one typed by hand. Either
-          // way the goal is gone and there is nothing left to watch.
-          this.stopRec("user-stop");
-          this.say(
-            wasStopping
-              ? `✈️ Autopilot stopped${this.runSummary()}`
-              : "✈️ Autopilot stopped — the goal was cleared in the terminal"
-          );
-          break;
-        case "met":
-          this.stopRec("met", status.reason);
-          // One line. The goal was quoted in full when the task started, and
-          // the evaluator's reasoning runs to thousands of characters — both
-          // are kept in AUTOPILOT.json for `/autopilot status` to show.
-          //
-          // A goal met while cork was clearing it still counts as stopped: the
-          // user asked for it to end, and it has. Saying only "complete" there
-          // would read as cork ignoring the request.
-          this.say(
-            wasStopping
-              ? `✈️ Autopilot stopped — the goal was met just as it was being cleared${this.runSummary()}`
-              : `✈️ Autopilot complete${this.runSummary()}`
-          );
-          break;
-        case "failed":
-          // The evaluator decided the condition cannot be met in this session.
-          // Pushing the model again would be pushing at a wall, so stop and
-          // hand the decision back.
-          this.stopRec("failed", status.reason);
-          // The reason matters here in a way it does not for success — this
-          // is the one ending the user has to act on — but one line of it is
-          // enough to decide whether to look.
-          this.say(
-            `⚠️ Autopilot stopped — goal judged unachievable${this.runSummary()}` +
-              (status.reason ? `\n\n${firstLine(status.reason, 200)}` : "")
-          );
-          break;
-        case "progress":
-          // A turn ended without meeting the goal: the model is working, and
-          // that is all this row says. It does not reset the nudge backoff —
-          // only time does (see checkStall). Resetting here would put the
-          // backoff back at the mercy of whether the model happens to stop
-          // where the evaluator can see it, which on a paced task is roughly
-          // never: one session showed 43 stop events and a single verdict.
-          break;
-      }
-      return;
-    }
-
-    // A `starting` task is waiting for its `/goal` to show up. An ordinary
-    // user message arriving first is the signature of it having failed: a
-    // command that claude did not take as a command is delivered as a plain
-    // message instead, which the model then answers. That is visible within
-    // seconds, so there is no reason to sit out the deadline.
-    if (current?.state === "starting" && isPlainUserMessage(row)) {
-      this.stopRec("start-failed", "the /goal arrived as an ordinary message");
-      this.say(
-        "⚠️ Autopilot did not start — `/goal` was not taken as a command. " +
-          "`/ap start` again"
-      );
-      return;
-    }
 
     if (isCompactBoundary(row)) {
       const count = (this.rec()?.compactCount ?? 0) + 1;
@@ -1299,9 +931,8 @@ export class TranscriptWatcher {
    * between "thinking hard" and "dead".
    *
    * Order matters. A dead pane also looks like a stall, and nudging a session
-   * that has no process is pointless — so liveness is settled first, and a
-   * restart does NOT re-send /goal: claude restores the goal from its own
-   * transcript on resume and carries on by itself.
+   * that has no process is pointless — so liveness is settled first. A restart
+   * re-sends nothing: the run's files are on disk, and the model re-reads them.
    */
   /**
    * Tell the chat when claude is waiting on a person, and when it stops.
@@ -1392,12 +1023,7 @@ export class TranscriptWatcher {
     if (!hooks) return;
     this.recCache = undefined; // a tick is its own batch
     const rec = this.rec();
-    if (!rec) return;
-    if (rec.state === "starting" || rec.state === "stopping") {
-      this.checkPending(rec);
-      return;
-    }
-    if (rec.state !== "running") return;
+    if (!rec || rec.state !== "running") return;
     this.noticeRunChange(rec);
 
     if (!hooks.isAlive()) {
@@ -1418,97 +1044,13 @@ export class TranscriptWatcher {
     // The pane is up: forget earlier failures.
     if (rec.restartCount) this.updateRec({ restartCount: 0 });
 
-    // Before anything that pushes the model: a run with no goal has nothing
-    // pushing it from claude's side either, so it will look stalled within
-    // minutes and get nudged toward a destination it no longer has.
-    if (rec.needsRearm) {
-      this.checkRearm(rec);
-      return;
-    }
+    // The model said it was done and is waiting to hear back. Quiet is the
+    // right state to be in; a nudge or a self-check now would only send it
+    // off working on the thing being judged.
+    if (rec.evaluatingSince) return;
 
     this.checkDrift(rec);
     this.checkStall(rec);
-  }
-
-  /**
-   * The deadline on a command whose effect has not shown up yet.
-   *
-   * Typing is not the same event as taking effect, and the gap is measured in
-   * seconds when the model is between tool calls and in tens of seconds when
-   * it is mid-answer. Waiting a minute covers both; past that, the command did
-   * not land.
-   *
-   * The two ends are handled differently because failing costs different
-   * things. A start that did not happen has left nothing behind — the user
-   * re-runs it. A stop that did not happen has left a goal set and a model
-   * working toward it, so cork tries once more before giving up on it.
-   */
-  private checkPending(rec: AutopilotRecord): void {
-    const hooks = this.hooks;
-    if (!hooks) return;
-    const since = rec.pendingSince ?? this.now();
-    if (this.now() - since < PENDING_DEADLINE_MS) return;
-
-    // Nothing is read from the file here, deliberately. What a deadline is
-    // waiting on is a `goal_status` row, and the tail does not miss those: it
-    // reads from its own byte offset to the new end of an append-only file.
-    // Re-reading the file would confirm what the tail already knows.
-    // `reconcile` reads it because it has a real gap to cover: the rows
-    // written while the daemon was down.
-    if (rec.state === "starting") {
-      // Type it again before giving up. `starting` and a goal lost with the
-      // pane are the same failure — cork put a `/goal` in and claude did not
-      // take it as one — and the `running` side has had two attempts at that
-      // since the re-arm went in. One attempt here and two there was not a
-      // decision, just two paths written at different times.
-      //
-      // No screen read: `starting` means this run has written no row of its
-      // own, so there is nothing for the screen to disambiguate. It is only
-      // needed where the transcript says a goal exists and might be wrong.
-      const attempts = rec.rearmAttempts ?? 0;
-      if (rec.goal && attempts < MAX_REARM_ATTEMPTS) {
-        hooks.rearmGoal(rec.goal);
-        this.updateRec({ rearmAttempts: attempts + 1, pendingSince: this.now() });
-        this.log.info("typing the goal again after it did not register", {
-          attempt: attempts + 1,
-        });
-        return;
-      }
-      this.log.warn("no goal within the deadline", { pendingSince: rec.pendingSince });
-      this.stopRec("start-failed", "the goal never registered");
-      this.say(
-        "⚠️ Autopilot did not start — no goal showed up. " +
-          "`/ap start` again"
-      );
-      return;
-    }
-
-    // stopping
-    const attempts = rec.clearAttempts ?? 1;
-    this.log.warn("goal still set after /goal clear", { attempts });
-
-    // One more try, if there is one left. The usual reason a clear does not
-    // get typed — a draft in the box, a dialog, the history filter panel — is
-    // a state the pane is IN rather than one it is stuck in, and `clearGoal`
-    // interrupts before it types, which by itself can be what unsticks it. So
-    // a first attempt that never reached the input box is not the end of it.
-    if (attempts < MAX_CLEAR_ATTEMPTS) {
-      hooks.clearGoal();
-      this.updateRec({ pendingSince: this.now(), clearAttempts: attempts + 1 });
-      this.log.info("retrying /goal clear", { attempt: attempts + 1 });
-      return;
-    }
-
-    // The run is over. The user asked for it to stop, cork typed the clear as
-    // many times as it is going to, and whether the goal is still set is not
-    // something cork can find out from here — `/goal clear` writes nothing at
-    // all when there is no goal to clear, so silence means both "it worked"
-    // and "there was nothing there". The old ending asserted the unhappy one:
-    // "the goal is still set and the model may still be working toward it",
-    // which is plainly false in the case this whole commit is about, and
-    // sends the user to the terminal to clear a goal that is not there.
-    this.stopRec("user-stop", "/goal clear was typed and nothing came back");
-    this.say(`✈️ Autopilot stopped${this.runSummary()}`);
   }
 
   private tryRestart(rec: AutopilotRecord): void {
@@ -1519,8 +1061,8 @@ export class TranscriptWatcher {
     if (attempts >= MAX_RESTART_ATTEMPTS) {
       this.stopRec("unreachable");
       this.say(
-        `⚠️ Autopilot stopped — could not bring the session back after ` +
-          `${MAX_RESTART_ATTEMPTS} attempts`
+        `${headline("stopped (unreachable)", this.rec() ?? rec, this.now())}\n` +
+          `could not bring the session back after ${MAX_RESTART_ATTEMPTS} attempts`
       );
       return;
     }
@@ -1544,113 +1086,10 @@ export class TranscriptWatcher {
    * Ask the model to check its own work against GOAL.md, once an hour of
    * going unchecked.
    *
-   * Said in the chat as well, like every other thing cork does to a run: the
-   * answer arrives as ordinary conversation, and without this line the user
-   * would not know it was asked for rather than volunteered.
+   * Logged, not said in the chat: the answer arrives as ordinary conversation,
+   * and a verdict from the evaluator counts as a check (the manager stamps
+   * `lastGoalCheckAt` when one lands), so the clock restarts with it.
    */
-  /**
-   * Put the goal back after the pane was replaced.
-   *
-   * Claude holds a goal in memory and rebuilds it on `-r` from the newest
-   * `goal_status` row in its own conversation — which, after a compaction,
-   * begins at the compact boundary. A goal set before that boundary is
-   * therefore invisible to the rebuild and simply does not come back, while
-   * the row stays in the transcript file where cork can still read it. So
-   * cork cannot tell the two cases apart from the file, and does not try:
-   * it types the goal in again after every resume. When the goal was fine,
-   * the new one supersedes an identical condition and nothing else changes.
-   *
-   * A dialog is the one thing that can stop the command being typed, and it
-   * is waited out rather than dismissed — Escape through an unknown dialog
-   * would answer a question that was being asked of the user. Blocked time
-   * is not an attempt: a dialog left up for an hour must not spend a budget
-   * meant for commands that were actually sent.
-   */
-  private checkRearm(rec: AutopilotRecord): void {
-    const hooks = this.hooks;
-    if (!hooks) return;
-
-    // A goal cork does not have the text of cannot be typed back in. Nothing
-    // useful is left to do, and pretending the run is live is what this whole
-    // mechanism exists to stop.
-    if (!rec.goal) {
-      this.finishRearm();
-      this.stopRec("rearm-failed", "cork has no copy of the goal to type back in");
-      this.say(REARM_LOST_TEXT);
-      return;
-    }
-
-    // An attempt that was typed and produced no `goal_status` row within the
-    // deadline did not take. The row arriving is handled where every other
-    // goal row is; this is only the timeout half.
-    const pending = rec.rearmPendingSince ? Date.parse(rec.rearmPendingSince) : null;
-    if (pending !== null && this.now() - pending < PENDING_DEADLINE_MS) return;
-
-    const attempts = rec.rearmAttempts ?? 0;
-    if (pending !== null && attempts >= MAX_REARM_ATTEMPTS) {
-      this.finishRearm();
-      this.stopRec("rearm-failed", "the goal did not register after being typed back in");
-      this.say(REARM_LOST_TEXT);
-      return;
-    }
-
-    if (this.dialogHooks?.read()) {
-      this.noticeRearmBlocked(rec);
-      return;
-    }
-
-    // The screen is asked before anything is typed. Most resumes do not lose
-    // the goal at all — it only goes when a compaction has moved the row it
-    // would be rebuilt from out of reach — and re-setting one that is already
-    // there costs a superseded goal and an extra evaluation for nothing.
-    //
-    // Only a clear "yes" skips. Null means there was no screen to ask, and
-    // typing the goal in again is harmless where believing a guess is not:
-    // measured, a `/goal` sent into a session that already has that goal
-    // replaces it with an identical one and does not interrupt the turn in
-    // flight — a 90-second command ran to completion through one.
-    if (hooks.goalArmed() === true) {
-      this.finishRearm();
-      this.log.info("goal survived the resume; nothing to re-arm");
-      return;
-    }
-
-    hooks.rearmGoal(rec.goal);
-    this.updateRec({
-      rearmAttempts: attempts + 1,
-      rearmPendingSince: new Date(this.now()).toISOString(),
-    });
-    this.log.info("typing the goal back in", { attempt: attempts + 1 });
-  }
-
-  /** Say once, and only once, that a run is sitting without its goal. */
-  private noticeRearmBlocked(rec: AutopilotRecord): void {
-    if (rec.rearmNotified) return;
-    // Start the clock here when nothing else did. The record is edited out of
-    // band by `/autopilot`, and a missing field must not mean "blocked for no
-    // time at all" on every tick — which is silence for ever.
-    if (!rec.blockedSince) {
-      this.updateRec({ blockedSince: new Date(this.now()).toISOString() });
-      return;
-    }
-    const blocked = this.now() - Date.parse(rec.blockedSince);
-    if (blocked < REARM_BLOCKED_NOTICE_MS) return;
-    this.updateRec({ rearmNotified: true });
-    this.log.warn("goal still not re-armed", { blocked: formatDuration(blocked) });
-    this.say("⚠️ Autopilot paused — the goal has not been re-armed yet");
-  }
-
-  /** Clear the re-arm bookkeeping, however it ended. */
-  private finishRearm(): void {
-    this.updateRec({
-      needsRearm: false,
-      rearmAttempts: 0,
-      rearmPendingSince: undefined,
-      blockedSince: undefined,
-      rearmNotified: false,
-    });
-  }
-
   private checkDrift(rec: AutopilotRecord): void {
     // From the last check, or from the start of the run when there has been
     // none. Both are on the record, so neither resets with the watcher.
@@ -1692,7 +1131,7 @@ export class TranscriptWatcher {
     let nudges = rec.nudgeCount ?? 0;
     if (nudges > 0 && sinceNudge > NUDGE_BACKOFF_RESET_MS) {
       nudges = 0;
-      this.updateRec({ nudgeCount: 0, stuckWarned: false });
+      this.updateRec({ nudgeCount: 0 });
     }
 
     const wait = NUDGE_DELAYS_MS[Math.min(nudges, NUDGE_DELAYS_MS.length - 1)];
@@ -1712,33 +1151,11 @@ export class TranscriptWatcher {
 
     this.lastNudgeAt = this.now();
     const count = nudges + 1;
-
-    // Did the previous nudge get anything at all? Any new row since it was
-    // sent counts — one line is enough. This is the only measure of "stuck"
-    // that survives the paced-task case, where the model reliably wakes, does
-    // a little and stops again, and where counting pushes would report a
-    // healthy run as dead.
-    if (this.lastRowAt > this.lastRowAtNudge) this.unansweredNudges = 0;
-    else this.unansweredNudges++;
-    this.lastRowAtNudge = this.lastRowAt;
-
     this.updateRec({ nudgeCount: count, lastNudgeAt: new Date().toISOString() });
-    this.log.info("nudged a stalled run", {
-      nudge: count,
-      unanswered: this.unansweredNudges,
-    });
-
-    // Nudging is routine maintenance and stays in the log. A run that answers
-    // none of them is not routine, and it is said once — repeating it every
-    // fifteen minutes would train the user to ignore the one message here that
-    // asks for their attention.
-    if (this.unansweredNudges >= STUCK_AFTER_NUDGES && !rec.stuckWarned) {
-      this.updateRec({ stuckWarned: true });
-      this.say(
-        `⚠️ Autopilot has had no response through ${this.unansweredNudges} ` +
-          `nudges — nothing has been written since. Check the terminal`
-      );
-    }
+    // Routine maintenance: the log, not the chat. A "looks stuck" warning
+    // used to follow three unanswered nudges; across 1079 nudges on this
+    // machine it never once fired, so it went.
+    this.log.info("nudged a stalled run", { nudge: count });
   }
 
   private cancelPendingRetry(reason: string): void {
@@ -1770,7 +1187,7 @@ export function isFreshUserInput(row: TranscriptRow): boolean {
   const content = row.message?.content;
   if (typeof content !== "string") return false; // tool_result content is an array
   if (content.startsWith(STOP_HOOK_PREFIX)) return false;
-  if (content.includes(WATCHER_SENDER_MARKER)) return false;
+  if (content.includes(CORK_SENDER_MARKER)) return false;
   return true;
 }
 
@@ -1798,88 +1215,6 @@ export function isMidStreamErrorRow(row: TranscriptRow): boolean {
   return false;
 }
 
-/**
- * What a `goal_status` row means. The `sentinel` flag is doing real work here:
- * a row carrying it is claude code announcing a state CHANGE, not the verdict
- * of a turn — and `/goal clear` announces itself as `met: true, sentinel: true`.
- * Reading `met` without looking at `sentinel` first therefore reports a goal the
- * user just cancelled as a goal that was achieved.
- *
- *   { met:false, sentinel:true }            → a goal was set
- *   { met:true,  sentinel:true }            → the goal was cleared by hand
- *   { met:true }                            → the evaluator says it is met
- *   { met:false, failed:true }              → judged unachievable; goal is over
- *   { met:false }                           → not yet; the model keeps working
- *
- * All five were observed against claude code 2.1.260.
- */
-export function readGoalStatus(row: TranscriptRow): {
-  kind: "set" | "cleared" | "met" | "failed" | "progress";
-  condition?: string;
-  reason?: string;
-} | null {
-  const a = row.attachment;
-  if (row.type !== "attachment" || a?.type !== "goal_status") return null;
-
-  const common = { condition: a.condition, reason: a.reason };
-  if (a.sentinel) {
-    return { kind: a.met ? "cleared" : "set", ...common };
-  }
-  if (a.met) return { kind: "met", ...common };
-  if (a.failed) return { kind: "failed", ...common };
-  return { kind: "progress", ...common };
-}
-
-/**
- * The `/goal …` and `/goal clear` a user typed, as recorded by claude code.
- * Cork uses this to confirm that a command it typed into the pane actually
- * registered — the failure mode being that a `/goal` which is not at the start
- * of the input is sent as an ordinary message, with nothing anywhere saying so.
- *
- * Claude code records this in TWO shapes, and cork has to read both:
- *
- *   - a command that starts a turn (`/goal <condition>`) lands as a `user` row
- *     with the markup in `message.content`;
- *   - one that does not (`/goal clear`) lands as `system` / `local_command`
- *     with the markup in `content`.
- *
- * Reading only the second shape is not a partial answer but a wrong one: it
- * makes setting a goal look like it never registered, every time. That is
- * exactly what an end-to-end run caught — with the goal in fact set, and cork
- * concluding the opposite and standing down.
- */
-export function readLocalCommand(
-  row: TranscriptRow
-): { name: string; args: string } | null {
-  const isSystemForm = row.type === "system" && row.subtype === "local_command";
-  const isUserForm =
-    row.type === "user" && typeof row.message?.content === "string";
-  if (!isSystemForm && !isUserForm) return null;
-  const text = isSystemForm ? row.content ?? "" : (row.message?.content as string);
-  if (!text.includes("<command-name>")) return null;
-  const name = /<command-name>\/?([^<]*)<\/command-name>/.exec(text)?.[1];
-  if (!name) return null;
-  // Not [^<]* — a goal may legitimately contain markup, and stopping at the
-  // first "<" would silently truncate it.
-  const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1] ?? "";
-  return { name: name.trim(), args: args.trim() };
-}
-
-/**
- * The stdout a local command printed, e.g. "Goal set: …" / "Goal cleared: …".
- * Recorded in the same two shapes as the command itself.
- */
-export function readLocalCommandOutput(row: TranscriptRow): string | null {
-  const text =
-    row.type === "system" && row.subtype === "local_command"
-      ? row.content ?? ""
-      : row.type === "user" && typeof row.message?.content === "string"
-        ? row.message.content
-        : "";
-  const m = /<local-command-stdout>([\s\S]*?)<\/local-command-stdout>/.exec(text);
-  return m ? m[1].trim() : null;
-}
-
 /** The marker claude code writes where it compacted the conversation. */
 export function isCompactBoundary(row: TranscriptRow): boolean {
   return row.type === "system" && row.subtype === "compact_boundary";
@@ -1901,25 +1236,8 @@ export function contextTokens(row: TranscriptRow): number | null {
 }
 
 /** A row this watcher itself put into the session, echoed back by claude code. */
-/**
- * A message from a person, as opposed to a command, a tool result, or one of
- * cork's own injections.
- *
- * Used for one thing: a `/goal` that claude did not take as a command lands as
- * a plain message, which is how a failed start announces itself long before any
- * deadline. Tool results also arrive as `user` rows, hence the string check —
- * those carry structured content.
- */
-export function isPlainUserMessage(row: TranscriptRow): boolean {
-  if (row.type !== "user" || row.isMeta) return false;
-  const content = row.message?.content;
-  if (typeof content !== "string") return false; // a tool result, not a message
-  if (content.includes(WATCHER_SENDER_MARKER)) return false; // cork's own
-  return readLocalCommand(row) === null && readLocalCommandOutput(row) === null;
-}
-
 export function isWatcherInjection(row: TranscriptRow): boolean {
   if (row.type !== "user") return false;
   const content = row.message?.content;
-  return typeof content === "string" && content.includes(WATCHER_SENDER_MARKER);
+  return typeof content === "string" && content.includes(CORK_SENDER_MARKER);
 }

@@ -31,6 +31,25 @@ export interface ReplyMessage extends UdsMessage {
   at?: string | string[];
 }
 
+/**
+ * A command the model issued through the channel MCP's `cork` tool — the
+ * model telling cork something, as opposed to a reply for the chat. The daemon
+ * answers with a CommandResultMessage carrying the same requestId.
+ */
+export interface CommandMessage extends UdsMessage {
+  type: "command";
+  corkSessionKey: string;
+  requestId: string;
+  command: string;
+}
+
+export interface CommandResultMessage extends UdsMessage {
+  type: "command-result";
+  requestId: string;
+  ok: boolean;
+  text: string;
+}
+
 interface ChannelConnection {
   socket: net.Socket;
   sessionKey: string;
@@ -43,6 +62,7 @@ interface ChannelConnection {
  * Events:
  * - "register" (sessionKey: string, conn: ChannelConnection)
  * - "reply" (msg: ReplyMessage)
+ * - "command" (msg: CommandMessage)
  * - "disconnect" (sessionKey: string)
  */
 export class UdsServer extends EventEmitter {
@@ -183,6 +203,29 @@ export class UdsServer extends EventEmitter {
       }
       case "reply": {
         this.emit("reply", msg as ReplyMessage);
+        break;
+      }
+      case "command": {
+        const cmd = msg as Partial<CommandMessage>;
+        // A command speaks for the socket it came in on, not for whichever
+        // session it names — and it has to be whole, or the daemon's answer
+        // would have nowhere to go.
+        if (
+          typeof cmd.corkSessionKey !== "string" ||
+          typeof cmd.requestId !== "string" ||
+          typeof cmd.command !== "string"
+        ) {
+          logger.warn("malformed command message", { keys: Object.keys(msg) });
+          return;
+        }
+        if (currentKey && cmd.corkSessionKey !== currentKey) {
+          logger.warn("command names another session; ignored", {
+            from: currentKey,
+            named: cmd.corkSessionKey,
+          });
+          return;
+        }
+        this.emit("command", msg as CommandMessage);
         break;
       }
       default:

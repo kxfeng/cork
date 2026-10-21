@@ -8,123 +8,88 @@ import { formatDuration } from "./transcript-watcher.js";
 const logger = getLogger("autopilot");
 
 /**
- * Autopilot is one `/goal` run: the user hands cork a completion condition,
- * cork types it into the pane as `/goal <condition>`, and claude code's own Stop
- * hook keeps the model working until an evaluator says the condition is met.
+ * Autopilot is one unattended run: the user agrees a goal with the model, cork
+ * starts the run and watches the session from outside — nudging it when it
+ * goes quiet, restarting it when the pane dies — and the model says when it
+ * believes the goal is met. Cork then judges that claim with an evaluator of
+ * its own (see evaluator.ts): a separate `claude -p` that reads GOAL.md, the
+ * evidence the model left, the workspace and the recorded transcript, and
+ * answers met / not met / impossible. Not met goes back to the model as text;
+ * met or impossible ends the run.
  *
- * Everything about whether the goal is still live is read from the transcript
- * (see transcript-watcher) — that is the only authority, and it survives a cork
- * restart because claude wrote it, not us. This file records the one thing the
- * transcript cannot say: whether the user asked cork to be watching at all.
- *
- * That distinction decides what happens on a daemon restart: `state: "running"`
- * means "resume watching this session", and the watcher's first look at the
- * transcript then reconciles the rest (a goal that was met while cork was down
- * ends the task the same way it would have live — no special startup path).
+ * Nothing here depends on claude code's own `/goal`. That was the first
+ * design, and it judged from the conversation in context, which a compaction
+ * cuts short — so a long run was judged on what it had done since the last
+ * compaction, and a day's work had to be redone to be believed.
  *
  *   ~/.cork/sessions/<id>/AUTOPILOT.json  ← this
- *   ~/.cork/sessions/<id>/GOAL.md        ← first line is the /goal condition
- *   ~/.cork/sessions/<id>/PROJECT.md     ← what the model must keep current
+ *   ~/.cork/sessions/<id>/GOAL.md        ← the goal, frozen once the run starts
+ *   ~/.cork/sessions/<id>/PROJECT.md     ← what the model keeps current
+ *   ~/.cork/sessions/<id>/EVIDENCE.md    ← what the model leaves for the evaluator
  */
 
 /**
- * Where an autopilot run is in its life.
- *
- * `starting` and `stopping` exist because typing a command into a pane and the
- * command taking effect are two different events, minutes apart in the worst
- * case. Cork types and moves on; the watcher reads the transcript and decides
- * what actually happened. Every message the user gets about a task starting or
- * ending comes from that reading, never from the typing.
+ * Where an autopilot run is in its life. `drafting` is the conversation that
+ * writes GOAL.md; `running` begins at `/autopilot start` and ends with a
+ * verdict, `/autopilot stop`, or a pane that cannot be brought back.
  */
-export type AutopilotState =
-  | "idle"
-  | "drafting"
-  | "starting" // `/goal` typed; waiting for the transcript to show it registered
-  | "running"
-  | "stopping" // `/goal clear` typed; waiting for the goal to actually end
-  | "stopped";
+export type AutopilotState = "idle" | "drafting" | "running" | "stopped";
 
 /** Why a run ended. Only ever set alongside `state: "stopped"`. */
 export type AutopilotStopReason =
-  | "met" // the evaluator says the condition holds
-  | "failed" // the evaluator says it cannot be met in this session
-  | "user-stop" // /autopilot stop, or a /goal clear typed in the pane
-  | "start-failed" // the /goal never registered
-  // No longer produced: a clear that comes back silent means both "it worked"
-  // and "there was no goal to clear", and cork was asserting the first of
-  // those. Kept for records already on disk.
-  | "stop-failed"
-  | "rearm-failed" // the goal was lost with the pane and could not be put back
+  | "met" // the evaluator says every condition holds
+  | "impossible" // the evaluator says the goal cannot be met
+  | "user-stop" // /autopilot stop, or the session was reset
   | "unreachable"; // the pane could not be brought back
+
+/** One evaluator run, as kept on the record. */
+export interface Evaluation {
+  at: string;
+  ok: boolean;
+  impossible: boolean;
+  reason: string;
+  /** How long the evaluator took, ms. */
+  durationMs?: number;
+  /** What it cost, when claude reported it. */
+  costUsd?: number;
+  /** The evaluator's claude session, replayable with `claude -r <id>`. */
+  sessionId?: string;
+}
 
 export interface AutopilotRecord {
   state: AutopilotState;
-  /** The condition as sent to /goal — kept so a Lark message can quote it. */
-  goal?: string;
   startedAt?: string;
   stoppedAt?: string;
   stopReason?: AutopilotStopReason;
-  /** Why the run ended, in the evaluator's words. */
+  /** Why the run ended, in the evaluator's words where there are any. */
   stopDetail?: string;
   /** Last time cork pushed the model to continue, and how many times in a row. */
   lastNudgeAt?: string;
   nudgeCount?: number;
-  /** Whether the "this looks stuck" warning has already gone out this stall. */
-  stuckWarned?: boolean;
   /** Consecutive failed attempts to bring the pane back. */
   restartCount?: number;
   /**
-   * When the goal was last checked against the work, ISO.
+   * When the model was last asked to check its work against the goal, ISO.
    *
    * On the record rather than in the watcher because a watcher is new on
    * every daemon start, and an hourly timer that restarts with it never
-   * fires on a machine being worked on: nine restarts in four hours left a
-   * real run with `driftChecks: 0` while the check that would have caught
-   * the goal going missing sat at zero the whole time.
+   * fires on a machine being worked on.
    */
   lastGoalCheckAt?: string;
-  /**
-   * Whether this run is waiting for its `/goal` to be typed in again.
-   *
-   * Claude keeps a goal in memory only — a Stop hook and one field of app
-   * state — and rebuilds it on `claude -r` by scanning its conversation back
-   * for the newest `goal_status` row. After a compaction that conversation
-   * starts at the compact boundary, so a goal set before it is invisible and
-   * comes back as no goal at all, silently: nothing is written anywhere, and
-   * the row cork can still see in the transcript file says the goal is live.
-   * Measured on claude code 2.1.268, and reproduced from both sides.
-   *
-   * Cork restarts claude on every daemon restart, so rather than try to tell
-   * the two cases apart it types the goal in again after each one. A goal
-   * that was fine is merely superseded by an identical one.
-   */
-  needsRearm?: boolean;
-  /** Attempts that actually reached the input box and did not take. */
-  rearmAttempts?: number;
-  /** When the current attempt was typed, for the deadline. */
-  rearmPendingSince?: string;
-  /** When re-arming was first blocked, and whether that was mentioned. */
-  blockedSince?: string;
-  rearmNotified?: boolean;
-  /** How many times this run has been compacted. */
-  compactCount?: number;
-  /**
-   * When cork typed the command it is now waiting on, as epoch ms.
-   *
-   * Drives the deadline for `starting` and `stopping`, and is reset when a
-   * daemon restart takes the wait over — otherwise an outage longer than the
-   * deadline would be read as a failure the moment cork came back.
-   */
-  pendingSince?: number;
-  /** How many times `/goal clear` has been typed for this stop. */
-  clearAttempts?: number;
   /** How many times cork has asked the model to check itself against the goal. */
   driftChecks?: number;
+  /** How many times this run has been compacted. */
+  compactCount?: number;
+  /** When the evaluator currently running was started, ISO. Absent ⇒ none is. */
+  evaluatingSince?: string;
+  /** Every verdict this run has had, oldest first. */
+  evaluations?: Evaluation[];
 }
 
 const FILE = "AUTOPILOT.json";
 export const GOAL_FILE = "GOAL.md";
 export const PROJECT_FILE = "PROJECT.md";
+export const EVIDENCE_FILE = "EVIDENCE.md";
 
 const IDLE: AutopilotRecord = { state: "idle" };
 
@@ -140,17 +105,42 @@ export function projectFilePath(key: string): string {
   return path.join(sessionDir(key), PROJECT_FILE);
 }
 
+export function evidenceFilePath(key: string): string {
+  return path.join(sessionDir(key), EVIDENCE_FILE);
+}
+
 /** The session's record, or an idle one when it has none / an unreadable one. */
 export function loadAutopilot(key: string): AutopilotRecord {
   try {
     const parsed = JSON.parse(fs.readFileSync(autopilotPath(key), "utf-8"));
     if (parsed && typeof parsed === "object" && typeof parsed.state === "string") {
-      return parsed as AutopilotRecord;
+      return normalizeLegacy(parsed as Omit<AutopilotRecord, "state"> & { state: string });
     }
   } catch {
     // Missing or corrupt — an unwatched session, which is the safe reading.
   }
   return { ...IDLE };
+}
+
+/**
+ * Records written by the `/goal` era had two more states: `starting` (the
+ * command typed, not yet confirmed) and `stopping` (the clear typed). Neither
+ * exists now. A run that was starting had its goal agreed and is treated as
+ * running — the model is nudged toward it and judged when it says so; one
+ * that was stopping was being stopped on request, so it is stopped.
+ */
+function normalizeLegacy(rec: Omit<AutopilotRecord, "state"> & { state: string }): AutopilotRecord {
+  const state = rec.state as string;
+  if (state === "starting") return { ...rec, state: "running" };
+  if (state === "stopping") {
+    return {
+      ...rec,
+      state: "stopped",
+      stopReason: rec.stopReason ?? "user-stop",
+      stoppedAt: rec.stoppedAt ?? new Date().toISOString(),
+    };
+  }
+  return rec as AutopilotRecord;
 }
 
 export function saveAutopilot(key: string, rec: AutopilotRecord): void {
@@ -184,23 +174,33 @@ export function stopAutopilot(
     stopReason: reason,
     stopDetail: detail,
     nudgeCount: 0,
-    stuckWarned: false,
     restartCount: 0,
+    evaluatingSince: undefined,
   });
 }
 
-/**
- * Sessions cork should be watching — what a daemon restart picks back up.
- *
- * All three live states count: a task interrupted mid-`starting` still has a
- * `/goal` in flight, and one interrupted mid-`stopping` still has a goal that
- * has to be got rid of. Both are settled by the watcher's first look at the
- * transcript.
- */
+/** Sessions cork should be watching — what a daemon restart picks back up. */
 export function isRunning(rec: AutopilotRecord): boolean {
-  return (
-    rec.state === "starting" || rec.state === "running" || rec.state === "stopping"
-  );
+  return rec.state === "running";
+}
+
+/** "12min" for how long a run has been going, or ran; "" when unknown. */
+export function runLength(rec: AutopilotRecord, now = Date.now()): string {
+  const started = rec.startedAt ? Date.parse(rec.startedAt) : NaN;
+  const until = rec.stoppedAt ? Date.parse(rec.stoppedAt) : now;
+  if (!Number.isFinite(started) || !Number.isFinite(until) || until <= started) return "";
+  return formatDuration(until - started);
+}
+
+/**
+ * The one line every autopilot message to the chat starts with:
+ * `✈️ Autopilot running (evaluating) · 12min`. The state, qualified in
+ * parentheses when it needs to be, and how long — nothing else, and the same
+ * mark whatever happened: the words say it. Status replies and notices share
+ * it so the chat reads as one voice.
+ */
+export function headline(state: string, rec: AutopilotRecord, now = Date.now()): string {
+  return [`✈️ Autopilot ${state}`, runLength(rec, now)].filter(Boolean).join(" · ");
 }
 
 /** GOAL.md in full, or null. */
@@ -213,102 +213,21 @@ export function readGoalFile(key: string): string | null {
 }
 
 /**
- * The `/goal` condition: GOAL.md, whole and unchanged.
- *
- * There is no split between "the condition" and "supporting material". The
- * evaluator that judges the goal after every turn runs with no tools at all
- * and is told to answer from transcript evidence only, so anything left out of
- * the condition is something the judgement cannot use — and a condition that
- * points at a file it cannot open reads to it as a dependency on something
- * unavailable, which it is told to report as impossible. So the file is the
- * condition: one document, one reader's worth of truth, nothing to keep in
- * step.
- *
- * Trailing whitespace goes; interior line breaks stay, and reach the condition
- * intact (see sendSlashCommand for how they are typed).
+ * The goal: GOAL.md with trailing whitespace dropped, or null when there is no
+ * file or nothing in it. The file is what the evaluator reads, so nothing
+ * about its length or shape is checked here — a goal is whatever the user
+ * agreed with the model, and the user looked at the file before `/autopilot
+ * start`.
  */
 export function readGoal(key: string): string | null {
   const text = readGoalFile(key);
   if (text === null) return null;
-  return text.replace(/\s+$/, "");
+  const trimmed = text.replace(/\s+$/, "");
+  return trimmed.trim().length === 0 ? null : trimmed;
 }
 
 /**
- * The longest GOAL.md cork will set as a goal.
- *
- * Under claude's own ceiling of 4000 characters for a condition, with room for
- * the `/goal ` prefix, and comfortably within what was measured going in: a
- * ~2900-character goal over 21 lines set cleanly when typed line by line.
- *
- * The remaining margin is for the judgement rather than the typing. The
- * evaluator re-reads the whole condition after every single turn, and the
- * longer it is the more of it gets skimmed.
- */
-export const MAX_GOAL_CHARS = 3000;
-
-/**
- * The longest single line within it.
- *
- * Claude folds any one input past ~800 characters into a `[Pasted text]`
- * block, and a `/goal` inside such a block is not a command at all — it is
- * sent as an ordinary message, with no error anywhere. Cork types GOAL.md a
- * line at a time, so this is the per-line budget; 512 leaves room to be wrong
- * about the exact boundary. A long paragraph just needs breaking up.
- */
-export const MAX_GOAL_LINE_CHARS = 512;
-
-export type GoalProblem =
-  | "missing"
-  | "empty"
-  | "too-long"
-  | "line-too-long"
-  | "is-command"
-  | "self-referential";
-
-/**
- * Why this goal cannot be used, or null if it can.
- *
- * `key` enables the self-referential check — a goal must not be judged against
- * a file the model doing the work can rewrite.
- */
-export function checkGoal(
-  goal: string | null,
-  key?: string
-): GoalProblem | null {
-  if (goal === null) return "missing";
-  const trimmed = goal.trim();
-  if (trimmed.length === 0) return "empty";
-  // Cork already prefixes `/goal `. A file that starts with a slash is almost
-  // always the model having written the whole command out, which would make the
-  // condition itself begin "/goal …" — accepted by claude, and wrong.
-  if (trimmed.startsWith("/")) return "is-command";
-  if ([...trimmed].length > MAX_GOAL_CHARS) return "too-long";
-  if (trimmed.split("\n").some((l) => [...l].length > MAX_GOAL_LINE_CHARS)) {
-    return "line-too-long";
-  }
-  if (key && referencesOwnFiles(trimmed, key)) return "self-referential";
-  return null;
-}
-
-/**
- * Whether the condition is judged against the session's WORKING document.
- *
- * "Every item in section 5 of PROJECT.md is satisfied" is a goal that can be
- * passed by editing section 5, and the evaluator — which re-reads whatever it
- * was last shown — cannot tell. PROJECT.md is written continuously as the work
- * proceeds, so a standard kept there does not stay still.
- *
- * GOAL.md itself is not checked for: it IS the condition, delivered whole, so
- * a mention of it points at text the evaluator already has in front of it.
- */
-function referencesOwnFiles(condition: string, key: string): boolean {
-  if (condition.includes(path.join(sessionDir(key), PROJECT_FILE))) return true;
-  return new RegExp(`\\b${PROJECT_FILE}\\b`).test(condition);
-}
-
-
-/**
- * How much of the evaluator's verdict is kept.
+ * How much of a verdict is kept in the archive.
  *
  * Measured across every terminal verdict on this machine: 17 of them, longest
  * 3326 characters, median 388. So this never fires in practice — it is here so
@@ -327,15 +246,13 @@ export function archiveDir(key: string): string {
  *
  * The reader of an archived goal is usually a model deciding what to do next;
  * "user-stop" and "unreachable" are precise to whoever wrote them and opaque
- * to everyone else.
+ * to everyone else. Records written before this version may carry reasons no
+ * longer produced; those fall through to the raw word.
  */
-const OUTCOMES: Record<AutopilotStopReason, string> = {
+const OUTCOMES: Record<string, string> = {
   met: "completed — the goal was met",
-  failed: "the goal was judged unachievable",
+  impossible: "the goal was judged impossible",
   "user-stop": "stopped on request",
-  "start-failed": "never started",
-  "stop-failed": "the goal could not be cleared",
-  "rearm-failed": "the goal was lost with the terminal and could not be set again",
   unreachable: "the session could not be brought back",
 };
 
@@ -392,6 +309,7 @@ function outcomeBlock(rec: AutopilotRecord): string {
     );
   }
   if (rec.compactCount) lines.push(`- Compactions: ${rec.compactCount}`);
+  if (rec.evaluations?.length) lines.push(`- Evaluations: ${rec.evaluations.length}`);
   return lines.join("\n");
 }
 
@@ -410,12 +328,12 @@ function verdictBlock(detail: string | undefined): string {
   return [
     "## Verdict",
     "",
-    "What the goal evaluator said when it ended this run, verbatim — a record of",
+    "What the evaluator said when it ended this run, verbatim — a record of",
     "what was checked and accepted, not a requirement for anything that follows.",
     "",
     cut ? chars.slice(0, MAX_VERDICT_CHARS).join("") : text,
     ...(cut
-      ? ["", `_(cut at ${MAX_VERDICT_CHARS} characters; the full text is in the session transcript)_`]
+      ? ["", `_(cut at ${MAX_VERDICT_CHARS} characters; the full text is in AUTOPILOT.json)_`]
       : []),
   ].join("\n");
 }
@@ -423,29 +341,38 @@ function verdictBlock(detail: string | undefined): string {
 /**
  * Move a finished run's files into `archive/`, and return the folder's name.
  *
- * Called when a new goal is being drafted over an old one that has ended. The
- * files move rather than copy: a stale GOAL.md left in place is one a model
- * edits instead of replacing, and two goals in a session directory is one too
- * many. What is kept is what the next run might want — the goal as it was set,
- * how it went, and the working document as it stood at the end.
+ * Called when a new run begins over an old one that has ended: when a new
+ * goal is drafted, and when `/autopilot start` re-runs a goal whose last run
+ * stopped. The files move rather than copy: a stale PROJECT.md or EVIDENCE.md
+ * left in place is one the next run's model picks up as its own — a fresh
+ * model told to write evidence finds some already there and offers it up.
+ * What is kept is what the next run might want — the goal as it was set, how
+ * it went, the working document and the evidence as they stood at the end.
+ *
+ * `keepGoal` is the re-run case: the same GOAL.md is the next run's goal, so
+ * it is copied into the archive and left where it is. Drafting moves it: two
+ * goals in a session directory is one too many.
  *
  * Returns null when there was nothing to archive, or when it could not be
- * done. Drafting a new goal is the point; filing the old one is housekeeping,
- * and housekeeping does not get to block it.
+ * done. Starting the next run is the point; filing the old one is
+ * housekeeping, and housekeeping does not get to block it.
  */
-export function archiveRun(key: string): string | null {
+export function archiveRun(key: string, opts: { keepGoal?: boolean } = {}): string | null {
   const rec = loadAutopilot(key);
   if (rec.state !== "stopped") return null;
 
   const goalPath = goalFilePath(key);
-  const projectPath = path.join(sessionDir(key), PROJECT_FILE);
+  const projectPath = projectFilePath(key);
+  const evidencePath = evidenceFilePath(key);
   const goal = readGoalFile(key);
   const hasProject = fs.existsSync(projectPath);
-  if (goal === null && !hasProject) return null; // nothing was ever written
+  const hasEvidence = fs.existsSync(evidencePath);
+  if (goal === null && !hasProject && !hasEvidence) return null; // nothing was ever written
 
   const drop = () => {
-    fs.rmSync(goalPath, { force: true });
+    if (!opts.keepGoal) fs.rmSync(goalPath, { force: true });
     fs.rmSync(projectPath, { force: true });
+    fs.rmSync(evidencePath, { force: true });
   };
 
   try {
@@ -478,8 +405,9 @@ export function archiveRun(key: string): string | null {
         "",
       ].join("\n")
     );
-    fs.rmSync(goalPath, { force: true });
+    if (!opts.keepGoal) fs.rmSync(goalPath, { force: true });
     if (hasProject) fs.renameSync(projectPath, path.join(dir, PROJECT_FILE));
+    if (hasEvidence) fs.renameSync(evidencePath, path.join(dir, EVIDENCE_FILE));
 
     logger.info("archived a finished run", { key, name, reason: rec.stopReason });
     return name;

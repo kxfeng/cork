@@ -3,83 +3,38 @@ import {
   TranscriptWatcher,
   AUTOPILOT_CONSTANTS as C,
   WATCHER_CONSTANTS as W,
-  readGoalStatus,
-  readLocalCommand,
-  readLocalCommandOutput,
   isCompactBoundary,
   contextTokens,
-  lastGoalStatus,
   type AutopilotHooks,
 } from "../src/session/transcript-watcher.js";
 import type { AutopilotRecord } from "../src/session/autopilot.js";
 
 /**
- * The rules that run while an autopilot run is live. They are driven entirely by
- * what claude code writes to the transcript plus a clock, so they are tested
- * the same way: rows in, decisions out, with a fake clock and fake hooks.
+ * The rules that run while an autopilot run is live. They are driven by what
+ * claude code writes to the transcript plus a clock, so they are tested the
+ * same way: rows in, decisions out, with a fake clock and fake hooks.
  *
- * The one that would hurt most if it broke silently is the goal_status
- * classification — `/goal clear` announces itself as `met: true`, so a reading
- * that skips `sentinel` reports a cancelled task as a completed one.
+ * Whether the goal is met is not decided here at all — the model says so
+ * through the `cork` tool and the evaluator judges (manager.ts, evaluator.ts).
+ * The watcher keeps the run alive: nudges, restarts, compaction notices, the
+ * hourly self-check.
  */
 
 const row = (o: Record<string, unknown>) => JSON.stringify(o) + "\n";
 
-/**
- * A permission prompt, as `readDialog` would return it. Only its presence
- * matters to the re-arm — it waits for a dialog rather than answering one —
- * but the dialog watcher formats whatever is on screen, so the shape has to
- * be whole.
- */
-const BLOCKING_DIALOG = {
-  kind: "takeover" as const,
-  title: "Bash command",
-  body: ["Do you want to proceed?"],
-  screen: ["Bash command", "", "❯ 1. Yes", "  2. No"],
-  optionRows: [2, 3],
-  folded: false,
-  options: [
-    { text: "1. Yes", selected: true },
-    { text: "2. No", selected: false },
-  ],
-  selected: 0,
-  footer: "Esc to cancel",
-  answerable: true,
-};
-
-const goalRow = (a: Record<string, unknown>) =>
-  row({ type: "attachment", attachment: { type: "goal_status", ...a } });
-
 function makeWatcher(
   initial: Partial<AutopilotRecord> = { state: "running" },
-  opts: {
-    window?: number;
-    compactPct?: number;
-    /**
-     * What a read of the transcript file finds, for the deadline checks that
-     * ask the file rather than trusting the record. Default: nothing there,
-     * which is what a session with no goal looks like.
-     */
-    onDisk?: Record<string, unknown>;
-    /** When that row was written, for the "belongs to an earlier run" test. */
-    onDiskAt?: number;
-  } = {}
+  opts: { window?: number; compactPct?: number } = {}
 ) {
   let clock = 1_000_000;
   let rec: AutopilotRecord = { state: "running", ...initial } as AutopilotRecord;
 
   const injected: string[] = [];
   const notified: string[] = [];
-  const calls = { restarts: 0, clears: 0, rearms: [] as string[] };
-  let onDisk = opts.onDisk;
-  let onDiskAt: number | undefined = opts.onDiskAt;
+  const calls = { restarts: 0 };
   let alive = true;
   let restartOk: boolean | undefined; // undefined ⇒ "came back iff the pane is up"
   let injectOk = true;
-  let dialogUp = false;
-  // What the screen says about a live goal. Null — "cannot say" — is the
-  // default because it is what a pane that has not drawn its box yet reports.
-  let armed: boolean | null = null;
 
   const hooks: AutopilotHooks = {
     read: () => rec,
@@ -97,13 +52,6 @@ function makeWatcher(
     },
     contextWindow: () => opts.window ?? 200_000,
     compactPercent: () => opts.compactPct ?? 75,
-    clearGoal: () => {
-      calls.clears++;
-    },
-    rearmGoal: (condition) => {
-      calls.rearms.push(condition);
-    },
-    goalArmed: () => armed,
   };
 
   const w = new TranscriptWatcher({
@@ -117,20 +65,6 @@ function makeWatcher(
     },
     autopilot: hooks,
     now: () => clock,
-    // Only `read` matters here: the re-arm waits for a dialog to go rather
-    // than dismissing it, so what is on screen is all it asks about.
-    dialog: {
-      read: () => (dialogUp ? BLOCKING_DIALOG : null),
-      driving: () => false,
-      clientActivity: () => null,
-    },
-    goalOnDisk: (_ws, _sid, since) => {
-      if (!onDisk) return null;
-      // The real reader drops rows older than the run. The fake dates its row
-      // `onDiskAt` so a test can put one before `startedAt` and see it ignored.
-      if (onDiskAt !== undefined && onDiskAt < since) return null;
-      return lastGoalStatus([JSON.parse(goalRow(onDisk))]);
-    },
   });
 
   return {
@@ -150,150 +84,16 @@ function makeWatcher(
     setAlive: (v: boolean) => {
       alive = v;
     },
-    /** What the next deadline check finds when it reads the transcript. */
-    setOnDisk: (a: Record<string, unknown> | undefined, at?: number) => {
-      onDisk = a;
-      onDiskAt = at;
-    },
     setInjectOk: (v: boolean) => {
       injectOk = v;
-    },
-    setDialogUp: (v: boolean) => {
-      dialogUp = v;
-    },
-    setArmed: (v: boolean | null) => {
-      armed = v;
     },
     setRec: (patch: Partial<AutopilotRecord>) => {
       rec = { ...rec, ...patch } as AutopilotRecord;
     },
-    /** Hand the watcher one transcript row, the way the file watcher does. */
-    feed: (line: string) =>
-      (w as unknown as { handleRow(r: unknown): void }).handleRow(JSON.parse(line)),
-    // Private, and only ever run when a watcher starts.
-    reconcile: () => (w as unknown as { reconcile(): void }).reconcile(),
     // The tick is private; it is the whole periodic half of the rules.
-    tick: async () => {
-      (w as unknown as { tick(): void }).tick();
-      // The `/goal clear` retry is the one thing a tick does asynchronously;
-      // let it settle before the assertions read the record.
-      await Promise.resolve();
-      await Promise.resolve();
-    },
+    tick: () => (w as unknown as { tick(): void }).tick(),
   };
 }
-
-describe("reading goal_status rows", () => {
-  it("tells a goal being set from a goal being cleared", () => {
-    // Both carry sentinel:true. `met` is the only difference, and it means
-    // something else here than it does on a verdict row.
-    expect(readGoalStatus(JSON.parse(goalRow({ met: false, sentinel: true })))).
-      toMatchObject({ kind: "set" });
-    expect(readGoalStatus(JSON.parse(goalRow({ met: true, sentinel: true })))).
-      toMatchObject({ kind: "cleared" });
-  });
-
-  it("reads the evaluator's three verdicts", () => {
-    expect(
-      readGoalStatus(JSON.parse(goalRow({ met: true, reason: "done" })))
-    ).toMatchObject({ kind: "met", reason: "done" });
-    expect(
-      readGoalStatus(JSON.parse(goalRow({ met: false, failed: true, reason: "no" })))
-    ).toMatchObject({ kind: "failed", reason: "no" });
-    expect(readGoalStatus(JSON.parse(goalRow({ met: false })))).toMatchObject({
-      kind: "progress",
-    });
-  });
-
-  it("ignores rows that are not goal status", () => {
-    expect(readGoalStatus(JSON.parse(row({ type: "assistant" })))).toBeNull();
-    expect(
-      readGoalStatus(
-        JSON.parse(row({ type: "attachment", attachment: { type: "auto_mode" } }))
-      )
-    ).toBeNull();
-  });
-});
-
-describe("reading local commands", () => {
-  /**
-   * Both shapes are copied from real claude code 2.1.260 transcripts. They are
-   * not interchangeable, and an end-to-end run is what caught that: a command
-   * that STARTS a turn (`/goal <condition>`) is a `user` row with the markup in
-   * message.content, while one that does not (`/goal clear`) is a `system` /
-   * `local_command` row with it in `content`. Reading only the second made
-   * setting a goal look like it never registered, every single time.
-   */
-  const systemForm = (name: string, args: string) =>
-    JSON.parse(
-      row({
-        type: "system",
-        subtype: "local_command",
-        content: `<command-name>/${name}</command-name>\n            <command-message>${name}</command-message>\n            <command-args>${args}</command-args>`,
-      })
-    );
-
-  const userForm = (name: string, args: string) =>
-    JSON.parse(
-      row({
-        type: "user",
-        isMeta: undefined,
-        message: {
-          role: "user",
-          content: `<command-name>/${name}</command-name>\n            <command-message>${name}</command-message>\n            <command-args>${args}</command-args>`,
-        },
-      })
-    );
-
-  it("reads a command that did not start a turn (system row)", () => {
-    expect(readLocalCommand(systemForm("goal", "clear"))).toEqual({
-      name: "goal",
-      args: "clear",
-    });
-  });
-
-  it("reads a command that started a turn (user row)", () => {
-    expect(readLocalCommand(userForm("goal", "done.txt exists"))).toEqual({
-      name: "goal",
-      args: "done.txt exists",
-    });
-  });
-
-  it("keeps an argument containing markup intact", () => {
-    // [^<]* would stop at the first "<" and silently truncate the condition.
-    expect(readLocalCommand(userForm("goal", "a <b> c")).args).toBe("a <b> c");
-  });
-
-  it("reads the stdout a command printed, in either shape", () => {
-    const sys = JSON.parse(
-      row({
-        type: "system",
-        subtype: "local_command",
-        content: "<local-command-stdout>Goal cleared: do the thing</local-command-stdout>",
-      })
-    );
-    const usr = JSON.parse(
-      row({
-        type: "user",
-        message: {
-          role: "user",
-          content: "<local-command-stdout>Goal set: do the thing</local-command-stdout>",
-        },
-      })
-    );
-    expect(readLocalCommandOutput(sys)).toBe("Goal cleared: do the thing");
-    expect(readLocalCommandOutput(usr)).toBe("Goal set: do the thing");
-  });
-
-  it("returns null for an ordinary message", () => {
-    const plain = JSON.parse(
-      row({ type: "user", message: { role: "user", content: "hello" } })
-    );
-    expect(readLocalCommand(plain)).toBeNull();
-    expect(readLocalCommandOutput(plain)).toBeNull();
-    expect(readLocalCommand(JSON.parse(row({ type: "assistant" })))).toBeNull();
-  });
-});
 
 describe("context accounting", () => {
   it("counts everything the turn was carrying, cached or not", () => {
@@ -326,64 +126,6 @@ describe("context accounting", () => {
   });
 });
 
-describe("goal lifecycle", () => {
-  it("ends the task and reports it when the goal is met", () => {
-    const t = makeWatcher();
-    t.w.ingest(goalRow({ met: true, condition: "ship it", reason: "shipped" }));
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("met");
-    expect(t.notified.join()).toContain("complete");
-  });
-
-  it("does NOT report a cleared goal as completed", () => {
-    // The regression this whole `sentinel` business exists to prevent.
-    const t = makeWatcher();
-    t.w.ingest(goalRow({ met: true, sentinel: true, condition: "ship it" }));
-
-    expect(t.rec.stopReason).toBe("user-stop");
-    expect(t.notified.join()).not.toContain("complete");
-  });
-
-  it("stops pushing when the goal is judged unachievable", () => {
-    const t = makeWatcher();
-    t.w.ingest(
-      goalRow({ met: false, failed: true, condition: "x", reason: "impossible" })
-    );
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("failed");
-    expect(t.rec.stopDetail).toBe("impossible");
-    expect(t.notified.join()).toContain("impossible");
-
-    // And a later stall must not nudge a task that is over.
-    t.advance(60 * 60_000);
-    t.tick();
-    expect(t.injected).toHaveLength(0);
-  });
-
-  it("records the condition when a goal is set, and resets the counters", () => {
-    const t = makeWatcher({ state: "running", nudgeCount: 2, stuckWarned: true });
-    t.w.ingest(goalRow({ met: false, sentinel: true, condition: "do the thing" }));
-
-    expect(t.rec.goal).toBe("do the thing");
-    expect(t.rec.nudgeCount).toBe(0);
-    expect(t.rec.stuckWarned).toBe(false);
-  });
-
-  it("keeps running on a not-yet verdict, and leaves the nudge backoff alone", () => {
-    // The verdict says the model is working; it says nothing about whether
-    // pushing it has been helping. The backoff is on a clock of its own —
-    // and on a paced task the evaluator almost never runs anyway (43 stop
-    // events, one verdict, in a real session).
-    const t = makeWatcher({ state: "running", nudgeCount: 2 });
-    t.w.ingest(goalRow({ met: false, reason: "still going" }));
-
-    expect(t.rec.state).toBe("running");
-    expect(t.rec.nudgeCount).toBe(2);
-  });
-});
-
 describe("compaction", () => {
   it("tells the model to restore itself from PROJECT.md, and counts it", () => {
     const t = makeWatcher();
@@ -391,6 +133,13 @@ describe("compaction", () => {
 
     expect(t.rec.compactCount).toBe(1);
     expect(t.injected[0]).toBe(C.COMPACT_TEXT);
+  });
+
+  it("points the model at EVIDENCE.md and away from editing GOAL.md", () => {
+    // After a compaction the model has only the summary and these words to go
+    // on: they have to name the file the evaluator will read.
+    expect(C.COMPACT_TEXT).toContain("EVIDENCE.md");
+    expect(C.COMPACT_TEXT).toContain("not to be edited");
   });
 
   it("warns once as the window fills, and again after a compaction", () => {
@@ -489,168 +238,6 @@ describe("compaction", () => {
   });
 });
 
-describe("starting: waiting for the goal to register", () => {
-  const startingRec = (t: number) => ({
-    state: "starting" as const,
-    goal: "done when: a",
-    pendingSince: t,
-  });
-
-  it("reports the task started only when the goal actually registers", () => {
-    // Cork types and moves on; this row is the first evidence anywhere that
-    // the command took effect, and the only thing a start is announced on.
-    const t = makeWatcher(startingRec(1_000_000));
-
-    t.w.ingest(goalRow({ met: false, sentinel: true, condition: "done when: a" }));
-
-    expect(t.rec.state).toBe("running");
-    expect(t.notified.join()).toContain("Autopilot started");
-    expect(t.notified.join()).toContain("done when: a");
-  });
-
-  it("fails as soon as a plain user message arrives instead", () => {
-    // A `/goal` claude did not take as a command is delivered as an ordinary
-    // message, which the model then answers. Visible in seconds — no reason to
-    // sit out the deadline.
-    const t = makeWatcher(startingRec(1_000_000));
-
-    t.w.ingest(
-      row({ type: "user", message: { role: "user", content: "/goal done when: a" } })
-    );
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("start-failed");
-    expect(t.notified.join()).toContain("did not start");
-  });
-
-  it("does not mistake a command row or a tool result for that", () => {
-    const t = makeWatcher(startingRec(1_000_000));
-
-    t.w.ingest(
-      row({
-        type: "user",
-        message: {
-          role: "user",
-          content:
-            "<command-name>/goal</command-name>\n<command-args>done when: a</command-args>",
-        },
-      })
-    );
-    t.w.ingest(
-      row({ type: "user", message: { role: "user", content: [{ type: "tool_result" }] } })
-    );
-
-    expect(t.rec.state).toBe("starting");
-    expect(t.notified).toHaveLength(0);
-  });
-
-  it("types the goal again before giving up", () => {
-    // The same failure the re-arm exists for — cork put a `/goal` in and
-    // claude did not take it as one — so the same two attempts. No screen is
-    // read: a `starting` run has written no row of its own, so there is
-    // nothing for the screen to disambiguate.
-    const t = makeWatcher({ ...startingRec(1_000_000), goal: "ship it" });
-
-    t.advance(C.PENDING_DEADLINE_MS - 1000);
-    t.tick();
-    expect(t.rec.state).toBe("starting");
-    expect(t.calls.rearms).toEqual([]);
-
-    t.advance(2000);
-    t.tick();
-    expect(t.calls.rearms).toEqual(["ship it"]); // retyped, deadline reset
-    expect(t.rec.state).toBe("starting");
-
-    t.advance(C.PENDING_DEADLINE_MS + 1000);
-    t.tick();
-    expect(t.calls.rearms).toHaveLength(2);
-    expect(t.rec.state).toBe("starting");
-
-    t.advance(C.PENDING_DEADLINE_MS + 1000);
-    t.tick();
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("start-failed");
-    expect(t.notified.join()).toContain("did not start");
-  });
-});
-
-describe("stopping: waiting for the goal to go away", () => {
-  const stoppingRec = (t: number) => ({
-    state: "stopping" as const,
-    goal: "done when: a",
-    pendingSince: t,
-    clearAttempts: 1,
-  });
-
-  it("reports the task stopped when the goal is cleared", () => {
-    const t = makeWatcher(stoppingRec(1_000_000));
-
-    t.w.ingest(goalRow({ met: true, sentinel: true, condition: "done when: a" }));
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.notified.join()).toContain("Autopilot stopped");
-  });
-
-  it("counts a goal met mid-stop as stopped, not as a completion", () => {
-    // The user asked for it to end and it has. Saying only "complete" would
-    // read as cork having ignored the request.
-    const t = makeWatcher(stoppingRec(1_000_000));
-
-    t.w.ingest(goalRow({ met: true, reason: "done" }));
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.notified.join()).toContain("stopped");
-  });
-
-  it("types /goal clear a second time, then calls the run stopped", async () => {
-    // A clear that comes back silent means both "it worked" and "there was no
-    // goal left to clear" — claude writes nothing either way. The run ends as
-    // stopped, which is what was asked for; the old ending asserted the
-    // unhappy reading and sent the user to clear a goal that may not be there.
-    const t = makeWatcher(stoppingRec(1_000_000));
-
-    t.advance(C.PENDING_DEADLINE_MS + 1000);
-    await t.tick();
-    expect(t.calls.clears).toBe(1);
-    expect(t.rec.state).toBe("stopping"); // still waiting, on a fresh deadline
-
-    t.advance(C.PENDING_DEADLINE_MS + 1000);
-    await t.tick();
-    expect(t.calls.clears).toBe(1); // MAX_CLEAR_ATTEMPTS reached
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("user-stop");
-    expect(t.notified.join()).toContain("Autopilot stopped");
-    expect(t.notified.join()).not.toContain("still set");
-  });
-});
-
-describe("reconcile", () => {
-  it("leaves a run alone when the transcript cannot answer", async () => {
-    // Runs on every watcher start, which includes every daemon restart. A
-    // `goal_status` row routinely sits outside the 256KB read — one measured
-    // session had 641KB of output after the last one — so finding nothing has
-    // to mean NOT KNOWN. Ending the run on it would hand a working task back
-    // to nobody, once per restart.
-    const t = makeWatcher({ state: "running", goal: "ship it" }); // nothing readable
-
-    t.reconcile();
-
-    expect(t.rec.state).toBe("running");
-    expect(t.notified).toHaveLength(0);
-  });
-
-  it("ends a run the transcript says is over", async () => {
-    const t = makeWatcher({ state: "running", goal: "ship it" }, {
-      onDisk: { met: true },
-    });
-
-    t.reconcile();
-
-    expect(t.rec.state).toBe("stopped");
-    expect(t.notified.join()).toContain("complete");
-  });
-});
-
 describe("stalls", () => {
   it("says nothing until the first window has passed", () => {
     const t = makeWatcher();
@@ -666,6 +253,12 @@ describe("stalls", () => {
 
     expect(t.injected).toEqual([C.NUDGE_TEXT]);
     expect(t.rec.nudgeCount).toBe(1);
+  });
+
+  it("tells the model where the exit is", () => {
+    // A nudge is also the moment a model that has finished but not said so
+    // learns how to say so.
+    expect(C.NUDGE_TEXT).toContain("autopilot done");
   });
 
   it("waits longer before each further nudge", () => {
@@ -743,13 +336,39 @@ describe("stalls", () => {
     t.tick();
 
     expect(t.rec.nudgeCount).toBe(1); // reset to 0, then this nudge
-    expect(t.rec.stuckWarned).toBe(false);
+  });
+
+  it("leaves a run alone while its goal is being evaluated", () => {
+    // The model said it was done and is waiting to hear back. Quiet is the
+    // right state, and a nudge now would send it off working on the thing
+    // being judged.
+    const t = makeWatcher({ state: "running", evaluatingSince: "2026-01-01T00:00:00.000Z" });
+    t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
+    t.tick();
+    expect(t.injected).toHaveLength(0);
+
+    // Verdict in (the manager clears the flag): nudging resumes on its clock.
+    t.setRec({ evaluatingSince: undefined });
+    t.tick();
+    expect(t.injected).toEqual([C.NUDGE_TEXT]);
+  });
+
+  it("does not run the hourly self-check while the goal is being evaluated", () => {
+    // Found in review: the self-check text ends with "call autopilot done",
+    // which during an evaluation sends the model off reworking the thing
+    // being judged. The verdict stamps the check clock when it lands.
+    const t = makeWatcher({ state: "running", evaluatingSince: "2026-01-01T00:00:00.000Z" });
+    t.tick();
+    t.advance(C.DRIFT_CHECK_INTERVAL_MS + 60_000);
+    t.tick();
+    expect(t.injected).toEqual([]);
+    expect(t.rec.driftChecks ?? 0).toBe(0);
   });
 
   it("asks the model to check itself against the goal every hour", () => {
-    // The evaluator only runs when the model tries to stop, so a model that
-    // never stops is never checked. This is the only thing in cork that looks
-    // at direction rather than liveness.
+    // The evaluator only runs when the model says it is done, so a model that
+    // never says so is never checked. This is the only thing in cork that
+    // looks at direction rather than liveness.
     const t = makeWatcher();
     t.tick(); // claims the run, which starts the clock
 
@@ -773,14 +392,15 @@ describe("stalls", () => {
     expect(t.rec.driftChecks).toBe(2);
   });
 
-  it("counts from the evaluator's own verdict, not only from the last check", () => {
-    // A verdict IS a check of the goal. Asking for a second opinion a minute
-    // after the evaluator gave one costs a turn and answers nothing.
+  it("counts from the evaluator's verdict, not only from the last check", () => {
+    // A verdict IS a check of the goal. The manager stamps `lastGoalCheckAt`
+    // when one lands; asking for a second opinion a minute later costs a turn
+    // and answers nothing.
     const t = makeWatcher();
     t.tick();
 
     t.advance(C.DRIFT_CHECK_INTERVAL_MS - 60_000);
-    t.w.ingest(goalRow({ met: false, condition: "the goal", reason: "not yet" }));
+    t.setRec({ lastGoalCheckAt: new Date(1_000_000 + C.DRIFT_CHECK_INTERVAL_MS - 60_000).toISOString() });
 
     t.advance(120_000); // past the hour, but only 2 minutes since the verdict
     t.tick();
@@ -795,8 +415,7 @@ describe("stalls", () => {
     // The clock used to live in the watcher, and a watcher is new on every
     // daemon start. On a machine being worked on those come more often than
     // once an hour, so the check never fired: a real run went four hours and
-    // nine restarts with `driftChecks: 0` — the one thing that would have
-    // noticed its goal was missing, sitting at zero the whole time.
+    // nine restarts with `driftChecks: 0`.
     const first = makeWatcher({
       state: "running",
       lastGoalCheckAt: new Date(1_000_000).toISOString(),
@@ -825,41 +444,16 @@ describe("stalls", () => {
     expect(t.rec.driftChecks).toBe(1);
   });
 
-  it("says nothing about a run that answers every nudge, however many there are", () => {
-    // The case that made the old wording wrong: woken, writes a line, stops
-    // again — over and over. That is a paced task working, not a dead one, and
-    // counting pushes would have reported it as stuck on the third.
-    const t = makeWatcher();
-    for (let i = 0; i < 6; i++) {
-      t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
-      t.tick();
-      t.w.ingest(row({ type: "assistant", message: { content: [] } })); // it answers
-    }
-
-    expect(t.injected.filter((x) => x === C.NUDGE_TEXT).length).toBeGreaterThan(
-      C.STUCK_AFTER_NUDGES
-    );
-    expect(t.notified.filter((x) => x.includes("nudges"))).toHaveLength(0);
-    expect(t.rec.stuckWarned).toBeFalsy(); // never set
-  });
-
-  it("nudges quietly, and speaks up once only when it looks stuck", () => {
-    // Nothing answers any of these nudges — no rows at all between them —
-    // which is the one shape that means the run has probably stopped for good.
-    // Said exactly once.
+  it("nudges quietly, however long the silence", () => {
+    // Nudging is maintenance; the chat hears endings. A "looks stuck" line
+    // used to follow three unanswered nudges and never fired in 1079 of them.
     const t = makeWatcher();
     for (let i = 0; i < 6; i++) {
       t.advance(C.NUDGE_DELAYS_MS[2] + 1000);
       t.tick();
     }
-
-    // Filtered: 96 minutes of stalling also crosses the hourly goal check,
-    // which speaks for itself.
-    const nudges = t.injected.filter((x) => x === C.NUDGE_TEXT);
-    const said = t.notified.filter((x) => x.includes("nudges"));
-    expect(nudges.length).toBeGreaterThan(C.STUCK_AFTER_NUDGES);
-    expect(said).toHaveLength(1);
-    expect(t.rec.stuckWarned).toBe(true);
+    expect(t.injected.filter((x) => x === C.NUDGE_TEXT).length).toBeGreaterThan(3);
+    expect(t.notified).toEqual([]);
   });
 
   it("does not burn a nudge when the session is not reachable yet", () => {
@@ -869,6 +463,40 @@ describe("stalls", () => {
     t.tick();
 
     expect(t.rec.nudgeCount ?? 0).toBe(0); // not counted against the backoff
+  });
+});
+
+describe("cork's own messages", () => {
+  const injection = (sender: string) =>
+    row({
+      type: "user",
+      message: {
+        role: "user",
+        content: `<channel source="cork-channel" chatId="oc_x" senderId="${sender}" messageId="m">hi</channel>`,
+      },
+    });
+
+  it("are not activity, whichever part of cork sent them", () => {
+    // A nudge, the start message and a verdict are all cork talking; counting
+    // any of them as the model being busy would reset the very backoff that
+    // measures whether the model is.
+    const t = makeWatcher();
+    t.advance(C.NUDGE_DELAYS_MS[0] - 10_000);
+    t.w.ingest(injection("cork:evaluator"));
+    t.w.ingest(injection("cork:autopilot"));
+    t.w.ingest(injection("cork:watcher"));
+    t.advance(20_000);
+    t.tick();
+    expect(t.injected).toEqual([C.NUDGE_TEXT]); // the silence counted from before them
+  });
+
+  it("while a person's message is", () => {
+    const t = makeWatcher();
+    t.advance(C.NUDGE_DELAYS_MS[0] - 10_000);
+    t.w.ingest(injection("ou_someone"));
+    t.advance(20_000);
+    t.tick();
+    expect(t.injected).toEqual([]);
   });
 });
 
@@ -974,242 +602,15 @@ describe("mode exclusivity", () => {
     expect(t.injected).toHaveLength(0);
     expect(t.notified).toHaveLength(0);
   });
-});
 
-/**
- * What a daemon restart has to work out: the watcher starts reading at the end
- * of the transcript, so anything that happened while cork was down is invisible
- * to it. The last goal_status row in the tail is the answer — claude writes one
- * for every change and every verdict.
- */
-describe("reading the goal's state out of a transcript tail", () => {
-  const rows = (...rs: Record<string, unknown>[]) =>
-    rs.map((r) => ({ type: "attachment", attachment: { type: "goal_status", ...r } }));
-
-  it("says what the newest goal_status says", () => {
-    expect(lastGoalStatus(rows({ met: false, sentinel: true }))).toBe("set");
-    expect(lastGoalStatus(rows({ met: false }))).toBe("progress");
-    expect(lastGoalStatus(rows({ met: true }))).toBe("met");
-    expect(lastGoalStatus(rows({ met: false, failed: true }))).toBe("failed");
-    expect(lastGoalStatus(rows({ met: true, sentinel: true }))).toBe("cleared");
-  });
-
-  it("takes the LAST one, not the first", () => {
-    // A goal that was set and then met leaves both rows behind.
-    expect(
-      lastGoalStatus(rows({ met: false, sentinel: true }, { met: false }, { met: true }))
-    ).toBe("met");
-  });
-
-  it("says null when no goal was ever set", () => {
-    expect(lastGoalStatus([])).toBeNull();
-    expect(lastGoalStatus([{ type: "assistant" }, { type: "user" }])).toBeNull();
-  });
-});
-
-
-describe("reconciling against rows an earlier run wrote", () => {
-  /**
-   * A session accumulates runs, and every `goal_status` row any of them wrote
-   * stays in the transcript. One real transcript here holds three runs. So
-   * "the newest row in the file" is only about this run when this run has
-   * written one — which is exactly what `starting` means it has not.
-   */
-  it("does not end a starting run on the previous run's verdict", async () => {
-    // The shape that would announce "✅ Autopilot complete." for a task whose
-    // `/goal` never registered: a `met` from the run before, found because
-    // this one has written nothing.
-    const t = makeWatcher(
-      {
-        state: "starting",
-        startedAt: new Date(1_000_000).toISOString(),
-        pendingSince: new Date(1_000_000).toISOString(),
-      },
-      { onDisk: { met: true }, onDiskAt: 900_000 }
-    );
-    t.reconcile();
-    expect(t.rec.state).toBe("starting");
-    expect(t.notified).toEqual([]);
-    // And it ends the way it should have: on its own deadline.
-    t.advance(C.PENDING_DEADLINE_MS + 1);
-    await t.tick();
-    expect(t.rec.stopReason).toBe("start-failed");
-  });
-
-  it("still acts on a row this run wrote", async () => {
-    const t = makeWatcher(
-      { state: "running", startedAt: new Date(1_000_000).toISOString() },
-      { onDisk: { met: true }, onDiskAt: 1_100_000 }
-    );
-    t.reconcile();
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("met");
-  });
-});
-
-describe("putting the goal back after the pane was replaced", () => {
-  /**
-   * Claude keeps a goal in memory and rebuilds it on `-r` from the newest
-   * `goal_status` row in its own conversation — which, after a compaction,
-   * starts at the compact boundary. A goal set before that boundary does not
-   * come back, and nothing anywhere records that it did not: the row is still
-   * in the transcript file, so every source cork used to trust says the goal
-   * is live. Measured on claude code 2.1.268 against a real run that sat for
-   * two and a half hours with no goal and 42 turn endings with no verdict.
-   *
-   * So cork does not try to tell the cases apart. It types the goal back in
-   * after every resume; when the goal was fine, an identical condition
-   * supersedes it and nothing else changes.
-   */
-  const GOAL = "ship the thing";
-
-  it("types the goal back in", async () => {
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    await t.tick();
-    expect(t.calls.rearms).toEqual([GOAL]);
-    expect(t.rec.rearmAttempts).toBe(1);
-  });
-
-  it("types nothing when the screen shows the goal survived", async () => {
-    // Most resumes do not lose the goal — it only goes when a compaction has
-    // moved the row it would be rebuilt from out of reach. Re-setting one
-    // that is already there costs a superseded goal and an extra evaluation.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    t.setArmed(true);
-    await t.tick();
-    expect(t.calls.rearms).toEqual([]);
-    expect(t.rec.needsRearm).toBe(false);
-  });
-
-  it("types it in anyway when the screen cannot say", async () => {
-    // "Cannot say" is not "no goal", but the safe way to be wrong is to send:
-    // measured, a `/goal` into a session that already has it replaces it with
-    // an identical one and interrupts nothing.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    t.setArmed(null);
-    await t.tick();
-    expect(t.calls.rearms).toEqual([GOAL]);
-  });
-
-  it("waits for a dialog rather than typing through it", async () => {
-    // Escape would answer a question that was being asked of the user — a
-    // permission prompt says no, a trust screen says do not trust. The command
-    // waits instead.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    t.setDialogUp(true);
-    await t.tick();
-    expect(t.calls.rearms).toEqual([]);
-    expect(t.rec.rearmAttempts ?? 0).toBe(0);
-  });
-
-  it("does not spend an attempt on a tick it was blocked for", async () => {
-    // A dialog left up for an hour must not use up a budget meant for
-    // commands that actually reached the input box.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    t.setDialogUp(true);
-    for (let i = 0; i < 20; i++) {
-      t.advance(C.TICK_INTERVAL_MS);
-      await t.tick();
-    }
-    expect(t.rec.state).toBe("running");
-    t.setDialogUp(false);
-    await t.tick();
-    expect(t.calls.rearms).toEqual([GOAL]);
-  });
-
-  it("says once that a run is sitting without its goal, and only once", async () => {
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    // The dialog announces itself too; this is only about the re-arm line.
-    const saidIt = () => t.notified.filter((x) => x.includes("re-armed"));
-    t.setDialogUp(true);
-    await t.tick();
-    expect(saidIt()).toEqual([]);
-    // Just short of the threshold is still silence.
-    t.advance(C.REARM_BLOCKED_NOTICE_MS - C.TICK_INTERVAL_MS);
-    await t.tick();
-    expect(saidIt()).toEqual([]);
-    t.advance(C.TICK_INTERVAL_MS);
-    await t.tick();
-    expect(saidIt()).toHaveLength(1);
-    for (let i = 0; i < 30; i++) {
-      t.advance(C.REARM_BLOCKED_NOTICE_MS);
-      await t.tick();
-    }
-    expect(saidIt()).toHaveLength(1);
-  });
-
-  it("is finished by the row the goal writes, and says nothing about it", async () => {
-    // The run never stopped, so there is nothing to announce. A line in the
-    // chat on every daemon restart would be noise about something that worked.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    await t.tick();
-    t.feed(goalRow({ met: false, sentinel: true, condition: GOAL }));
-    expect(t.rec.needsRearm).toBe(false);
-    expect(t.rec.state).toBe("running");
-    expect(t.notified).toEqual([]);
-  });
-
-  it("gives up after two attempts and stops the run", async () => {
-    // The way a long `/goal` fails is that claude folds it into `[Pasted
-    // text]` and stops treating it as a command — deterministic, so a third
-    // identical attempt fails identically.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    await t.tick();
-    t.advance(C.PENDING_DEADLINE_MS);
-    await t.tick();
-    expect(t.calls.rearms).toHaveLength(2);
-    expect(t.rec.state).toBe("running");
-    t.advance(C.PENDING_DEADLINE_MS);
-    await t.tick();
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("rearm-failed");
-    expect(t.notified.join(" ")).toContain("could not re-arm the goal");
-  });
-
-  it("does not nudge a run that has no goal to be nudged toward", async () => {
-    // Nothing is pushing the session from claude's side either, so it goes
-    // quiet within minutes and looks exactly like a stall.
-    const t = makeWatcher({ state: "running", goal: GOAL, needsRearm: true });
-    t.setDialogUp(true);
-    for (let i = 0; i < 40; i++) {
-      t.advance(C.TICK_INTERVAL_MS);
-      await t.tick();
-    }
-    expect(t.injected).toEqual([]);
-    expect(t.rec.nudgeCount ?? 0).toBe(0);
-  });
-
-  it("leaves a starting run to its own path", async () => {
-    // `starting` has its own retry, driven by its deadline rather than by a
-    // pane having been replaced. What must not happen is both at once.
-    const t = makeWatcher({
-      state: "starting",
-      goal: GOAL,
-      needsRearm: true,
-      pendingSince: 1_000_000,
-    });
-    await t.tick();
-    expect(t.calls.rearms).toEqual([]); // deadline not reached yet
-  });
-
-  it("leaves a stopping run alone", async () => {
-    // Its goal is being cleared on purpose. Putting one back is the opposite
-    // of what was asked.
-    const t = makeWatcher({
-      state: "stopping",
-      goal: GOAL,
-      needsRearm: true,
-      pendingSince: new Date(1_000_000).toISOString(),
-    });
-    await t.tick();
-    expect(t.calls.rearms).toEqual([]);
-  });
-
-  it("stops rather than pretend, when cork has no copy of the goal", async () => {
-    const t = makeWatcher({ state: "running", goal: undefined, needsRearm: true });
-    await t.tick();
-    expect(t.calls.rearms).toEqual([]);
-    expect(t.rec.state).toBe("stopped");
-    expect(t.rec.stopReason).toBe("rearm-failed");
+  it("does nothing for a session that is only drafting", () => {
+    // Drafting is a conversation, not a run: nothing to nudge, nothing to
+    // restart, nothing to check against.
+    const t = makeWatcher({ state: "drafting" });
+    t.setAlive(false);
+    t.advance(60 * 60_000);
+    t.tick();
+    expect(t.calls.restarts).toBe(0);
+    expect(t.injected).toHaveLength(0);
   });
 });

@@ -2,7 +2,7 @@ import type { Channel } from "../channels/types.js";
 import { MessageRouter } from "../dispatcher/router.js";
 import type { CorkConfig } from "../config/schema.js";
 import { ensureDirs } from "../config/loader.js";
-import { UdsServer, type ReplyMessage } from "./uds-server.js";
+import { UdsServer, type ReplyMessage, type CommandMessage } from "./uds-server.js";
 import { CommandSpool, type SpoolCommand } from "./command-spool.js";
 import { writeSkills } from "../skills/index.js";
 import { paths } from "../config/paths.js";
@@ -70,6 +70,25 @@ export class CorkDaemon {
     // Handle replies from Claude via UDS → forward to Lark
     this.udsServer.on("reply", (msg: ReplyMessage) => {
       this.handleReply(msg);
+    });
+
+    // Commands the model issues through the channel MCP's `cork` tool. Each is
+    // answered on the same socket, so the tool call returns what cork did.
+    this.udsServer.on("command", (msg: CommandMessage) => {
+      void this.router.sessionManager
+        .runModelCommand(msg.corkSessionKey, msg.command)
+        .catch((err: Error) => {
+          logger.error("model command failed", { err, command: msg.command });
+          return { ok: false, text: `cork failed: ${err.message}` };
+        })
+        .then((res) => {
+          this.udsServer.sendToChannel(msg.corkSessionKey, {
+            type: "command-result",
+            requestId: msg.requestId,
+            ok: res.ok,
+            text: res.text,
+          });
+        });
     });
 
     // Handle session errors (starting timeout, etc.)

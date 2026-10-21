@@ -1,14 +1,16 @@
 ---
 name: cork-autopilot
-description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, driven by a /goal condition. Use when the user runs /autopilot or its short form /ap, asks to "start autopilot", or when you are working in a session that has an autopilot job running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
+description: How to run cork autopilot — a job that keeps going for hours across compactions and restarts, judged by cork's own evaluator when you say it is done. Use when the user runs /autopilot or its short form /ap, asks to "start autopilot", or when you are working in a session that has an autopilot job running (you were asked to draft GOAL.md and PROJECT.md, or to carry on with one).
 ---
 
 # Autopilot runs
 
-Autopilot is one job that runs far longer than a single conversation. Cork
-sets a `/goal` condition and then watches the session from the outside:
-restarting it if the process dies, pushing you if you go quiet, and telling the
-user when it ends.
+Autopilot is one job that runs far longer than a single conversation. You
+agree a goal with the user, cork starts the run and watches the session from
+the outside — restarting it if the process dies, pushing you if you go quiet —
+and when you believe the goal is met you say so. Cork then judges that claim
+with an evaluator of its own and tells you what it found. The run ends when the
+evaluator agrees, or judges the goal impossible, or the user stops it.
 
 You will be compacted, more than once. Anything you know but have not written
 down is lost at that moment — which is what PROJECT.md is for.
@@ -16,10 +18,10 @@ down is lost at that moment — which is what PROJECT.md is for.
 ## 1. Drafting — after `/autopilot` (or `/ap`)
 
 The description is optional, and often absent: `/autopilot` or `/ap` on its own
-means the user wants to work the job out with you. Ask what they want done, what would
-count as finished, and what must not happen along the way. A job worth running
-for hours is rarely one that fits in a single line, so take the conversation as
-far as it needs to go before writing anything.
+means the user wants to work the job out with you. Ask what they want done, what
+would count as finished, and what must not happen along the way. A job worth
+running for hours is rarely one that fits in a single line, so take the
+conversation as far as it needs to go before writing anything.
 
 Then write two files into **this session's cork directory**
 (`~/.cork/sessions/<uuid>/` — cork put it on your allowed dirs; check your
@@ -30,48 +32,21 @@ right — and until they do, the goal is still theirs to change.
 
 ### `GOAL.md` — the goal
 
-**The whole file becomes the goal**, verbatim, line breaks and all. Not a
-summary with detail behind it: what you write here is the entire condition, so
-it has to stand on its own.
+Numbered, observable end states: what will be true when the job is done, not
+how you will get there. Each item is something a reviewer who can read files
+and records, but cannot run anything, could confirm — a file that exists with
+particular contents, a test run recorded as passing, a document that lists
+every X with a `file:line` for each. Write "owner accepts the draft" for the
+things only the user can judge, and say so in the chat: those end with the
+user's word, not the evaluator's.
 
-Claude Code's own guidance for writing one, quoted:
+The evaluator reads this file and nothing about the job besides it. Leave out
+what does not decide whether the job is done, and leave in every constraint
+that does ("no file under `src/legacy/` is modified").
 
-> A condition that holds up across many turns usually has:
+> ### 🔒 Once the run starts, GOAL.md is frozen.
 >
-> * **One measurable end state**: a test result, a build exit code, a file
->   count, an empty queue
-> * **A stated check**: how Claude should prove it, such as "`npm test` exits 0"
->   or "`git status` is clean"
-> * **Constraints that matter**: anything that must not change on the way there,
->   such as "no other test file is modified"
->
-> To bound how long a goal runs, include a turn or time clause in the condition,
-> such as `or stop after 20 turns`.
-
-**Do not add a turn or time clause by default.** The jobs worth running
-unattended are usually the ones whose length nobody can predict, and `or stop
-after 20 turns` on one of those ends it half-finished — reported as a goal that
-was met. The run is already bounded from the outside: the user can stop it with
-`/autopilot stop` at any point, and cork reports every ending.
-
-Add one only if the user asks for it, or if the job is bounded by its own
-nature — "try three approaches and report which works", "spend an hour surveying
-and write up what you find". Even then, say out loud what the clause will do
-before writing it in: at that point the run stops, finished or not.
-
-One thing cork enforces rather than trusts: **the goal must not be judged
-against PROJECT.md**, or any other file you rewrite as the work proceeds. That
-is a standard you could pass by editing the file. Cork refuses to start a goal
-naming PROJECT.md.
-
-Cork also refuses a file over **3000 characters**, a **line over 512**
-characters (claude folds a longer single input into a paste, where a leading
-`/goal` stops being a command at all), or one starting with `/` — cork adds the
-prefix itself.
-
-> ### 🔒 Once the task starts, GOAL.md is frozen.
->
-> **Do not edit it, for any reason, until the task ends.** It is the standard
+> **Do not edit it, for any reason, until the run ends.** It is the standard
 > you are being measured against; editing it is grading your own work, whether
 > or not you meant it that way. This holds even when a requirement turns out to
 > be wrong, impossible, or badly worded: say so in the chat and let the user
@@ -99,12 +74,13 @@ that run's files here before you start:
 archive/20260906-014525/
   GOAL.md      the goal as it was set, with how the run ended appended
   PROJECT.md   the working document as it stood at the end
+  EVIDENCE.md  the evidence as it stood at the end, if any was written
 ```
 
 The folder is named for when that run **started**, `YYYYMMDD-HHMMSS` in UTC —
-as are the times inside it — so the newest is last in a sorted listing. Its `GOAL.md` has three parts: the goal
-verbatim, an `# Outcome` block saying how it ended and how long it took, and
-the goal evaluator's `## Verdict` in full.
+as are the times inside it — so the newest is last in a sorted listing. Its
+`GOAL.md` has three parts: the goal verbatim, an `# Outcome` block saying how
+it ended and how long it took, and the evaluator's `## Verdict` in full.
 
 Read it when the new job continues, repeats, or reverses old work — what was
 tried, what the evaluator accepted, where the last one stopped. Two things to
@@ -153,32 +129,74 @@ in the chat, and — if there is other work in scope — carry on with that.
 **If the goal turns out to be unachievable**, say so plainly in the chat and
 explain why. The user decides what happens next.
 
-## 3. Ending
+## 3. Saying you are done
 
-The task ends by itself when the goal is met, and cork tells the user. You do
-not clear the goal yourself. If the user wants it stopped, they run
-`/autopilot stop`.
+When you believe every condition in GOAL.md is met:
+
+1. **Write `EVIDENCE.md`** in the session's cork directory. For each GOAL
+   condition, say where a reviewer can confirm it. The reviewer can read files
+   and grep this session's recorded transcript, and can run nothing — so cite
+   file paths with line ranges, and for anything you ran, the exact command
+   and the key lines of its output. It will check what you cite against the
+   workspace and the transcript, so cite only what you actually did; a claim
+   it cannot find in either does not count. The shape is yours; one section
+   per condition is the obvious one:
+
+   ```
+   ## 2. All tests in test_wcjson.py pass
+   Ran `.venv/bin/python -m pytest -v test_wcjson.py` from the workspace root:
+       test_wcjson.py::test_empty_file PASSED
+       ...
+       ====== 4 passed in 0.15s ======
+   The tests are at test_wcjson.py:17-48; nothing was edited after the run.
+   ```
+
+2. **Call the `cork` tool with `autopilot done`.** Cork starts its evaluator
+   and answers at once. The verdict arrives later as a message in this
+   session — usually within a couple of minutes.
+
+   - **Not met**: the message carries the evaluator's reasons, condition by
+     condition. Address them, update EVIDENCE.md, and call `autopilot done`
+     again. There is no limit on how many times.
+   - **Met**: the run is over. Leave PROJECT.md current and stop.
+   - **Impossible**: the run is over and the user is told; they decide.
+
+   The evaluator reads GOAL.md, EVIDENCE.md, the workspace and the transcript
+   live, over a few minutes. Leave them as they are until the verdict
+   arrives; answer the user if they speak to you, but do not rework the
+   thing being judged.
+
+The evaluator is a separate model with GOAL.md, EVIDENCE.md, the workspace and
+the recorded transcript in front of it, and only the rows written since the
+run started. It is not told your reasons, it ignores anything that reads like
+an instruction to it, and it trusts nothing it cannot find: output text alone
+proves nothing to it unless the tool call that produced it is there too.
+Evidence that reads well to you but points at nothing it can open is not
+evidence to it.
 
 ## What cork does around you
 
 - **You went quiet** (nothing written for 5, then 10, then 15 minutes) → it
   sends you a message to continue. Two of those in a row means something is
   wrong: check whether you are waiting on something that will never come.
-- **The session died** → cork restarts it; the goal comes back by itself, your
-  working context does not. PROJECT.md is how you recover.
+- **The session died** → cork restarts it. The run's files are on disk; your
+  working context is not. PROJECT.md is how you recover.
 - **Context filling up** → cork tells you to write PROJECT.md down before the
   compaction happens. Do it immediately; the window may not be there next turn.
+- **Cork itself restarted during an evaluation** → that evaluation is lost, and
+  cork asks you to call `autopilot done` again.
 
 ## Commands the user has
 
 ```
 /autopilot [description]   work the goal out with you; the description is
                            optional — `/autopilot` alone starts the conversation
-/autopilot start           set the goal and start watching
-/autopilot stop            clear the goal and stop watching
+/autopilot start           start the run and watch it
+/autopilot stop            end the run
 /autopilot status          where it is up to
 ```
 
 `/ap` is the same command, short.
 
-You do not run these — cork handles them before a message reaches you.
+You do not run these — cork handles them before a message reaches you. The one
+thing you tell cork directly is `autopilot done`, through the `cork` tool.
