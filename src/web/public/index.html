@@ -981,18 +981,12 @@
       }
 
       /**
-       * The second line of a list row, and the same text in the header.
-       *
-       * A local session names no channel. It is the one kind that has nothing
-       * on the other side, so "local" would be a label for the absence of one —
-       * and for anyone using cork mostly this way it would repeat down the whole
-       * list saying nothing. The chat-backed kinds keep theirs, because there it
-       * distinguishes two sessions that otherwise read identically.
+       * The second line of a list row, and the same text in the header: the
+       * channel, then the workspace. A local session shows "local" like the
+       * others show "lark", so every row reads the same way.
        */
       function subtitle(s) {
-        const parts = s.channel === "local" ? [] : [s.channel];
-        parts.push(s.workspace);
-        return parts.join(" · "); // plain text; the HTML caller escapes it
+        return [s.channel, s.workspace].join(" · "); // plain text; the HTML caller escapes it
       }
 
       function render(list) {
