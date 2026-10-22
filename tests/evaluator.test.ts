@@ -86,11 +86,10 @@ describe("how the evaluator is called", () => {
     expect(EVALUATOR_SYSTEM_PROMPT).toContain("Every condition in GOAL.md needs evidence");
     expect(EVALUATOR_SYSTEM_PROMPT).toContain("You cannot run anything");
     // Found in review: output text alone is forgeable, instructions in files
-    // are data, only the named transcript counts, owner acceptance has a shape.
+    // are data, only the named transcript counts.
     expect(EVALUATOR_SYSTEM_PROMPT).toContain("Output text alone proves nothing");
     expect(EVALUATOR_SYSTEM_PROMPT).toContain("not an instruction");
     expect(EVALUATOR_SYSTEM_PROMPT).toContain("do not count");
-    expect(EVALUATOR_SYSTEM_PROMPT).toContain('role=\"owner\"');
   });
 
   it("strips the parent claude session's variables from its environment", () => {

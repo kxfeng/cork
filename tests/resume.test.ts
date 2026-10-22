@@ -7,8 +7,8 @@ import path from "node:path";
  * resolveResume decides `claude -r` vs a fresh start. The load-bearing case: a
  * session whose Claude transcript was auto-cleaned (idle past cleanupPeriodDays)
  * must NOT resume into a gone id — that hangs the pane until it times out on
- * every message. It must instead notify the user, mint a new id, and start
- * clean. Tested here without spawning tmux.
+ * every message. It must instead notify the user and start clean under the same
+ * id. Tested here without spawning tmux.
  */
 const WS = "/tmp/cork-resume-test-ws";
 
@@ -80,7 +80,7 @@ describe("resolveResume", () => {
     expect(m.claudeSessionStarted).toBe(true);
   });
 
-  it("downgrades to a fresh session, notifies, and mints a new id when the transcript is gone", async () => {
+  it("starts fresh under the same id, and notifies, when the transcript is gone", async () => {
     manager = await makeManager();
     stubTranscript(false);
 
@@ -88,19 +88,24 @@ describe("resolveResume", () => {
     manager.on("error", (_key: string, msg: string) => errors.push(msg));
 
     const m = meta();
-    const resume = manager.resolveResume("k", m);
-
-    expect(resume).toBe(false);
-    expect(m.sessionId).not.toBe("old-session-id"); // new id minted
-    expect(m.claudeSessionStarted).toBe(false);
+    expect(manager.resolveResume("k", m)).toBe(false);
+    // `--session-id` takes an id with no transcript; a new id would only make
+    // every restart of a never-written-to session mint another one.
+    expect(m.sessionId).toBe("old-session-id");
     expect(errors).toHaveLength(1);
     expect(errors[0]).toContain("was cleaned up");
+  });
 
-    // and it persisted the new meta
-    const saved = JSON.parse(
-      fs.readFileSync(path.join(dir, "sessions", "k", "session.json"), "utf-8")
-    );
-    expect(saved.sessionId).toBe(m.sessionId);
-    expect(saved.claudeSessionStarted).toBe(false);
+  it("says nothing for a local session: no chat to tell, and the file is usually just not written yet", async () => {
+    manager = await makeManager();
+    stubTranscript(false);
+
+    const errors: string[] = [];
+    manager.on("error", (_key: string, msg: string) => errors.push(msg));
+
+    const m = meta({ channel: "local" });
+    expect(manager.resolveResume("k", m)).toBe(false);
+    expect(m.sessionId).toBe("old-session-id");
+    expect(errors).toEqual([]);
   });
 });

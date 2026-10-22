@@ -2786,13 +2786,18 @@ export class SessionManager extends EventEmitter {
   // --- Private ---
 
   /**
-   * Decide whether to `claude -r` (resume) or start fresh, and mutate `meta`
-   * accordingly. Claude Code deletes transcripts idle past cleanupPeriodDays
-   * (default 30), so a session cork last touched weeks ago may have had its
-   * transcript reaped. `claude -r <gone-id>` then hangs instead of erroring, and
-   * the session times out on every message with no way to recover itself. When
-   * the transcript is missing, tell the user it was auto-cleaned, mint a fresh
-   * id, persist it, and start clean instead of resuming into nothing.
+   * Decide whether to `claude -r` (resume) or start fresh. Claude Code deletes
+   * transcripts idle past cleanupPeriodDays (default 30), so a session cork
+   * last touched weeks ago may have had its transcript reaped. `claude -r
+   * <gone-id>` then hangs instead of erroring, and the session times out on
+   * every message with no way to recover itself. When the transcript is
+   * missing, start fresh under the same id instead: `--session-id` accepts an
+   * id whose transcript does not exist (measured), and it is only an existing
+   * transcript that makes it "already in use". A chat session is told its
+   * context is gone. A local session is not — it has no chat to tell, and the
+   * common reason its transcript is missing is that nobody has written to it
+   * yet (Claude Code creates the file on the first message, while cork marks
+   * a local session started as soon as its pane runs).
    *
    * Returns true to resume, false to start a new session. Exists as its own
    * method so the decision can be unit-tested without spawning tmux.
@@ -2801,18 +2806,17 @@ export class SessionManager extends EventEmitter {
     if (!meta.claudeSessionStarted) return false;
     if (fs.existsSync(transcriptPath(meta.workspace, meta.sessionId))) return true;
 
-    logger.warn("resume transcript missing — starting a fresh session", {
+    logger.warn("resume transcript missing — starting fresh under the same id", {
       key,
       sessionId: meta.sessionId,
     });
-    this.emit(
-      "error",
-      key,
-      "The Claude Code session was cleaned up (idle over 30 days by default) — continuing in a new one."
-    );
-    meta.sessionId = uuidv4();
-    meta.claudeSessionStarted = false;
-    saveSession(key, meta);
+    if (!isLocal(meta)) {
+      this.emit(
+        "error",
+        key,
+        "The Claude Code session was cleaned up (idle over 30 days by default) — continuing in a new one."
+      );
+    }
     return false;
   }
 
