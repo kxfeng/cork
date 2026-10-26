@@ -122,12 +122,21 @@ export interface Dialog {
   answerable: boolean;
 }
 
-/** A line drawn edge to edge out of one character: the top of a frame. */
+/**
+ * A line drawn edge to edge out of one character: the top of a frame.
+ *
+ * An overlay's rule may give up its right part to a notice. Measured on claude
+ * 2.1.310: for about ten seconds after the model picker closes, a picker opened
+ * again draws `▔▔▔… ◐ medium · /effort ▔`. So an overlay rule counts when it
+ * starts and ends with the rule character and its first half is all rule.
+ */
 function isRule(line: string, width: number): boolean {
   const s = line.trim();
   if (s.length !== width || s.length === 0) return false;
   if (s[0] !== INPUT_RULE && s[0] !== OVERLAY_RULE) return false;
-  return new Set(s).size === 1;
+  if (new Set(s).size === 1) return true;
+  if (s[0] !== OVERLAY_RULE || s[s.length - 1] !== OVERLAY_RULE) return false;
+  return new Set(s.slice(0, Math.ceil(width / 2))).size === 1;
 }
 
 /**
@@ -160,7 +169,15 @@ export function readDialog(pane: string, width: number): Dialog | null {
   // every check. The box is recognised from above: the prompt sits at the
   // edge, and a draft's later lines are indented under it, with nothing blank
   // in between. A dialog's own rule has the conversation above it instead.
-  if (!clipped && isInputFoot(lines, last)) return null;
+  //
+  // Only the thin rule can be the box's foot. An overlay's `▔` rule is drawn
+  // straight under the last conversation row, with no blank line, and when
+  // that row is a slash command's echo (`❯ /artifacts`, `⎿ Artifacts panel
+  // closed` under it) the walk up took it for a draft — measured on a real
+  // session: the model picker went unread every time.
+  if (!clipped && lines[last].trim()[0] === INPUT_RULE && isInputFoot(lines, last)) {
+    return null;
+  }
   if (clipped && !isDialogBottom(region, rows)) return null;
 
   const taken = new Set(options.map((o) => o.text));

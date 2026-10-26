@@ -30,7 +30,11 @@ export interface PickerRow {
   label: string;
   /** The right column, in full. */
   description: string;
-  /** The concrete model, i.e. the description up to its first "·". */
+  /**
+   * The concrete model, i.e. the description up to its first "·"; empty when
+   * the description has no "·". Claude 2.1.310 puts the model in the label
+   * and only a description on the right (`Opus 5.5 ✔   For complex work…`).
+   */
   modelName: string;
   /** Whether claude marked this row as the one in use (a "✔"). */
   current: boolean;
@@ -48,7 +52,7 @@ export interface PickerView {
  * while cork was typing. Both halves are required: "Esc to cancel" alone
  * appears under every dialog claude draws.
  */
-const PICKER_FOOTER = /Enter to set as default.*s to use this session only/;
+export const PICKER_FOOTER = /Enter to set as default.*s to use this session only/;
 
 /**
  * The picker as it stands on screen, or null when the pane is not showing one.
@@ -73,7 +77,7 @@ export function parseModelPicker(pane: string, width: number): PickerView | null
       n: m ? Number(m[1]) : i + 1,
       label: labelRaw.replace("✔", "").trim(),
       description,
-      modelName: description.split("·")[0].trim(),
+      modelName: description.includes("·") ? description.split("·")[0].trim() : "",
       current: labelRaw.includes("✔"),
     };
   });

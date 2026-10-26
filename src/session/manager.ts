@@ -28,6 +28,7 @@ import {
 import { readDialog, type Dialog } from "./dialog.js";
 import {
   parseModelPicker,
+  PICKER_FOOTER,
   chooseModelRow,
   switchConfirmYes,
   lastModelNotice,
@@ -1638,6 +1639,18 @@ export class SessionManager extends EventEmitter {
       const view = parseModelPicker(capturePaneSafe(tmuxName), width);
       if (view) return { ok: true, view };
       if (Date.now() >= drawDeadline) {
+        // If it is on screen after all, unread, close it: left open, the Enter
+        // of the next slash command lands on it and means "set as default",
+        // which moves every new claude on the machine. Matched on the picker's
+        // own footer only, so Escape never reaches a prompt where, in vim
+        // NORMAL mode, it would interrupt the model.
+        if (PICKER_FOOTER.test(capturePaneSafe(tmuxName))) {
+          try {
+            execSync(corkTmux(`send-keys -t "${tmuxName}" Escape`), { stdio: "pipe" });
+          } catch {
+            // The pane is gone; nothing is left open then.
+          }
+        }
         return { ok: false, reason: "the model picker did not open" };
       }
       await new Promise((r) => setTimeout(r, pollMs));

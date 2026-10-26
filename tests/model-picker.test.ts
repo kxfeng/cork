@@ -261,3 +261,92 @@ describe("the confirmation and what claude says it did", () => {
     expect(lastModelNotice(IDLE)).toBeNull();
   });
 });
+
+describe("parseModelPicker drawn under a slash command's echo", () => {
+  // Captured off a real cork session on claude 2.1.310, 156 wide: the rule
+  // follows the previous command's echo with no blank line between.
+  const UNDER_ECHO = `
+❯ /artifacts
+  ⎿  Artifacts panel closed
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+     1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+   ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+     3.  Fable 5.1              For your toughest challenges
+     4.  Sonnet 5.5             Most efficient for simpler tasks
+     5.  Haiku 5.5              Fastest for quick answers
+     6.  Haiku 4.5              Fastest for quick answers
+     7.  Sonnet 5               Efficient for routine tasks
+     8.  Opus 5                 Best for everyday, complex tasks
+     9.  Fable 5                Most capable for your hardest and longest-running tasks
+   ↓ 10. Opus 4.8               Best for everyday, complex tasks
+      … +3 models
+
+   ◐ Medium effort (default) ←/→ to adjust
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to set as default · s to use this session only · Esc to cancel
+`;
+
+  it("is not taken for the input box", () => {
+    const view = parseModelPicker(UNDER_ECHO, 156);
+    expect(view).not.toBeNull();
+    expect(view!.cursor).toBe(1);
+    expect(view!.rows[1].label).toBe("Opus 5.5");
+  });
+
+  it("takes no model name from a description without a ·", () => {
+    // The label is the model here; the right column is prose. Read as a name,
+    // "Already on" said "For complex work and everyday tasks".
+    const rows = parseModelPicker(UNDER_ECHO, 156)!.rows;
+    expect(rows[0].modelName).toBe("Opus 5.5");
+    expect(rows[1].modelName).toBe("");
+    expect(formatPickerRows(rows.slice(0, 3))).toBe(
+      [
+        "  1  Default (recommended)  Opus 5.5",
+        "✔ 2  Opus 5.5",
+        "  3  Fable 5.1",
+      ].join("\n")
+    );
+  });
+});
+
+describe("parseModelPicker with a notice on its rule", () => {
+  // Captured off claude 2.1.310, 156 wide: a picker opened within ten seconds
+  // of the last one closing carries "◐ medium · /effort" on its rule.
+  const NOTICE_ON_RULE = `
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◐ medium · /effort ▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, specify with --model.
+
+     1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+   ❯ 2.  Opus 5.5 ✔             For complex work and everyday tasks
+     3.  Fable 5.1              For your toughest challenges
+     4.  Sonnet 5.5             Most efficient for simpler tasks
+     5.  Haiku 5.5              Fastest for quick answers
+     6.  Haiku 4.5              Fastest for quick answers
+     7.  Sonnet 5               Efficient for routine tasks
+     8.  Opus 5                 Best for everyday, complex tasks
+     9.  Fable 5                Most capable for your hardest and longest-running tasks
+   ↓ 10. Opus 4.8               Best for everyday, complex tasks
+      … +3 models
+
+   ◐ Medium effort (default) ←/→ to adjust
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to set as default · s to use this session only · Esc to cancel
+`;
+
+  it("still reads the picker", () => {
+    const view = parseModelPicker(NOTICE_ON_RULE, 156);
+    expect(view).not.toBeNull();
+    expect(view!.cursor).toBe(1);
+    expect(view!.rows[1].label).toBe("Opus 5.5");
+  });
+});
