@@ -12,6 +12,9 @@ import { getLogger } from "../logger.js";
 
 const logger = getLogger("daemon");
 
+/** How long warming a new chat's session waits on its name. */
+const CHAT_NAME_TIMEOUT_MS = 3000;
+
 export class CorkDaemon {
   private router: MessageRouter;
   private channels: Channel[] = [];
@@ -229,37 +232,41 @@ export class CorkDaemon {
       logger.warn("create_session missing channel/chatId", { args });
       return;
     }
-    this.router.sessionManager.prepareSession({
-      channel,
-      chatId,
-      threadId: typeof args.threadId === "string" ? args.threadId : undefined,
-      workspace: typeof args.workspace === "string" ? args.workspace : undefined,
-      mentionRequired:
-        typeof args.mentionRequired === "boolean"
-          ? args.mentionRequired
-          : undefined,
+    // The name is looked up before warming, not after: claude takes it as
+    // `--name` at launch only. A lookup costs far less than claude's startup,
+    // and one that fails or hangs warms the session unnamed.
+    this.fetchChatName(channel, chatId).then((chatName) => {
+      this.router.sessionManager.prepareSession({
+        channel,
+        chatId,
+        threadId: typeof args.threadId === "string" ? args.threadId : undefined,
+        workspace: typeof args.workspace === "string" ? args.workspace : undefined,
+        mentionRequired:
+          typeof args.mentionRequired === "boolean"
+            ? args.mentionRequired
+            : undefined,
+        chatName,
+      });
+      logger.info("prepared session", { channel, chatId, chatName });
     });
-    logger.info("prepared session", { channel, chatId });
-    // The warm-up above has only the chat id to name the session with, so
-    // `cork status` and the web view would show a raw `oc_…` until someone
-    // spoke. Look the title up after warming rather than before, so the pane
-    // still starts without waiting on an API round trip.
-    this.backfillChatName(channel, chatId);
   }
 
-  private backfillChatName(channel: string, chatId: string): void {
+  private async fetchChatName(channel: string, chatId: string): Promise<string | undefined> {
     const adapter = this.channels.find((c) => c.name === channel);
-    if (!adapter?.fetchChatName) return;
-    adapter
-      .fetchChatName(chatId)
-      .then((name) => {
-        if (!name) return;
-        this.router.sessionManager.setChatName(channel, chatId, name);
-        logger.info("named prepared session", { channel, chatId, name });
-      })
-      .catch((err) =>
-        logger.warn("could not fetch chat name", { channel, chatId, err })
-      );
+    if (!adapter?.fetchChatName) return undefined;
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve(""), CHAT_NAME_TIMEOUT_MS);
+    });
+    try {
+      const name = await Promise.race([adapter.fetchChatName(chatId), timeout]);
+      return name || undefined;
+    } catch (err) {
+      logger.warn("could not fetch chat name", { channel, chatId, err });
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**

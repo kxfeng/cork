@@ -69,6 +69,12 @@ export interface SessionMeta {
    * what the 7-day limit counts from.
    */
   keepAlive?: boolean;
+  /**
+   * A local session only: its name was typed by someone, at creation or in a
+   * rename, rather than taken from the workspace's directory. Only such a name
+   * is given to claude as `--name`.
+   */
+  named?: boolean;
 }
 
 /**

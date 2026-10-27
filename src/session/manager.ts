@@ -455,6 +455,18 @@ export function claudeSessionStatus(sessionId: string): string | null {
 }
 
 /** A file's last write in ms, or 0 when it does not exist. */
+/**
+ * The title to give claude, or undefined when the session has no real name:
+ * a chat whose name lookup failed is still titled by its id, and a local
+ * session nobody named is titled by its directory.
+ */
+export function claudeName(meta: SessionMeta): string | undefined {
+  const name = meta.chatName?.trim();
+  if (!name) return undefined;
+  if (isLocal(meta)) return meta.named ? name : undefined;
+  return name === meta.chatId ? undefined : name;
+}
+
 /** A value safe inside single quotes on a shell command line. */
 function shellQuoted(v: string): string {
   return `'${v.replace(/'/g, "'\\''")}'`;
@@ -2602,6 +2614,7 @@ export class SessionManager extends EventEmitter {
       claudeSessionStarted: false,
       mentionRequired: false,
       keepAlive: true,
+      ...(opts.name?.trim() ? { named: true } : {}),
     };
     saveSession(key, meta);
     this.rememberId(key, meta);
@@ -2648,6 +2661,7 @@ export class SessionManager extends EventEmitter {
     if (!meta || !isLocal(meta)) return false;
 
     meta.chatName = clean;
+    meta.named = true;
     saveSession(key, meta);
     logger.info("renamed session", { key, name: clean });
     return true;
@@ -2728,6 +2742,7 @@ export class SessionManager extends EventEmitter {
     threadId?: string;
     workspace?: string;
     mentionRequired?: boolean;
+    chatName?: string;
   }): void {
     const { channel, chatId, threadId } = opts;
     const key = this.keyForOrNew(channel, chatId, threadId);
@@ -2761,6 +2776,8 @@ export class SessionManager extends EventEmitter {
       };
       this.sessions.set(key, session);
     }
+
+    if (opts.chatName) session.meta.chatName = opts.chatName;
 
     // Reconcile the mention flag whether the session is new or pre-existing —
     // the new-chat flow wants the group to answer without an @mention.
@@ -2844,6 +2861,12 @@ export class SessionManager extends EventEmitter {
     const claudeArgs = resume
       ? ["-r", meta.sessionId]
       : ["--session-id", meta.sessionId];
+
+    // Named once, when the claude session is new: it is the title Remote
+    // Control shows. A resume leaves it alone, so a rename made in the app
+    // is not put back on every restart.
+    const name = claudeName(meta);
+    if (!resume && name) claudeArgs.push("--name", shellQuoted(name));
 
     // `permissionMode` governs how a prompt reaches a chat, which a local
     // session has none of; its prompts surface in the pane instead. They are
