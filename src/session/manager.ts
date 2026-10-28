@@ -454,7 +454,6 @@ export function claudeSessionStatus(sessionId: string): string | null {
   return null;
 }
 
-/** A file's last write in ms, or 0 when it does not exist. */
 /**
  * The title to give claude, or undefined when the session has no real name:
  * a chat whose name lookup failed is still titled by its id, and a local

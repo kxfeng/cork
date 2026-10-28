@@ -714,7 +714,7 @@ judge it:
 
 - the mid-stream retry is **off** — the stall check subsumes it, and both
   would inject a "keep going" message
-- nothing written for 5 / 10 / 15 minutes → the model is nudged, quietly,
+- nothing written for 5 / 10 / 15 / 30 minutes → the model is nudged, quietly,
   and only quietly: a "looks stuck" line used to follow three nudges that
   produced no rows at all, and across 1079 nudges on one machine it never
   fired, so it went. The backoff runs on two clocks and nothing else: how long the transcript has

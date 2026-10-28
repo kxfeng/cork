@@ -36,9 +36,7 @@ Numbered, observable end states: what will be true when the job is done, not
 how you will get there. Each item is something a reviewer who can read files
 and records, but cannot run anything, could confirm — a file that exists with
 particular contents, a test run recorded as passing, a document that lists
-every X with a `file:line` for each. Write "owner accepts the draft" for the
-things only the user can judge, and say so in the chat: those end with the
-user's word, not the evaluator's.
+every X with a `file:line` for each.
 
 The evaluator reads this file and nothing about the job besides it. Leave out
 what does not decide whether the job is done, and leave in every constraint
@@ -176,9 +174,8 @@ evidence to it.
 
 ## What cork does around you
 
-- **You went quiet** (nothing written for 5, then 10, then 15 minutes) → it
-  sends you a message to continue. Two of those in a row means something is
-  wrong: check whether you are waiting on something that will never come.
+- **You went quiet** (nothing written for a while, the gap growing each
+  time) → it sends you a message to continue.
 - **The session died** → cork restarts it. The run's files are on disk; your
   working context is not. PROJECT.md is how you recover.
 - **Context filling up** → cork tells you to write PROJECT.md down before the

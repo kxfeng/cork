@@ -116,7 +116,7 @@ export const WATCHER_CONSTANTS = {
  *
  * 10s costs a `tmux ls` and a small read every ten seconds per running task,
  * measured at 2.0ms and 1.1ms: six of each per minute, about 0.02% of one
- * core. The waits it measures are 60s, 5/10/15min and an hour, so nothing
+ * core. The waits it measures are 60s, 5/10/15/30min and an hour, so nothing
  * here wants to be tighter than this either.
  */
 const TICK_INTERVAL_MS = 10_000;
@@ -159,26 +159,42 @@ const DIALOG_GRACE_MS = 2 * DIALOG_POLL_MS;
  * How long the transcript may go without a new row before cork pushes the model
  * to continue, per consecutive nudge. Growing, because a model that ignored one
  * nudge is not usually helped by a faster second one — and each nudge costs a
- * turn. Any new row resets this to the first entry.
+ * turn. A new row restarts the silence clock but not the count; only
+ * NUDGE_BACKOFF_RESET_MS below takes the count back to the first entry.
+ *
+ * The last entry is what a run waiting on something that will not come pays
+ * for as long as it waits: one stood idle for sixteen hours at the 15-minute
+ * cap, a turn every quarter hour on a 350k context. Thirty halves that and
+ * leaves the first three nudges, the ones that wake a run that really
+ * stalled, as they were.
+ *
+ * Keep it under an hour. Claude Code writes the main session's prompt cache
+ * with a one-hour TTL (measured: every main-session write lands in
+ * `ephemeral_1h`), so a turn every thirty minutes still reads the context
+ * from cache; a gap past the hour rewrites all of it, which on a 350k
+ * context costs more than thirty cached nudges.
  */
-const NUDGE_DELAYS_MS = [5, 10, 15].map((m) => m * 60_000);
+const NUDGE_DELAYS_MS = [5, 10, 15, 30].map((m) => m * 60_000);
 
 /**
  * How long a run must go without needing a nudge before the backoff starts
  * over at five minutes.
  *
  * Without it the count only ever climbs: a task that stalled three times in
- * its first hour would still be on the fifteen-minute delay six healthy hours
+ * its first hour would still be on the thirty-minute delay six healthy hours
  * later, when it finally stalls for real. With it, a spell of stalling and the
  * one that follows an hour of good work are treated as what they are — two
  * different events.
  *
  * Distinct from BACKOFF_RESET_WINDOW_MS above, which does the same job for the
  * mid-stream retry on a different scale (5 minutes against an error that
- * repeats in seconds, half an hour against a stall measured in tens of
+ * repeats in seconds, an hour against a stall measured in tens of
  * minutes).
+ *
+ * Longer than the last nudge delay, or the reset would fire in the minute
+ * before that nudge is due and the backoff would never reach it.
  */
-const NUDGE_BACKOFF_RESET_MS = 30 * 60_000;
+const NUDGE_BACKOFF_RESET_MS = 60 * 60_000;
 
 /**
  * Same idea for bringing a dead pane back: a session that crashes on startup
@@ -1137,7 +1153,7 @@ export class TranscriptWatcher {
     const wait = NUDGE_DELAYS_MS[Math.min(nudges, NUDGE_DELAYS_MS.length - 1)];
     // Both, not either: the silence has to be long enough AND the last push has
     // to be far enough back. The second is what makes the intervals read as
-    // 5 / 10 / 15 from the outside instead of "five minutes after it last
+    // 5 / 10 / 15 / 30 from the outside instead of "five minutes after it last
     // twitched".
     if (quiet < wait || sinceNudge < wait) return;
 

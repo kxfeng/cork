@@ -303,33 +303,37 @@ describe("stalls", () => {
     expect(t.rec.nudgeCount).toBe(2);
   });
 
-  it("holds the intervals at 5 / 10 / 15 through a run of stalls", () => {
+  it("holds the intervals at 5 / 10 / 15 / 30 through a run of stalls", () => {
     // What the intervals look like from the chat, which is where the old
     // behaviour was noticed: four "nudge 1" messages six minutes apart.
     const t = makeWatcher();
     const at: number[] = [];
     let clock = 0;
 
-    // Step half a minute at a time, the way the real tick does, for an hour.
-    for (let i = 0; i < 120; i++) {
+    // Step half a minute at a time, the way the real tick does, for three
+    // hours: long enough to show the last delay holds and the backoff reset
+    // does not cut in ahead of it.
+    for (let i = 0; i < 360; i++) {
       t.advance(30_000);
       clock += 30_000;
       const before = t.injected.length;
       t.tick();
-      if (t.injected.length > before) at.push(clock);
+      // The hourly goal check lands in the same pane; only nudges count here.
+      if (t.injected.slice(before).includes(C.NUDGE_TEXT)) at.push(clock);
     }
 
     const gaps = at.map((v, i) => (i === 0 ? v : v - at[i - 1]));
     expect(gaps[0]).toBe(C.NUDGE_DELAYS_MS[0]);
     expect(gaps[1]).toBe(C.NUDGE_DELAYS_MS[1]);
     expect(gaps[2]).toBe(C.NUDGE_DELAYS_MS[2]);
-    expect(gaps[3]).toBe(C.NUDGE_DELAYS_MS[2]); // and stays there
+    expect(gaps[3]).toBe(C.NUDGE_DELAYS_MS[3]);
+    expect(gaps.slice(4).every((g) => g === C.NUDGE_DELAYS_MS[3])).toBe(true); // and stays there
   });
 
   it("starts over after a long spell of needing no nudge at all", () => {
     // Two stalls an hour apart are two events, not one that got worse. Without
     // this, a task that stalled three times early would still be on the
-    // fifteen-minute delay when it finally stalls for real hours later.
+    // thirty-minute delay when it finally stalls for real hours later.
     const t = makeWatcher({ state: "running", nudgeCount: 3 });
 
     t.advance(C.NUDGE_BACKOFF_RESET_MS + 60_000);
