@@ -275,12 +275,13 @@ export async function uploadFile(
   return { fileKey: res.file_key, fileName };
 }
 
+/** `chatId` is a person's open id instead when `opts.toUser` is set. */
 export async function sendMessage(
   client: lark.Client,
   chatId: string,
   msgType: "post" | "interactive" | "file",
   content: string,
-  opts?: { replyToMessageId?: string; replyInThread?: boolean }
+  opts?: { replyToMessageId?: string; replyInThread?: boolean; toUser?: boolean }
 ): Promise<string> {
   // When replyToMessageId is set, reply to that message (im.message.reply) so
   // the reply lands in its thread; otherwise create a fresh chat message. Both
@@ -296,7 +297,7 @@ export async function sendMessage(
           },
         })
       : client.im.message.create({
-          params: { receive_id_type: "chat_id" },
+          params: { receive_id_type: opts?.toUser ? "open_id" : "chat_id" },
           data: { receive_id: chatId, msg_type: msgType, content: body },
         });
 
@@ -342,6 +343,47 @@ export async function getChatName(
     logger.debug("failed to get chat name", { err, chatId });
   }
   return "";
+}
+
+// Lark's code for an app missing the scope an API needs.
+const MISSING_SCOPE_CODE = 99991672;
+
+/**
+ * Whether any of `ids` is a member of the chat, and how many members it has.
+ * "denied" when the app lacks the scope to list members, undefined when the
+ * lookup failed otherwise. Members are people only, never bots.
+ */
+export async function chatMembership(
+  client: lark.Client,
+  chatId: string,
+  ids: string[]
+): Promise<{ hasAny: boolean; members: number } | "denied" | undefined> {
+  let pageToken: string | undefined;
+  let members = 0;
+  const failed = (code: unknown, detail: unknown) => {
+    logger.warn("failed to list chat members", { chatId, code, detail });
+    return code === MISSING_SCOPE_CODE ? ("denied" as const) : undefined;
+  };
+  try {
+    do {
+      const res = await client.im.chatMembers.get({
+        path: { chat_id: chatId },
+        params: { member_id_type: "open_id", page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) },
+      });
+      if (res.code !== 0) return failed(res.code, res.msg);
+      members = res.data?.member_total ?? members;
+      if (res.data?.items?.some((m) => m.member_id && ids.includes(m.member_id))) {
+        return { hasAny: true, members };
+      }
+      pageToken = res.data?.has_more ? res.data.page_token : undefined;
+    } while (pageToken);
+  } catch (err) {
+    // The SDK throws on an HTTP error, and Lark's own code and message — which
+    // name a missing scope — are only in the response body.
+    const data = (err as { response?: { data?: { code?: unknown; msg?: unknown } } })?.response?.data;
+    return failed(data?.code, data?.msg ?? String(err));
+  }
+  return { hasAny: false, members };
 }
 
 export async function getUserName(

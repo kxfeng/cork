@@ -200,7 +200,8 @@ Don't set `ANTHROPIC_MODEL` here. Claude Code fixes a session's model when the s
 - `idleStopHours` — stop a chat session's pane nothing has happened in for this long; `0` means never. The next message resumes it. Local sessions (started from cork web, no chat) get a fixed 7 days instead: nothing brings one back once stopped, and one driven over Remote Control would vanish from claude.ai. A local session left running is brought back whenever the daemon starts — after `cork restart`, a crash or a reboot — unless it has had no exchange in 7 days.
 - `domain` — `feishu` or `lark`.
 - `owners` — may talk to the bot and run its commands. Edited here only.
-- `allows` — may talk to it in every chat, but not command it. Edited here only; `/allow` in a chat covers just that chat.
+- `allows` — may talk to it in every chat, but not command it. Edited here only; `/allow` in a chat covers just that chat. `"*"` lets in anyone.
+- `allowsRequireOwnerInGroup` — on unless set to `false`: anyone let in by `allows` or `/allow` is served only in a group that has an owner in it, never in a DM. `"*"` also needs the group to have fewer than `allowsAnyoneMaxMembers` (default 100) people. Checked from the group's member list, refreshed every 15 minutes; it needs the app's `im:chat.members:read` scope, and without it the check does nothing and the first owner gets a DM saying so.
 
 An older install kept this as `config.jsonc`. cork moves it to `config.json` the first time it loads the config — comments and trailing commas in it are fine — and keeps the old file as `config.jsonc.bak`.
 

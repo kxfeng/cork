@@ -17,6 +17,7 @@ import {
   addReaction as larkAddReaction,
   removeReaction as larkRemoveReaction,
   getChatName as larkGetChatName,
+  chatMembership as larkChatMembership,
   fetchSubMessages as larkFetchSubMessages,
   fetchMessage as larkFetchMessage,
   fetchThreadMessages as larkFetchThreadMessages,
@@ -48,6 +49,8 @@ const WATCHDOG_INTERVAL_MS = 30_000;
 const SLEEP_SKEW_THRESHOLD_MS = 60_000;
 const RESTART_THROTTLE_MS = 60_000;
 const DNS_PROBE_TIMEOUT_MS = 3_000;
+// How often the owner may be told this app cannot list chat members.
+const SCOPE_NOTICE_INTERVAL_MS = 60 * 60 * 1000;
 
 export class LarkChannel implements Channel {
   readonly name = "lark";
@@ -451,6 +454,33 @@ export class LarkChannel implements Channel {
     return larkGetChatName(this.client, chatId, senderId);
   }
 
+  async chatOwners(chatId: string): Promise<{ hasAny: boolean; members: number } | "denied" | undefined> {
+    return larkChatMembership(this.client, chatId, this.config.owners);
+  }
+
+  private scopeNoticeAt = 0;
+
+  /**
+   * Tell the primary owner, in a DM and at most once an hour, that this app
+   * cannot list chat members, so allowsRequireOwnerInGroup is not enforced.
+   */
+  async noticeMissingMembersScope(): Promise<void> {
+    const owner = this.config.owners[0];
+    if (!owner || Date.now() - this.scopeNoticeAt < SCOPE_NOTICE_INTERVAL_MS) return;
+    this.scopeNoticeAt = Date.now();
+    const host = this.config.domain === "lark" ? "open.larksuite.com" : "open.feishu.cn";
+    const url = `https://${host}/app/${this.config.appId}/auth?q=im:chat.members:read&op_from=openapi&token_type=tenant`;
+    const text =
+      "⚠️ This bot cannot read group members, so allowsRequireOwnerInGroup is not in effect: " +
+      "anyone on allows is served in any group, whether an owner is in it or not.\n" +
+      `Grant the app the im:chat.members:read scope: ${url}`;
+    try {
+      await sendMessage(this.client, owner, "post", await this.buildPost(text), { toUser: true });
+    } catch (err) {
+      logger.warn("failed to tell the owner about the missing scope", { err });
+    }
+  }
+
   async fetchSubMessages(messageId: string): Promise<SubMessageItem[]> {
     return larkFetchSubMessages(this.client, messageId);
   }
@@ -496,7 +526,8 @@ export class LarkChannel implements Channel {
   }
 
   admitsEverywhere(id: string): boolean {
-    return this.config.owners.includes(id) || (this.config.allows ?? []).includes(id);
+    const allows = this.config.allows ?? [];
+    return this.config.owners.includes(id) || allows.includes("*") || allows.includes(id);
   }
 
   async downloadResource(

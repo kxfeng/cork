@@ -137,8 +137,17 @@ describe("a post's at node", () => {
 });
 
 describe("a message from an allowed bot", () => {
-  function makeCtx(config: object = { allows: [COKO] }, chatAllows: Record<string, string[]> = {}) {
+  function makeCtx(
+    config: object = { allows: [COKO] },
+    chatAllows: Record<string, string[]> = {},
+    owners: (chatId: string) => { hasAny: boolean; members: number } | "denied" | undefined = () => ({
+      hasAny: true,
+      members: 2,
+    })
+  ) {
     const dispatched: Array<Record<string, unknown>> = [];
+    const lookups: string[] = [];
+    const notices: number[] = [];
     const { src } = names();
     const ctx = {
       config: { owners: [OWNER], ackEmoji: "", ...config },
@@ -147,6 +156,13 @@ describe("a message from an allowed bot", () => {
         ...src,
         markEventReceived: () => {},
         fetchChatName: async () => "Chat",
+        chatOwners: async (chatId: string) => {
+          lookups.push(chatId);
+          return owners(chatId);
+        },
+        noticeMissingMembersScope: async () => {
+          notices.push(1);
+        },
         fetchMessage: async () => null,
         botAppId: "cli_xiaok",
         ensureBotOpenId: async () => SELF,
@@ -166,7 +182,7 @@ describe("a message from an allowed bot", () => {
     const fn = createEventDispatcher(ctx).handles.get("im.message.receive_v1") as (
       d: unknown
     ) => Promise<void>;
-    return { fn, dispatched };
+    return { fn, dispatched, lookups, notices };
   }
 
   const event = (
@@ -175,12 +191,13 @@ describe("a message from an allowed bot", () => {
     from: string,
     type: string,
     content: string,
-    chatId = "oc_bm"
+    chatId = "oc_bm",
+    chatType = "group"
   ) => ({
     message: {
       message_id: `om_bm_${tag}`,
       chat_id: chatId,
-      chat_type: "group",
+      chat_type: chatType,
       message_type: type,
       create_time: String(Date.now()),
       content,
@@ -245,5 +262,101 @@ describe("a message from an allowed bot", () => {
     await fn(event("a", "bot", COKO, "text", text));
     await fn(event("b", "bot", COKO, "text", text, "oc_other"));
     expect(dispatched).toHaveLength(2);
+  });
+
+  describe("with allowsRequireOwnerInGroup", () => {
+    const text = JSON.stringify({ text: "@_user_1 hi" });
+    const owned = { hasAny: true, members: 2 };
+
+    it("lets anyone in with \"*\", but only in a small group an owner is in", async () => {
+      const groups: Record<string, { hasAny: boolean; members: number }> = {
+        oc_star_owned: owned,
+        oc_star_alone: { hasAny: false, members: 2 },
+        oc_star_big: { hasAny: true, members: 100 },
+      };
+      const { fn, dispatched } = makeCtx({ allows: ["*"] }, {}, (c) => groups[c]);
+      for (const c of Object.keys(groups)) await fn(event(c, "user", "ou_anyone", "text", text, c));
+      expect(dispatched.map((m) => m.chatId)).toEqual(["oc_star_owned"]);
+    });
+
+    it("takes the size limit from the config", async () => {
+      const { fn, dispatched } = makeCtx({ allows: ["*"], allowsAnyoneMaxMembers: 3 }, {}, () => ({ hasAny: true, members: 3 }));
+      await fn(event("cap", "user", "ou_anyone", "text", text, "oc_cap"));
+      expect(dispatched).toHaveLength(0);
+    });
+
+    it("lets someone named in allows into a big group, as long as an owner is in it", async () => {
+      const { fn, dispatched } = makeCtx({ allows: ["*", COKO] }, {}, () => ({ hasAny: true, members: 500 }));
+      await fn(event("big", "bot", COKO, "text", text, "oc_big"));
+      expect(dispatched).toHaveLength(1);
+    });
+
+    it("refuses an allowed sender in a DM", async () => {
+      const { fn, dispatched, lookups } = makeCtx();
+      await fn(event("dm", "bot", COKO, "text", text, "oc_dm", "p2p"));
+      expect(dispatched).toHaveLength(0);
+      expect(lookups).toEqual([]);
+    });
+
+    it("never asks about an owner's own messages", async () => {
+      const { fn, dispatched, lookups } = makeCtx(undefined, {}, () => undefined);
+      await fn(event("own", "user", OWNER, "text", text, "oc_own"));
+      expect(dispatched).toHaveLength(1);
+      expect(lookups).toEqual([]);
+    });
+
+    it("goes by allows alone until Lark has answered, then by the answer", async () => {
+      let answer: { hasAny: boolean; members: number } | undefined = undefined;
+      const { fn, dispatched, lookups } = makeCtx({ allows: ["*"] }, {}, () => answer);
+      await fn(event("f1", "user", "ou_anyone", "text", text, "oc_flaky"));
+      answer = { hasAny: false, members: 2 };
+      await fn(event("f2", "user", "ou_anyone", "text", text, "oc_flaky"));
+      await fn(event("f3", "user", "ou_anyone", "text", text, "oc_flaky"));
+      expect(dispatched.map((m) => m.messageId)).toEqual(["om_bm_f1"]);
+      expect(lookups).toEqual(["oc_flaky", "oc_flaky"]);
+    });
+
+    it("tells the owner when the app may not list members, and lets allows decide", async () => {
+      const { fn, dispatched, notices } = makeCtx(undefined, {}, () => "denied");
+      await fn(event("d1", "bot", COKO, "text", text, "oc_denied"));
+      expect(dispatched).toHaveLength(1);
+      expect(notices).toHaveLength(1);
+    });
+
+    it("answers from an expired entry and refreshes it behind the message", async () => {
+      let answer = owned;
+      const { fn, dispatched, lookups } = makeCtx(undefined, {}, () => answer);
+      await fn(event("e1", "bot", COKO, "text", text, "oc_stale"));
+      answer = { hasAny: false, members: 2 };
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      await fn(event("e2", "bot", COKO, "text", text, "oc_stale"));
+      await fn(event("e3", "bot", COKO, "text", text, "oc_stale"));
+      expect(dispatched.map((m) => m.messageId)).toEqual(["om_bm_e1", "om_bm_e2"]);
+      expect(lookups).toEqual(["oc_stale", "oc_stale"]);
+    });
+
+    it("keeps an expired entry when its refresh fails", async () => {
+      let answer: { hasAny: boolean; members: number } | undefined = { hasAny: false, members: 2 };
+      const { fn, dispatched, lookups } = makeCtx(undefined, {}, () => answer);
+      await fn(event("k1", "bot", COKO, "text", text, "oc_keep"));
+      answer = undefined;
+      vi.setSystemTime(Date.now() + 16 * 60_000);
+      await fn(event("k2", "bot", COKO, "text", text, "oc_keep"));
+      await fn(event("k3", "bot", COKO, "text", text, "oc_keep"));
+      expect(dispatched).toHaveLength(0);
+      expect(lookups).toEqual(["oc_keep", "oc_keep", "oc_keep"]);
+    });
+
+    it("lets an allowed sender in anywhere when turned off", async () => {
+      const { fn, dispatched, lookups } = makeCtx(
+        { allows: [COKO], allowsRequireOwnerInGroup: false },
+        {},
+        () => undefined
+      );
+      await fn(event("off1", "bot", COKO, "text", text, "oc_off_dm", "p2p"));
+      await fn(event("off2", "bot", COKO, "text", text, "oc_off_group"));
+      expect(dispatched).toHaveLength(2);
+      expect(lookups).toEqual([]);
+    });
   });
 });

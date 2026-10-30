@@ -19,6 +19,8 @@ function makeCtx() {
     channel: {
       markEventReceived: () => {},
       fetchChatName: async () => "Chat",
+      chatOwners: async () => ({ hasAny: true, members: 2 }),
+      noticeMissingMembersScope: async () => {},
       getUserName: async () => "Someone",
       fetchMessage: async (id: string) => ({
         msgType: "text",

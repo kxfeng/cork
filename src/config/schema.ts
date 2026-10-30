@@ -119,9 +119,23 @@ export interface LarkChannelConfig extends ChannelToggle {
    * Open ids that may talk to the bot in every chat but not command it — their
    * `/…` reaches the model as plain text. Edited by hand only; `/allow
    * @someone` lets someone into one chat instead (SessionMeta.allows). Other
-   * bots belong here rather than in owners.
+   * bots belong here rather than in owners. `"*"` lets in anyone.
    */
   allows?: string[];
+  /**
+   * When not false (the default), everyone let in by allows — channel-wide,
+   * `"*"` or `/allow` — is served only in a group that has an owner in it:
+   * never in a DM, and not in a chat no owner is watching. Membership is
+   * cached per chat, refreshed in the background every 15 minutes. Needs the
+   * app's im:chat.members:read scope; without it allows alone decides.
+   */
+  allowsRequireOwnerInGroup?: boolean;
+  /**
+   * With allowsRequireOwnerInGroup on, `"*"` counts only in a group of fewer
+   * members than this (people, not bots); 100 when absent. Someone named in
+   * allows is not held to it.
+   */
+  allowsAnyoneMaxMembers?: number;
   ackEmoji: string;
 }
 

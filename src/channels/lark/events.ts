@@ -216,15 +216,65 @@ function mentionRefs(
 
 /**
  * Whether a sender may talk to the bot in this chat at all: an owner, someone
- * on the allows list, or someone `/allow` let into this chat. Only owners may
- * also command it — see IncomingMessage.fromOwner.
+ * on the allows list (`"*"` is anyone), or someone `/allow` let into this
+ * chat. Unless allowsRequireOwnerInGroup is off, the last two only in a group,
+ * one an owner is in, and `"*"` only in one of fewer than
+ * allowsAnyoneMaxMembers — as far as anyone has been able to tell: with no
+ * answer from Lark yet, allows alone decides. Only owners may also command
+ * it — see IncomingMessage.fromOwner.
  */
-function isAdmitted(senderId: string, chatAllows: string[], config: LarkChannelConfig): boolean {
-  return (
-    isOwner(senderId, config.owners) ||
-    (config.allows ?? []).includes(senderId) ||
-    chatAllows.includes(senderId)
-  );
+async function isAdmitted(
+  ctx: LarkEventContext,
+  senderId: string,
+  chatId: string,
+  chatType: "p2p" | "group"
+): Promise<boolean> {
+  const config = ctx.config;
+  if (isOwner(senderId, config.owners)) return true;
+  const allows = config.allows ?? [];
+  const named = allows.includes(senderId) || (ctx.dispatcher.getAllows?.("lark", chatId) ?? []).includes(senderId);
+  if (!named && !allows.includes("*")) return false;
+  if (config.allowsRequireOwnerInGroup === false) return true;
+  if (chatType !== "group") return false;
+  const owners = await chatOwners(ctx, chatId);
+  if (!owners) return true;
+  if (!owners.hasAny) return false;
+  // In a bigger group the owner cannot keep an eye on everyone who may talk to it.
+  return named || owners.members < (config.allowsAnyoneMaxMembers ?? 100);
+}
+
+// chat_id -> its owner membership and when that was asked. An entry is used
+// however old it is; past the TTL it is refreshed in the background, and a
+// failed refresh leaves it as it was. Only a chat's first message waits.
+const chatOwnersCache = new Map<string, { hasAny: boolean; members: number; at: number }>();
+const chatOwnersRefreshing = new Set<string>();
+const CHAT_OWNERS_TTL_MS = 15 * 60 * 1000;
+
+/** A chat's owner membership, or undefined when Lark has never said. */
+async function chatOwners(
+  ctx: LarkEventContext,
+  chatId: string
+): Promise<{ hasAny: boolean; members: number } | undefined> {
+  const refresh = async () => {
+    chatOwnersRefreshing.add(chatId);
+    try {
+      const got = await ctx.channel.chatOwners(chatId);
+      if (got === "denied") {
+        void ctx.channel.noticeMissingMembersScope();
+        return undefined;
+      }
+      if (got) chatOwnersCache.set(chatId, { ...got, at: Date.now() });
+      return got;
+    } finally {
+      chatOwnersRefreshing.delete(chatId);
+    }
+  };
+  const cached = chatOwnersCache.get(chatId);
+  if (!cached) return refresh();
+  if (Date.now() - cached.at >= CHAT_OWNERS_TTL_MS && !chatOwnersRefreshing.has(chatId)) {
+    refresh().catch(() => {});
+  }
+  return cached;
 }
 
 /**
@@ -419,7 +469,7 @@ async function handleMessageEvent(
   const botOpenId = await ctx.channel.ensureBotOpenId();
   const selfIds = [botOpenId, ctx.channel.botAppId].filter((v): v is string => !!v);
   const ownerCheck = isOwner(senderId, ctx.config.owners);
-  const admitted = isAdmitted(senderId, ctx.dispatcher.getAllows?.("lark", chatId) ?? [], ctx.config);
+  const admitted = await isAdmitted(ctx, senderId, chatId, chatType);
   // mentionsSelf, not a local matcher: the @-gate and the text rendering
   // must agree on what "mentions me" means across both of Lark's id shapes.
   const mentioned = mentionsSelf(mentions, selfIds);
